@@ -1,0 +1,11 @@
+name=Ember Routes
+id=EmberRoutes
+author=MuMu
+description=Community settlements, bartering economy, caravans, and human NPCs for Build 42.
+version=0.1.0
+versionMin=42.21.0
+require=\ZombieBuddy,\EmberUI
+javaJarFile=media/java/client/EmberRoutes.jar
+javaPkgName=emberroutes
+ZBVersionMin=2.3.4
+ZBVersionMax=2.3.4

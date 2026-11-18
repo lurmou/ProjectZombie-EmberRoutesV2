@@ -1,0 +1,11 @@
+{
+    "ContextMenu_ER_Root": "Ember Routes · Territory & Storage (M1)",
+    "ContextMenu_ER_OpenMonitor": "Open Live Warehouse & Settlement Panel",
+    "ContextMenu_ER_NewSettlementEditor": "New Settlement (Left-Click Drag Box)...",
+    "ContextMenu_ER_EditSettlementFmt": "Edit Territory [%1] (Left-Click Drag)...",
+    "ContextMenu_ER_DeleteSettlementFmt": "Delete Settlement [%1]",
+    "ContextMenu_ER_MarkPrivateFmt": "Mark Private (Exclude Storage): %1",
+    "ContextMenu_ER_UnmarkPrivateFmt": "Restore Public (Include Storage): %1",
+    "ContextMenu_ER_HideBorders": "Hide Territory Borders",
+    "ContextMenu_ER_ShowBorders": "Show Territory Borders"
+}

@@ -1,0 +1,7 @@
+build/
+.gradle/
+java-src/.gradle/
+java-src/build/
+java-src/bin/
+.idea/
+*.iml

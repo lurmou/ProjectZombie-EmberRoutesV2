@@ -1,0 +1,5 @@
+version=1
+title=Ember Routes
+description=Community settlements, bartering economy, caravans, and human NPCs for Build 42.
+tags=Build 42
+visibility=private

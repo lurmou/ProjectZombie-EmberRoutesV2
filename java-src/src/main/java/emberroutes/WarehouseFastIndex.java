@@ -1,0 +1,1196 @@
+package emberroutes;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.PriorityQueue;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import se.krka.kahlua.j2se.J2SEPlatform;
+import se.krka.kahlua.vm.KahluaTable;
+import zombie.characters.IsoGameCharacter;
+import zombie.core.properties.PropertyContainer;
+import zombie.inventory.InventoryItem;
+import zombie.inventory.ItemContainer;
+import zombie.inventory.types.DrainableComboItem;
+import zombie.inventory.types.Food;
+import zombie.inventory.types.HandWeapon;
+import zombie.inventory.types.InventoryContainer;
+import zombie.inventory.types.Literature;
+import zombie.iso.IsoCell;
+import zombie.iso.IsoChunk;
+import zombie.iso.IsoGridSquare;
+import zombie.iso.IsoObject;
+import zombie.iso.IsoWorld;
+import zombie.iso.objects.IsoBarbecue;
+import zombie.iso.objects.IsoCarBatteryCharger;
+import zombie.iso.objects.IsoClothingDryer;
+import zombie.iso.objects.IsoClothingWasher;
+import zombie.iso.objects.IsoCombinationWasherDryer;
+import zombie.iso.objects.IsoCompost;
+import zombie.iso.objects.IsoDeadBody;
+import zombie.iso.objects.IsoFeedingTrough;
+import zombie.iso.objects.IsoFireplace;
+import zombie.iso.objects.IsoHutch;
+import zombie.iso.objects.IsoMannequin;
+import zombie.iso.objects.IsoStackedWasherDryer;
+import zombie.iso.objects.IsoStove;
+import zombie.iso.objects.IsoTrap;
+import zombie.iso.objects.IsoWheelieBin;
+import zombie.iso.objects.IsoWorldInventoryObject;
+import zombie.scripting.objects.ItemTag;
+import zombie.util.list.PZArrayList;
+
+/**
+ * 据点全楼层世界容器增量聚合索引（对标 AE2 {@code StorageService + StorageBusPart + TickManagerService + KeyCounter}）：
+ *
+ * <ol>
+ *   <li>双通道感知：{@code @Patch} 无锁脏队列即时唤醒（{@code alertDevice}）+ {@code PriorityQueue} 最小堆自适应退避巡检（{@code min=5, max=60}）；</li>
+ *   <li>懒惰快照物化（{@code StorageService.cachedStacksNeedUpdate}）：变动仅更新纯 Java {@link Aggregate} 并令 {@code front = null}，不开面板 0 {@code KahluaTable} 分配；</li>
+ *   <li>准入隔离与单箱权限（{@code MEInventoryHandler}）：内置非储物设施黑名单，支持单方块 {@code ModData.ER_Private} 私密排除（先判 {@code hasModData()} 零空表污染，随对象走防漂移）；</li>
+ *   <li>两级健康度统计（{@code KeyCounter}）：在 {@code fullType} 下同步区分可用件数与腐烂/烧焦/损坏/耗尽件数；</li>
+ *   <li>僵毁离屏适配（{@code OFFLINE_CACHED}）：区块卸载保留最后已知快照供外出查阅与宏观经济读取，同时区分 {@code loaded} 在场可物理提取容器。</li>
+ * </ol>
+ */
+public final class WarehouseFastIndex {
+    public static final int TICK_MIN_RATE = 5;
+    public static final int TICK_MAX_RATE = 60;
+    public static final int TICK_SLOW_DOWN_FACTOR = 1;
+    private static final int MAX_PROBES_PER_TICK = 4;
+
+    public static final String MODDATA_PRIVATE_KEY = "ER_Private";
+    public static final String STATUS_LOADED = "LOADED";
+    public static final String STATUS_OFFLINE_CACHED = "OFFLINE_CACHED";
+    public static final String STATUS_PRIVATE = "PRIVATE";
+
+    private static final Map<String, String> CUSTOM_CATEGORY_OVERRIDES = new ConcurrentHashMap<>();
+    private static final Map<String, String> CATEGORY_CACHE = new ConcurrentHashMap<>();
+
+    private static final Set<String> MEDICAL_TAG_KEYS = Set.of(
+            "pills", "bandage", "disinfectant", "tweezers", "sutureneedle", "medical", "firstaid"
+    );
+    private static final Set<String> TOOL_TAG_KEYS = Set.of(
+            "hammer", "saw", "screwdriver", "wrench", "lugwrench", "pipewrench",
+            "choptree", "cutplant", "digplow", "diggrave", "sledgehammer",
+            "weldingmask", "blowtorch", "crowbar", "scissors", "pliers", "file", "tongs"
+    );
+    private static final Set<String> UTENSIL_OR_STATIONERY_TAG_KEYS = Set.of(
+            "write", "pen", "pencil", "eraser", "fork", "spoon", "butterknife"
+    );
+
+    private WarehouseFastIndex() {}
+
+    private static KahluaTable table() {
+        return J2SEPlatform.getInstance().newTable();
+    }
+
+    // ==================== 1. 可扩展物品分类规则链 ====================
+
+    public static void registerCategoryOverride(String key, String categoryNode) {
+        if (key == null || key.isEmpty() || categoryNode == null || categoryNode.isEmpty()) {
+            return;
+        }
+        CUSTOM_CATEGORY_OVERRIDES.put(key.trim().toLowerCase(Locale.ROOT), categoryNode.trim());
+        CATEGORY_CACHE.clear();
+    }
+
+    public static void clearCategoryOverrides() {
+        CUSTOM_CATEGORY_OVERRIDES.clear();
+        CATEGORY_CACHE.clear();
+    }
+
+    private static String normalizeTagKey(ItemTag tag) {
+        if (tag == null) return "";
+        String raw = tag.toString();
+        if (raw == null || raw.isEmpty()) return "";
+        int colon = raw.lastIndexOf(':');
+        int dot = raw.lastIndexOf('.');
+        int cut = Math.max(colon, dot);
+        String clean = cut >= 0 && cut + 1 < raw.length() ? raw.substring(cut + 1) : raw;
+        return clean.toLowerCase(Locale.ROOT);
+    }
+
+    public static String classifyItem(InventoryItem item) {
+        if (item == null) return "other";
+        String ft = item.getFullType();
+        if (ft != null) {
+            String cached = CATEGORY_CACHE.get(ft);
+            if (cached != null) return cached;
+        }
+        String node = doClassify(item);
+        if (ft != null) {
+            CATEGORY_CACHE.put(ft, node);
+        }
+        return node;
+    }
+
+    private static String doClassify(InventoryItem item) {
+        try {
+            String ft = item.getFullType();
+            if (ft != null) {
+                String customExact = CUSTOM_CATEGORY_OVERRIDES.get(ft.toLowerCase(Locale.ROOT));
+                if (customExact != null) return customExact;
+            }
+
+            Set<ItemTag> rawTags = null;
+            try {
+                rawTags = item.getTags();
+            } catch (RuntimeException ignored) {
+            }
+
+            boolean hasMedicalTag = false;
+            boolean hasToolTag = false;
+            boolean isUtensilOrStationery = false;
+            if (rawTags != null) {
+                for (ItemTag tag : rawTags) {
+                    String tk = normalizeTagKey(tag);
+                    if (tk.isEmpty()) continue;
+                    String customByTag = CUSTOM_CATEGORY_OVERRIDES.get("tag:" + tk);
+                    if (customByTag != null) return customByTag;
+                    if (MEDICAL_TAG_KEYS.contains(tk)) hasMedicalTag = true;
+                    if (TOOL_TAG_KEYS.contains(tk)) hasToolTag = true;
+                    if (UTENSIL_OR_STATIONERY_TAG_KEYS.contains(tk)) isUtensilOrStationery = true;
+                }
+            }
+
+            String cat = item.getCategory();
+            String disp = item.getDisplayCategory();
+
+            if (item.isFood() || "Food".equalsIgnoreCase(cat)) {
+                return item.getOffAgeMax() < 1_000_000_000 ? "food.perishable" : "food.stable";
+            }
+            if (item instanceof Literature
+                    || "Literature".equalsIgnoreCase(cat)
+                    || "SkillBook".equalsIgnoreCase(disp)
+                    || "Literature".equalsIgnoreCase(disp)) {
+                return "literature";
+            }
+            if (item instanceof InventoryContainer || "Container".equalsIgnoreCase(cat)) {
+                return "containers";
+            }
+            if ("FirstAid".equalsIgnoreCase(cat) || "FirstAid".equalsIgnoreCase(disp) || hasMedicalTag) {
+                return "medical";
+            }
+            if ("Ammo".equalsIgnoreCase(cat) || "Ammo".equalsIgnoreCase(disp)) {
+                return "weapons.ammo";
+            }
+            if (item instanceof HandWeapon hw && hw.isRanged()) {
+                return "weapons.guns";
+            }
+            if ("Tool".equalsIgnoreCase(cat)
+                    || "ToolWeapon".equalsIgnoreCase(cat)
+                    || "Tool".equalsIgnoreCase(disp)
+                    || "ToolWeapon".equalsIgnoreCase(disp)
+                    || hasToolTag) {
+                return "tools";
+            }
+            // 防伪武器误判（原版脚本把圆珠笔、铅笔、叉子、勺子标为 Category=Weapon）
+            if (isUtensilOrStationery
+                    || "Household".equalsIgnoreCase(disp)
+                    || "Cooking".equalsIgnoreCase(disp)
+                    || "Stationery".equalsIgnoreCase(disp)) {
+                return "other";
+            }
+            if ("Weapon".equalsIgnoreCase(cat) || "WeaponPart".equalsIgnoreCase(cat)) {
+                return "weapons.other";
+            }
+            if ("Clothing".equalsIgnoreCase(cat) || "Accessory".equalsIgnoreCase(disp)) {
+                return "apparel";
+            }
+            if ("Material".equalsIgnoreCase(cat) || "Material".equalsIgnoreCase(disp)) {
+                return "materials";
+            }
+            if (item.getFluidContainer() != null) {
+                return "fluids";
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return "other";
+    }
+
+    private static boolean isEligibleItem(InventoryItem item) {
+        return item != null && !item.isEquipped();
+    }
+
+    private static boolean isItemDegraded(InventoryItem item) {
+        if (item == null) return false;
+        if (item.isBroken() || item.isBurnt()) return true;
+        if (item instanceof Food food && food.isRotten()) return true;
+        if (item instanceof DrainableComboItem && item.getCurrentUses() <= 0) return true;
+        return false;
+    }
+
+    // ==================== 2. 容器准入过滤与单方块私密开关 ====================
+
+    /**
+     * 判定世界方块对象是否属于合法的据点储物家具（自动排除活体、尸体、地面散落物、假人、食槽、禽舍、垃圾桶、炉灶、洗衣烘干机等设施）。
+     */
+    public static boolean isEligibleStorageObject(IsoObject obj) {
+        if (obj == null
+                || obj instanceof IsoGameCharacter
+                || obj instanceof IsoDeadBody
+                || obj instanceof IsoWorldInventoryObject
+                || obj instanceof IsoMannequin
+                || obj instanceof IsoFeedingTrough
+                || obj instanceof IsoHutch
+                || obj instanceof IsoWheelieBin
+                || obj instanceof IsoCompost
+                || obj instanceof IsoTrap
+                || obj instanceof IsoCarBatteryCharger
+                || obj instanceof IsoStove
+                || obj instanceof IsoBarbecue
+                || obj instanceof IsoFireplace
+                || obj instanceof IsoClothingWasher
+                || obj instanceof IsoClothingDryer
+                || obj instanceof IsoCombinationWasherDryer
+                || obj instanceof IsoStackedWasherDryer) {
+            return false;
+        }
+        int contCount = obj.getContainerCount();
+        if (contCount <= 0 && obj.getContainer() == null) {
+            return false;
+        }
+        boolean anyStorageContainer = false;
+        if (contCount > 0) {
+            for (int ci = 0; ci < contCount; ci++) {
+                if (isEligibleContainerType(obj.getContainerByIndex(ci))) {
+                    anyStorageContainer = true;
+                    break;
+                }
+            }
+        } else {
+            anyStorageContainer = isEligibleContainerType(obj.getContainer());
+        }
+        return anyStorageContainer;
+    }
+
+    public static boolean isEligibleContainerType(ItemContainer ic) {
+        if (ic == null || ic.getCharacter() != null || ic.isVehiclePart()) {
+            return false;
+        }
+        String kind = ic.getType();
+        if (kind == null || kind.isEmpty()) {
+            return true;
+        }
+        return !"floor".equalsIgnoreCase(kind)
+                && !"bin".equalsIgnoreCase(kind)
+                && !"garbage".equalsIgnoreCase(kind)
+                && !"inventorymale".equalsIgnoreCase(kind)
+                && !"inventoryfemale".equalsIgnoreCase(kind);
+    }
+
+    /**
+     * 零空表分配读取单方块私密状态：严格先调 {@link IsoObject#hasModData()}，绝不为普通箱子分配空 {@code KahluaTable}。
+     */
+    public static boolean isObjectPrivate(IsoObject obj) {
+        if (obj == null || !obj.hasModData()) {
+            return false;
+        }
+        KahluaTable md = obj.getModData();
+        return md != null && Boolean.TRUE.equals(md.rawget(MODDATA_PRIVATE_KEY));
+    }
+
+    /**
+     * 设置或清除世界储物方块的私密排除标记（直接附着于 {@link IsoObject} 自身，刷漆或拆叠箱绝不漂移）。
+     */
+    public static boolean setObjectPrivate(IsoObject obj, boolean makePrivate) {
+        if (obj == null) return false;
+        if (makePrivate) {
+            obj.getModData().rawset(MODDATA_PRIVATE_KEY, Boolean.TRUE);
+        } else if (obj.hasModData()) {
+            obj.getModData().rawset(MODDATA_PRIVATE_KEY, null);
+        }
+        obj.flagForHotSave();
+        IsoGridSquare sq = obj.getSquare();
+        if (sq != null) {
+            ContainerDirtyQueue.markSquare(sq);
+        }
+        return isObjectPrivate(obj);
+    }
+
+    public static String resolveObjectDisplayName(IsoObject obj) {
+        String custom = resolveCustomName(obj);
+        if (custom != null && !custom.isEmpty()) {
+            return custom;
+        }
+        if (obj != null) {
+            ItemContainer ic = obj.getContainer();
+            if (ic != null && ic.getType() != null && !ic.getType().isEmpty()) {
+                return ic.getType();
+            }
+            String objName = obj.getObjectName();
+            if (objName != null && !objName.isEmpty()) {
+                return objName;
+            }
+        }
+        return "container";
+    }
+
+    // ==================== 3. 单箱缓存、两级健康度与总账差量结构 ====================
+
+    static final class ContainerContribution {
+        final String containerId;
+        final int x, y, z;
+        WarehouseFingerprint fingerprint;
+        int count;
+        int usableCount;
+        int degradedCount;
+        Map<String, Integer> typeCounts = Collections.emptyMap();
+        Map<String, Integer> usableTypeCounts = Collections.emptyMap();
+        Map<String, Integer> degradedTypeCounts = Collections.emptyMap();
+        Map<String, Integer> tagCounts = Collections.emptyMap();
+        double capacity, usedWeight;
+        String kind = "container";
+        String customName;
+        String status = "UNINITIALIZED";
+
+        ContainerContribution(String containerId, int x, int y, int z) {
+            this.containerId = containerId;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+    }
+
+    static final class Source {
+        final String id, kind, customName;
+        final int x, y, z, count;
+        final boolean loaded;
+
+        Source(ContainerContribution c, int count, boolean loaded) {
+            this.id = c.containerId;
+            this.kind = c.kind;
+            this.customName = c.customName;
+            this.x = c.x;
+            this.y = c.y;
+            this.z = c.z;
+            this.count = count;
+            this.loaded = loaded;
+        }
+    }
+
+    static final class Aggregate {
+        final TreeMap<String, Integer> typeCounts = new TreeMap<>();
+        final TreeMap<String, Integer> usableByType = new TreeMap<>();
+        final TreeMap<String, Integer> degradedByType = new TreeMap<>();
+        final TreeMap<String, List<Source>> sourcesByType = new TreeMap<>();
+        final TreeMap<String, Integer> tagCounts = new TreeMap<>();
+        int loaded, unloaded, privateCount;
+        int totalItems, loadedItems, usableItems, degradedItems, fullCount;
+        double totalCapacity, totalUsedWeight;
+
+        private static void bump(TreeMap<String, Integer> map, String key, int delta) {
+            Integer old = map.get(key);
+            int next = (old == null ? 0 : old) + delta;
+            if (next <= 0) map.remove(key);
+            else map.put(key, next);
+        }
+
+        void subtract(ContainerContribution c) {
+            if (STATUS_PRIVATE.equals(c.status)) {
+                privateCount--;
+                return;
+            }
+            boolean isLoaded = STATUS_LOADED.equals(c.status);
+            boolean isOfflineCached = STATUS_OFFLINE_CACHED.equals(c.status);
+            if (!isLoaded && !isOfflineCached) {
+                return;
+            }
+            if (isLoaded) {
+                loaded--;
+                loadedItems -= c.count;
+            } else {
+                unloaded--;
+            }
+            totalItems -= c.count;
+            usableItems -= c.usableCount;
+            degradedItems -= c.degradedCount;
+            totalCapacity -= c.capacity;
+            totalUsedWeight -= c.usedWeight;
+            if (c.capacity > 0 && c.usedWeight >= c.capacity * 0.9) {
+                fullCount--;
+            }
+            for (Map.Entry<String, Integer> e : c.typeCounts.entrySet()) {
+                bump(typeCounts, e.getKey(), -e.getValue());
+                List<Source> list = sourcesByType.get(e.getKey());
+                if (list != null) {
+                    list.removeIf(s -> c.containerId.equals(s.id));
+                    if (list.isEmpty()) sourcesByType.remove(e.getKey());
+                }
+            }
+            for (Map.Entry<String, Integer> e : c.usableTypeCounts.entrySet()) {
+                bump(usableByType, e.getKey(), -e.getValue());
+            }
+            for (Map.Entry<String, Integer> e : c.degradedTypeCounts.entrySet()) {
+                bump(degradedByType, e.getKey(), -e.getValue());
+            }
+            for (Map.Entry<String, Integer> e : c.tagCounts.entrySet()) {
+                bump(tagCounts, e.getKey(), -e.getValue());
+            }
+        }
+
+        void add(ContainerContribution c) {
+            if (STATUS_PRIVATE.equals(c.status)) {
+                privateCount++;
+                return;
+            }
+            boolean isLoaded = STATUS_LOADED.equals(c.status);
+            boolean isOfflineCached = STATUS_OFFLINE_CACHED.equals(c.status);
+            if (!isLoaded && !isOfflineCached) {
+                return;
+            }
+            if (isLoaded) {
+                loaded++;
+                loadedItems += c.count;
+            } else {
+                unloaded++;
+            }
+            totalItems += c.count;
+            usableItems += c.usableCount;
+            degradedItems += c.degradedCount;
+            totalCapacity += c.capacity;
+            totalUsedWeight += c.usedWeight;
+            if (c.capacity > 0 && c.usedWeight >= c.capacity * 0.9) {
+                fullCount++;
+            }
+            for (Map.Entry<String, Integer> e : c.typeCounts.entrySet()) {
+                bump(typeCounts, e.getKey(), e.getValue());
+                sourcesByType.computeIfAbsent(e.getKey(), k -> new ArrayList<>())
+                        .add(new Source(c, e.getValue(), isLoaded));
+            }
+            for (Map.Entry<String, Integer> e : c.usableTypeCounts.entrySet()) {
+                bump(usableByType, e.getKey(), e.getValue());
+            }
+            for (Map.Entry<String, Integer> e : c.degradedTypeCounts.entrySet()) {
+                bump(degradedByType, e.getKey(), e.getValue());
+            }
+            for (Map.Entry<String, Integer> e : c.tagCounts.entrySet()) {
+                bump(tagCounts, e.getKey(), e.getValue());
+            }
+        }
+    }
+
+    // ==================== 4. AE2 TickManagerService 最小堆动态退避调度器 ====================
+
+    static final class SquareTickTracker implements Comparable<SquareTickTracker> {
+        final long sqKey;
+        String settlementId;
+        int currentRate;
+        long nextTick;
+        boolean awake;
+
+        SquareTickTracker(long sqKey, String settlementId, long nowTick, int initialRate) {
+            this.sqKey = sqKey;
+            this.settlementId = settlementId;
+            this.currentRate = clampRate(initialRate);
+            this.nextTick = nowTick + this.currentRate;
+        }
+
+        void modulate(boolean changed, long nowTick) {
+            if (changed) {
+                this.currentRate = TICK_MIN_RATE; // AE2 TickRateModulation.URGENT
+            } else {
+                this.currentRate = clampRate(this.currentRate + TICK_SLOW_DOWN_FACTOR); // AE2 TickRateModulation.SLOWER
+            }
+            this.nextTick = nowTick + this.currentRate;
+        }
+
+        private static int clampRate(int r) {
+            if (r < TICK_MIN_RATE) return TICK_MIN_RATE;
+            if (r > TICK_MAX_RATE) return TICK_MAX_RATE;
+            return r;
+        }
+
+        @Override
+        public int compareTo(SquareTickTracker o) {
+            int cmp = Long.compare(this.nextTick, o.nextTick);
+            return cmp != 0 ? cmp : Long.compare(this.sqKey, o.sqKey);
+        }
+    }
+
+    static final class SettlementState {
+        final String settlementId;
+        final List<int[]> rects = new ArrayList<>(); // 2D rects: [x, y, w, h]
+        final Map<String, ContainerContribution> containers = new HashMap<>();
+        final Map<Long, Set<String>> squareIndex = new HashMap<>();
+        final Aggregate aggregate = new Aggregate();
+        volatile KahluaTable front = null; // null 表示需要按需物化（对标 StorageService.cachedStacksNeedUpdate）
+        long revision = 0;
+
+        SettlementState(String settlementId) {
+            this.settlementId = settlementId;
+        }
+
+        boolean contains2D(int x, int y) {
+            for (int i = 0, n = rects.size(); i < n; i++) {
+                int[] r = rects.get(i);
+                if (x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private static final Map<String, SettlementState> SETTLEMENTS = new ConcurrentHashMap<>();
+    private static final Map<Long, SquareTickTracker> TRACKERS = new HashMap<>();
+    private static final PriorityQueue<SquareTickTracker> AWAKE_QUEUE = new PriorityQueue<>();
+    private static long currentTick = 0L;
+
+    public static void reset() {
+        SETTLEMENTS.clear();
+        CATEGORY_CACHE.clear();
+        TRACKERS.clear();
+        AWAKE_QUEUE.clear();
+        currentTick = 0L;
+        TerritoryRenderer.reset();
+    }
+
+    public static int getAwakeTickerCount() {
+        return AWAKE_QUEUE.size();
+    }
+
+    static SquareTickTracker registerOrWakeTracker(long sqKey, String settlementId, boolean urgent) {
+        SquareTickTracker tt = TRACKERS.get(sqKey);
+        if (tt == null) {
+            int initRate = urgent ? TICK_MIN_RATE : (TICK_MIN_RATE + (int) (Math.abs(sqKey) % 15L));
+            tt = new SquareTickTracker(sqKey, settlementId, currentTick, initRate);
+            tt.awake = true;
+            TRACKERS.put(sqKey, tt);
+            AWAKE_QUEUE.add(tt);
+        } else {
+            tt.settlementId = settlementId;
+            if (urgent) {
+                if (tt.awake) {
+                    AWAKE_QUEUE.remove(tt);
+                }
+                tt.currentRate = TICK_MIN_RATE;
+                tt.nextTick = currentTick + TICK_MIN_RATE;
+                tt.awake = true;
+                AWAKE_QUEUE.add(tt);
+            } else if (!tt.awake) {
+                tt.nextTick = currentTick + tt.currentRate;
+                tt.awake = true;
+                AWAKE_QUEUE.add(tt);
+            }
+        }
+        return tt;
+    }
+
+    static void sleepAndRemoveTracker(long sqKey) {
+        SquareTickTracker tt = TRACKERS.remove(sqKey);
+        if (tt != null && tt.awake) {
+            tt.awake = false;
+            AWAKE_QUEUE.remove(tt);
+        }
+    }
+
+    public static void invalidateSettlement(String settlementId) {
+        if (settlementId != null) {
+            SettlementState removed = SETTLEMENTS.remove(settlementId);
+            if (removed != null) {
+                for (Long sqKey : removed.squareIndex.keySet()) {
+                    sleepAndRemoveTracker(sqKey.longValue());
+                }
+            }
+            TerritoryRenderer.removeSettlement(settlementId);
+        }
+    }
+
+    private static SettlementState findOwner(int x, int y) {
+        for (SettlementState s : SETTLEMENTS.values()) {
+            if (s.contains2D(x, y)) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    public static String findSettlementIdAt(int x, int y) {
+        SettlementState s = findOwner(x, y);
+        return s != null ? s.settlementId : null;
+    }
+
+    public static double typeCount(String settlementId, String fullType) {
+        if (settlementId == null || fullType == null) return 0;
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null) return 0;
+        Integer n = s.aggregate.typeCounts.get(fullType);
+        return n == null ? 0 : n.doubleValue();
+    }
+
+    public static double usableTypeCount(String settlementId, String fullType) {
+        if (settlementId == null || fullType == null) return 0;
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null) return 0;
+        Integer n = s.aggregate.usableByType.get(fullType);
+        return n == null ? 0 : n.doubleValue();
+    }
+
+    public static long getRevision(String settlementId) {
+        if (settlementId == null) return 0;
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        return s == null ? 0 : s.revision;
+    }
+
+    /**
+     * 懒惰标记快照失效（对标 AE2 {@code StorageService.invalidateCache}）：
+     * 后台变动期间 0 {@code KahluaTable} 分配，直到 UI 真正调用 {@link #getSnapshot(String)} 时才按需组装一次。
+     */
+    private static void markSnapshotDirty(SettlementState s) {
+        s.revision++;
+        s.front = null;
+    }
+
+    public static KahluaTable getSnapshot(String settlementId) {
+        if (settlementId == null) return null;
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null) return null;
+        KahluaTable cached = s.front;
+        if (cached == null) {
+            cached = compileSnapshot(s);
+            s.front = cached;
+        }
+        return cached;
+    }
+
+    private static int toInt(Object o) {
+        return o instanceof Number n ? n.intValue() : 0;
+    }
+
+    /**
+     * 同步据点 2D 领地矩形列表（扁平数组 {x1, y1, w1, h1, x2, y2, w2, h2, ...}）：
+     * 1. 自动摘除已被裁剪移出领地的旧容器贡献与节拍器；
+     * 2. 自动扫描领地内全部已加载区块的所有有效楼层（含 B42 地下室 minLevel 至顶层 maxLevel）。
+     */
+    public static double syncSettlementAreas(String settlementId, KahluaTable flatRects) {
+        if (settlementId == null) return 0;
+        SettlementState s = SETTLEMENTS.computeIfAbsent(settlementId, SettlementState::new);
+        List<int[]> rawRects = new ArrayList<>();
+        if (flatRects != null) {
+            int len = flatRects.len();
+            for (int i = 1; i + 3 <= len; i += 4) {
+                int rx = toInt(flatRects.rawget(Double.valueOf(i)));
+                int ry = toInt(flatRects.rawget(Double.valueOf(i + 1)));
+                int rw = toInt(flatRects.rawget(Double.valueOf(i + 2)));
+                int rh = toInt(flatRects.rawget(Double.valueOf(i + 3)));
+                if (rw > 0 && rh > 0) {
+                    rawRects.add(new int[]{rx, ry, rw, rh});
+                }
+            }
+        }
+        s.rects.clear();
+        s.rects.addAll(TerritoryContour.normalizeDisjoint(rawRects));
+        TerritoryRenderer.syncSettlement(settlementId, s.rects);
+
+        boolean changed = s.revision == 0;
+
+        // 1. 剔除不再落于新领地内的已索引格（含在场与离屏缓存）
+        Iterator<Map.Entry<Long, Set<String>>> it = s.squareIndex.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Long, Set<String>> entry = it.next();
+            long packed = entry.getKey().longValue();
+            int sx = ContainerDirtyQueue.unpackX(packed);
+            int sy = ContainerDirtyQueue.unpackY(packed);
+            if (!s.contains2D(sx, sy)) {
+                for (String cid : entry.getValue()) {
+                    ContainerContribution removed = s.containers.remove(cid);
+                    if (removed != null) {
+                        s.aggregate.subtract(removed);
+                        changed = true;
+                    }
+                }
+                sleepAndRemoveTracker(packed);
+                it.remove();
+            }
+        }
+
+        // 2. 扫描领地内所有已加载区块的全楼层世界容器
+        IsoCell cell = IsoWorld.instance != null ? IsoWorld.instance.currentCell : null;
+        if (cell != null) {
+            for (int ri = 0, rn = s.rects.size(); ri < rn; ri++) {
+                int[] r = s.rects.get(ri);
+                int rx = r[0], ry = r[1], rw = r[2], rh = r[3];
+                int lastCx = Integer.MIN_VALUE, lastCy = Integer.MIN_VALUE;
+                IsoChunk cachedChunk = null;
+                int minZ = 0, maxZ = 7;
+
+                for (int x = rx; x < rx + rw; x++) {
+                    int cx = Math.floorDiv(x, 8);
+                    for (int y = ry; y < ry + rh; y++) {
+                        int cy = Math.floorDiv(y, 8);
+                        if (cx != lastCx || cy != lastCy) {
+                            lastCx = cx;
+                            lastCy = cy;
+                            cachedChunk = cell.getChunkForGridSquare(x, y, 0);
+                            if (cachedChunk != null) {
+                                minZ = cachedChunk.getMinLevel();
+                                maxZ = cachedChunk.getMaxLevel();
+                            } else {
+                                minZ = 0;
+                                maxZ = 7;
+                            }
+                        }
+                        for (int z = minZ; z <= maxZ; z++) {
+                            IsoGridSquare sq = cell.getGridSquare(x, y, z);
+                            if (sq != null && scanSquareInternal(s, sq, false)) {
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (changed) {
+            markSnapshotDirty(s);
+        }
+        return s.revision;
+    }
+
+    /**
+     * 主线程零分配排空 {@code @Patch} 脏格队列（对应 AE2 {@code alertDevice} 即时通道，暂停期亦可安全调用）。
+     */
+    public static boolean flushDirtyQueue() {
+        if (!ContainerDirtyQueue.hasDirty()) {
+            return false;
+        }
+        Set<SettlementState> touched = new HashSet<>();
+        IsoCell cell = IsoWorld.instance != null ? IsoWorld.instance.currentCell : null;
+
+        ContainerDirtyQueue.drain(packed -> {
+            int x = ContainerDirtyQueue.unpackX(packed);
+            int y = ContainerDirtyQueue.unpackY(packed);
+            int z = ContainerDirtyQueue.unpackZ(packed);
+            SettlementState owner = findOwner(x, y);
+            if (owner == null) {
+                sleepAndRemoveTracker(packed);
+                return;
+            }
+            IsoGridSquare sq = cell != null ? cell.getGridSquare(x, y, z) : null;
+            boolean changed = sq != null
+                    ? scanSquareInternal(owner, sq, true)
+                    : markSquareUnloadedInternal(owner, x, y, z);
+            if (changed || owner.revision == 0) {
+                touched.add(owner);
+            }
+        });
+
+        for (SettlementState s : touched) {
+            markSnapshotDirty(s);
+        }
+        return !touched.isEmpty();
+    }
+
+    /**
+     * 运行态每 Tick 入口：先排空 {@code @Patch} 即时脏队列，再按最小堆到期时间推进最多 {@link #MAX_PROBES_PER_TICK} 个外部容器格，
+     * 检出原位变化置 {@code URGENT(5)}，静止每次 {@code +1} 退避至 {@code SLOWER(60)}。
+     */
+    public static boolean tickWarehouse() {
+        boolean anyChanged = flushDirtyQueue();
+        currentTick++;
+        if (AWAKE_QUEUE.isEmpty()) {
+            return anyChanged;
+        }
+
+        IsoCell cell = IsoWorld.instance != null ? IsoWorld.instance.currentCell : null;
+        int probed = 0;
+        while (probed < MAX_PROBES_PER_TICK && !AWAKE_QUEUE.isEmpty()) {
+            SquareTickTracker head = AWAKE_QUEUE.peek();
+            if (head.nextTick > currentTick) {
+                break;
+            }
+            AWAKE_QUEUE.poll();
+            head.awake = false;
+            probed++;
+
+            SettlementState owner = SETTLEMENTS.get(head.settlementId);
+            int x = ContainerDirtyQueue.unpackX(head.sqKey);
+            int y = ContainerDirtyQueue.unpackY(head.sqKey);
+            int z = ContainerDirtyQueue.unpackZ(head.sqKey);
+            if (owner == null || !owner.contains2D(x, y)) {
+                TRACKERS.remove(head.sqKey);
+                continue;
+            }
+
+            IsoGridSquare sq = cell != null ? cell.getGridSquare(x, y, z) : null;
+            if (sq == null) {
+                if (markSquareUnloadedInternal(owner, x, y, z)) {
+                    markSnapshotDirty(owner);
+                    anyChanged = true;
+                }
+                continue;
+            }
+
+            boolean sqChanged = scanSquareInternal(owner, sq, false);
+            if (sqChanged) {
+                markSnapshotDirty(owner);
+                anyChanged = true;
+            }
+
+            Set<String> activeOnSq = owner.squareIndex.get(head.sqKey);
+            if (activeOnSq != null && !activeOnSq.isEmpty() && TRACKERS.get(head.sqKey) == head) {
+                head.modulate(sqChanged, currentTick);
+                head.awake = true;
+                AWAKE_QUEUE.add(head);
+            } else {
+                TRACKERS.remove(head.sqKey);
+            }
+        }
+        return anyChanged;
+    }
+
+    public static void onSquareLoaded(IsoGridSquare sq) {
+        if (sq == null) return;
+        SettlementState owner = findOwner(sq.getX(), sq.getY());
+        if (owner != null && scanSquareInternal(owner, sq, true)) {
+            markSnapshotDirty(owner);
+        }
+    }
+
+    public static void onSquareUnloaded(IsoGridSquare sq) {
+        if (sq == null) return;
+        SettlementState owner = findOwner(sq.getX(), sq.getY());
+        if (owner != null && markSquareUnloadedInternal(owner, sq.getX(), sq.getY(), sq.getZ())) {
+            markSnapshotDirty(owner);
+        }
+    }
+
+    /**
+     * 区块卸载处理（僵毁专属修正：保留 {@code OFFLINE_CACHED} 最后已知快照而非清零，同时停掉该格轮询节拍器）。
+     */
+    static boolean markSquareUnloadedInternal(SettlementState s, int x, int y, int z) {
+        long sqKey = ContainerDirtyQueue.packCoord(x, y, z);
+        sleepAndRemoveTracker(sqKey);
+        Set<String> ids = s.squareIndex.get(sqKey);
+        if (ids == null || ids.isEmpty()) return false;
+        boolean changed = false;
+        for (String id : ids) {
+            ContainerContribution c = s.containers.get(id);
+            if (c != null && STATUS_LOADED.equals(c.status)) {
+                s.aggregate.subtract(c);
+                c.fingerprint = null; // 下次重进区块强制与真实容器复核
+                c.status = STATUS_OFFLINE_CACHED;
+                s.aggregate.add(c);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private static String resolveCustomName(IsoObject obj) {
+        if (obj == null) return null;
+        String name = obj.getName();
+        if (name != null && !name.isEmpty()) return name;
+        PropertyContainer props = obj.getProperties();
+        if (props != null && props.has("CustomName")) {
+            String group = props.get("GroupName");
+            String custom = props.get("CustomName");
+            if (group != null && !group.isEmpty() && custom != null && !custom.isEmpty()) {
+                return group + " " + custom;
+            }
+            if (custom != null && !custom.isEmpty()) return custom;
+        }
+        return null;
+    }
+
+    private static boolean scanSquareInternal(SettlementState s, IsoGridSquare sq, boolean urgentWake) {
+        int x = sq.getX(), y = sq.getY(), z = sq.getZ();
+        long sqKey = ContainerDirtyQueue.packCoord(x, y, z);
+        PZArrayList<IsoObject> objects = sq.getObjects();
+        Set<String> seenIds = new HashSet<>();
+        Map<String, Integer> stackOrdinals = new HashMap<>();
+        boolean changed = false;
+
+        if (objects != null) {
+            int objSize = objects.size();
+            for (int oi = 0; oi < objSize; oi++) {
+                IsoObject obj = objects.get(oi);
+                if (!isEligibleStorageObject(obj)) {
+                    continue;
+                }
+
+                String spriteName = obj.getSpriteName();
+                if (spriteName == null || spriteName.isEmpty()) spriteName = "nosprite";
+                String customName = resolveCustomName(obj);
+                boolean markedPrivate = isObjectPrivate(obj);
+
+                int contCount = obj.getContainerCount();
+                if (contCount <= 0 && obj.getContainer() != null) {
+                    contCount = 1;
+                }
+
+                for (int ci = 0; ci < contCount; ci++) {
+                    ItemContainer ic = obj.getContainerByIndex(ci);
+                    if (ic == null && ci == 0) ic = obj.getContainer();
+                    if (!isEligibleContainerType(ic)) continue;
+
+                    String kind = ic.getType();
+                    if (kind == null || kind.isEmpty()) kind = "container";
+
+                    String sig = spriteName + ":" + kind + ":" + ci;
+                    int ord = stackOrdinals.getOrDefault(sig, 0);
+                    stackOrdinals.put(sig, ord + 1);
+
+                    String cid = x + ":" + y + ":" + z + "#" + sig + "#" + ord;
+                    seenIds.add(cid);
+
+                    ContainerContribution existing = s.containers.get(cid);
+                    if (markedPrivate) {
+                        if (existing != null && STATUS_PRIVATE.equals(existing.status)) {
+                            continue;
+                        }
+                        if (existing != null) {
+                            s.aggregate.subtract(existing);
+                        } else {
+                            existing = new ContainerContribution(cid, x, y, z);
+                            s.containers.put(cid, existing);
+                        }
+                        existing.fingerprint = null;
+                        existing.count = 0;
+                        existing.usableCount = 0;
+                        existing.degradedCount = 0;
+                        existing.typeCounts = Collections.emptyMap();
+                        existing.usableTypeCounts = Collections.emptyMap();
+                        existing.degradedTypeCounts = Collections.emptyMap();
+                        existing.tagCounts = Collections.emptyMap();
+                        existing.capacity = 0;
+                        existing.usedWeight = 0;
+                        existing.kind = kind;
+                        existing.customName = customName;
+                        existing.status = STATUS_PRIVATE;
+                        s.aggregate.add(existing);
+                        changed = true;
+                        continue;
+                    }
+
+                    double cap = ic.getCapacity();
+                    if (existing != null
+                            && STATUS_LOADED.equals(existing.status)
+                            && existing.fingerprint != null
+                            && Double.compare(existing.capacity, cap) == 0
+                            && Objects.equals(existing.kind, kind)
+                            && Objects.equals(existing.customName, customName)
+                            && existing.fingerprint.matchesContainer(ic)) {
+                        continue;
+                    }
+
+                    WarehouseFingerprint fp = WarehouseFingerprint.of(ic);
+                    double used = ic.getContentsWeight();
+
+                    if (existing != null) {
+                        s.aggregate.subtract(existing);
+                    } else {
+                        existing = new ContainerContribution(cid, x, y, z);
+                        s.containers.put(cid, existing);
+                    }
+
+                    populateLoadedContribution(existing, ic, fp, cap, used, kind, customName);
+                    s.aggregate.add(existing);
+                    changed = true;
+                }
+            }
+        }
+
+        Set<String> prevIds = s.squareIndex.get(sqKey);
+        if (prevIds != null) {
+            for (String oldId : prevIds) {
+                if (!seenIds.contains(oldId)) {
+                    ContainerContribution old = s.containers.remove(oldId);
+                    if (old != null) {
+                        s.aggregate.subtract(old);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if (seenIds.isEmpty()) {
+            s.squareIndex.remove(sqKey);
+            sleepAndRemoveTracker(sqKey);
+        } else {
+            s.squareIndex.put(sqKey, seenIds);
+            registerOrWakeTracker(sqKey, s.settlementId, urgentWake);
+        }
+        return changed;
+    }
+
+    private static void populateLoadedContribution(
+            ContainerContribution c,
+            ItemContainer ic,
+            WarehouseFingerprint fp,
+            double cap,
+            double used,
+            String kind,
+            String customName) {
+        ArrayList<InventoryItem> items = ic.getItems();
+        Map<String, Integer> counts = new HashMap<>();
+        Map<String, Integer> usableCounts = new HashMap<>();
+        Map<String, Integer> degradedCounts = new HashMap<>();
+        Map<String, Integer> tags = new HashMap<>();
+        int eligibleCount = 0;
+        int usableTotal = 0;
+        int degradedTotal = 0;
+
+        if (items != null) {
+            int sz = items.size();
+            for (int i = 0; i < sz; i++) {
+                InventoryItem itm = items.get(i);
+                if (!isEligibleItem(itm)) continue;
+                String ft = itm.getFullType();
+                if (ft != null) {
+                    counts.put(ft, counts.getOrDefault(ft, 0) + 1);
+                    eligibleCount++;
+                    if (isItemDegraded(itm)) {
+                        degradedCounts.put(ft, degradedCounts.getOrDefault(ft, 0) + 1);
+                        degradedTotal++;
+                    } else {
+                        usableCounts.put(ft, usableCounts.getOrDefault(ft, 0) + 1);
+                        usableTotal++;
+                    }
+                    classifyItem(itm);
+                }
+                try {
+                    Set<ItemTag> itemTags = itm.getTags();
+                    if (itemTags != null && tags.size() < 256) {
+                        for (ItemTag tag : itemTags) {
+                            if (tag == null) continue;
+                            String name = tag.toString();
+                            if (name != null && !name.isEmpty()) {
+                                tags.put(name, tags.getOrDefault(name, 0) + 1);
+                            }
+                        }
+                    }
+                } catch (RuntimeException ignored) {
+                }
+            }
+        }
+
+        c.fingerprint = fp;
+        c.count = eligibleCount;
+        c.usableCount = usableTotal;
+        c.degradedCount = degradedTotal;
+        c.typeCounts = counts;
+        c.usableTypeCounts = usableCounts;
+        c.degradedTypeCounts = degradedCounts;
+        c.tagCounts = tags;
+        c.capacity = cap;
+        c.usedWeight = used;
+        c.kind = kind;
+        c.customName = customName;
+        c.status = STATUS_LOADED;
+    }
+
+    private static KahluaTable compileSnapshot(SettlementState s) {
+        KahluaTable result = table();
+        KahluaTable rowsTable = table();
+        KahluaTable countsTable = table();
+        KahluaTable containersTable = table();
+        KahluaTable fullContainersList = table();
+        Aggregate a = s.aggregate;
+
+        int contIndex = 1;
+        for (ContainerContribution c : s.containers.values()) {
+            if (STATUS_PRIVATE.equals(c.status)) continue;
+            boolean isLoaded = STATUS_LOADED.equals(c.status);
+            if (!isLoaded && !STATUS_OFFLINE_CACHED.equals(c.status)) continue;
+
+            if (c.capacity > 0 && c.usedWeight >= c.capacity * 0.9 && fullContainersList.len() < 8) {
+                KahluaTable fc = table();
+                fc.rawset("name", c.customName != null ? c.customName : c.kind);
+                fc.rawset("x", Double.valueOf(c.x));
+                fc.rawset("y", Double.valueOf(c.y));
+                fc.rawset("z", Double.valueOf(c.z));
+                fc.rawset("capacity", Double.valueOf(c.capacity));
+                fc.rawset("used", Double.valueOf(c.usedWeight));
+                fc.rawset("loaded", Boolean.valueOf(isLoaded));
+                fullContainersList.rawset(Double.valueOf(fullContainersList.len() + 1), fc);
+            }
+            KahluaTable contEntry = table();
+            contEntry.rawset("id", c.containerId);
+            contEntry.rawset("x", Double.valueOf(c.x));
+            contEntry.rawset("y", Double.valueOf(c.y));
+            contEntry.rawset("z", Double.valueOf(c.z));
+            contEntry.rawset("kind", c.kind);
+            if (c.customName != null) contEntry.rawset("customName", c.customName);
+            contEntry.rawset("capacity", Double.valueOf(c.capacity));
+            contEntry.rawset("usedWeight", Double.valueOf(c.usedWeight));
+            contEntry.rawset("count", Double.valueOf(c.count));
+            contEntry.rawset("loaded", Boolean.valueOf(isLoaded));
+            contEntry.rawset("status", c.status);
+            containersTable.rawset(Double.valueOf(contIndex++), contEntry);
+        }
+
+        int rowIndex = 1;
+        for (Map.Entry<String, Integer> e : a.typeCounts.entrySet()) {
+            String ft = e.getKey();
+            int total = e.getValue().intValue();
+            int usable = a.usableByType.getOrDefault(ft, Integer.valueOf(0)).intValue();
+            int degraded = a.degradedByType.getOrDefault(ft, Integer.valueOf(0)).intValue();
+
+            KahluaTable row = table();
+            row.rawset("fullType", ft);
+            row.rawset("count", Double.valueOf(total));
+            row.rawset("usableCount", Double.valueOf(usable));
+            row.rawset("degradedCount", Double.valueOf(degraded));
+            row.rawset("node", CATEGORY_CACHE.getOrDefault(ft, "other"));
+
+            KahluaTable sources = table();
+            List<Source> srcList = a.sourcesByType.get(ft);
+            if (srcList != null) {
+                for (int i = 0; i < srcList.size(); i++) {
+                    Source src = srcList.get(i);
+                    KahluaTable entry = table();
+                    entry.rawset("id", src.id);
+                    entry.rawset("count", Double.valueOf(src.count));
+                    entry.rawset("x", Double.valueOf(src.x));
+                    entry.rawset("y", Double.valueOf(src.y));
+                    entry.rawset("z", Double.valueOf(src.z));
+                    entry.rawset("kind", src.kind);
+                    entry.rawset("loaded", Boolean.valueOf(src.loaded));
+                    if (src.customName != null) entry.rawset("customName", src.customName);
+                    sources.rawset(Double.valueOf(i + 1), entry);
+                }
+            }
+            row.rawset("sources", sources);
+            rowsTable.rawset(Double.valueOf(rowIndex++), row);
+        }
+
+        countsTable.rawset("loaded", Double.valueOf(a.loaded));
+        countsTable.rawset("unloaded", Double.valueOf(a.unloaded));
+        countsTable.rawset("privateCount", Double.valueOf(a.privateCount));
+        countsTable.rawset("items", Double.valueOf(a.totalItems));
+        countsTable.rawset("loadedItems", Double.valueOf(a.loadedItems));
+        countsTable.rawset("usableItems", Double.valueOf(a.usableItems));
+        countsTable.rawset("degradedItems", Double.valueOf(a.degradedItems));
+        countsTable.rawset("containers", Double.valueOf(a.loaded + a.unloaded));
+        countsTable.rawset("totalCapacity", Double.valueOf(a.totalCapacity));
+        countsTable.rawset("usedWeight", Double.valueOf(a.totalUsedWeight));
+        countsTable.rawset("fullCount", Double.valueOf(a.fullCount));
+        countsTable.rawset("fullContainers", fullContainersList);
+
+        KahluaTable tagsTable = table();
+        int tagIndex = 1;
+        for (Map.Entry<String, Integer> e : a.tagCounts.entrySet()) {
+            KahluaTable tagRow = table();
+            tagRow.rawset("tag", e.getKey());
+            tagRow.rawset("count", Double.valueOf(e.getValue()));
+            tagsTable.rawset(Double.valueOf(tagIndex++), tagRow);
+        }
+
+        result.rawset("state", "READY");
+        result.rawset("rows", rowsTable);
+        result.rawset("counts", countsTable);
+        result.rawset("containers", containersTable);
+        result.rawset("tags", tagsTable);
+        result.rawset("revision", Double.valueOf(s.revision));
+        return result;
+    }
+}

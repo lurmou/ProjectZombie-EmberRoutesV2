@@ -1,0 +1,11 @@
+{
+    "ContextMenu_ER_Root": "余烬商路 · 据点与仓储 (M1)",
+    "ContextMenu_ER_OpenMonitor": "打开实时仓储与据点面板",
+    "ContextMenu_ER_NewSettlementEditor": "新建据点 (开启左键拖框划区)...",
+    "ContextMenu_ER_EditSettlementFmt": "编辑据点划区 [%1] (左键拖框增删)...",
+    "ContextMenu_ER_DeleteSettlementFmt": "删除据点 [%1]",
+    "ContextMenu_ER_MarkPrivateFmt": "设为私密容器 (排除公共仓): %1",
+    "ContextMenu_ER_UnmarkPrivateFmt": "恢复公共容器 (纳入据点仓): %1",
+    "ContextMenu_ER_HideBorders": "隐藏地面领地边框",
+    "ContextMenu_ER_ShowBorders": "显示地面领地边框"
+}
