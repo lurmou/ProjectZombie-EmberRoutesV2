@@ -1,4 +1,5 @@
-local Geometry = require "EmberRoutes/SettlementGeometry"
+local Geometry = require "EmberRoutes/Settlement/SettlementGeometry"
+local Kernel = require "EmberRoutes/Kernel"
 
 local SettlementStore = {}
 
@@ -14,14 +15,34 @@ local function getRoot()
 end
 
 local function notifyChanged()
+    if #listeners == 0 then return end
+    local snap = {}
     for i = 1, #listeners do
-        listeners[i]()
+        snap[i] = listeners[i]
+    end
+    for i = 1, #snap do
+        local entry = snap[i]
+        if entry.active and entry.fn then
+            entry.fn()
+        end
     end
 end
 
 function SettlementStore.onChanged(fn)
-    if type(fn) == "function" then
-        listeners[#listeners + 1] = fn
+    if type(fn) ~= "function" then
+        return function() end
+    end
+    local entry = { fn = fn, active = true }
+    listeners[#listeners + 1] = entry
+    return function()
+        if not entry.active then return end
+        entry.active = false
+        for i = #listeners, 1, -1 do
+            if listeners[i] == entry then
+                table.remove(listeners, i)
+                break
+            end
+        end
     end
 end
 
@@ -49,19 +70,29 @@ local function syncToJava(record)
     end
 end
 
-local function overlapsOtherSettlement(root, ignoreId, areas)
-    for sid, s in pairs(root.settlements) do
-        if sid ~= ignoreId and type(s.areas) == "table" then
-            for i = 1, #areas do
-                for j = 1, #s.areas do
-                    if Geometry.overlap(areas[i], s.areas[j], 0) then
-                        return true
+function SettlementStore.findOverlappingSettlement(areas, ignoreId)
+    if type(areas) ~= "table" or #areas == 0 then return nil end
+    local root = getRoot()
+    for i = 1, #root.order do
+        local sid = root.order[i]
+        if sid ~= ignoreId then
+            local s = root.settlements[sid]
+            if s and type(s.areas) == "table" then
+                for aIdx = 1, #areas do
+                    local ra = areas[aIdx]
+                    if Geometry.valid(ra) then
+                        for bIdx = 1, #s.areas do
+                            local rb = s.areas[bIdx]
+                            if Geometry.valid(rb) and Geometry.overlap(ra, rb, 0) then
+                                return s
+                            end
+                        end
                     end
                 end
             end
         end
     end
-    return false
+    return nil
 end
 
 function SettlementStore.list()
@@ -104,7 +135,7 @@ function SettlementStore.commitSettlement(settlementId, name, areas)
     end
 
     local root = getRoot()
-    if overlapsOtherSettlement(root, settlementId, compacted) then
+    if SettlementStore.findOverlappingSettlement(compacted, settlementId) ~= nil then
         return nil, "TERRITORY_OVERLAP"
     end
 
@@ -193,5 +224,13 @@ function SettlementStore.reconcileAndMountAll()
     end
     notifyChanged()
 end
+
+Kernel.plugin({
+    name = "settlements",
+    provides = { "settlements" },
+    apply = function(ctx)
+        ctx:provide("settlements", SettlementStore)
+    end,
+})
 
 return SettlementStore

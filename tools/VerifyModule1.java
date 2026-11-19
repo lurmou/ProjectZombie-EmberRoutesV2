@@ -1,8 +1,8 @@
-import emberroutes.ContainerDirtyQueue;
 import emberroutes.EmberRoutesBridge;
-import emberroutes.TerritoryContour;
-import emberroutes.WarehouseFastIndex;
-import emberroutes.WarehouseFingerprint;
+import emberroutes.warehouse.ContainerDirtyQueue;
+import emberroutes.warehouse.TerritoryContour;
+import emberroutes.warehouse.WarehouseFastIndex;
+import emberroutes.warehouse.WarehouseFingerprint;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -124,9 +124,33 @@ public final class VerifyModule1 {
                     callFrame.push(cached);
                     return 1;
                 }
-                Path sharedFile = luaRoot.resolve("shared").resolve(modName + ".lua");
+                if ("EmberUI".equals(modName) || modName.startsWith("EmberUI/")) {
+                    KahluaTable stub = platform.newTable();
+                    KahluaTable themeStub = platform.newTable();
+                    themeStub.rawset("registerModule", (JavaFunction) (cf, n) -> 0);
+                    themeStub.rawset("getModuleColor", (JavaFunction) (cf, n) -> {
+                        KahluaTable col = platform.newTable();
+                        col.rawset("r", 1.0); col.rawset("g", 1.0); col.rawset("b", 1.0); col.rawset("a", 1.0);
+                        cf.push(col);
+                        return 1;
+                    });
+                    themeStub.rawset("panel", platform.newTable());
+                    stub.rawset("UI", platform.newTable());
+                    stub.rawset("Theme", themeStub);
+                    stub.rawset("Chrome", platform.newTable());
+                    stub.rawset("WindowHost", platform.newTable());
+                    stub.rawset("PageLifecycle", platform.newTable());
+                    stub.rawset("openThemeSettings", (JavaFunction) (cf, n) -> 0);
+                    loaded.rawset(modName, stub);
+                    callFrame.push(stub);
+                    return 1;
+                }
+                Path luaFile = luaRoot.resolve("shared").resolve(modName + ".lua");
+                if (!Files.isRegularFile(luaFile)) {
+                    luaFile = luaRoot.resolve("client").resolve(modName + ".lua");
+                }
                 try {
-                    String code = Files.readString(sharedFile, StandardCharsets.UTF_8);
+                    String code = Files.readString(luaFile, StandardCharsets.UTF_8);
                     LuaClosure fn = LuaCompiler.loadstring(code, modName, env);
                     LuaReturn ret = caller.protectedCall(thread, fn);
                     if (!ret.isSuccess()) throw new RuntimeException("require failed: " + ret.getErrorString());
@@ -153,8 +177,13 @@ public final class VerifyModule1 {
             });
             env.rawset("ModData", modDataApi);
 
+            AtomicInteger resetCount = new AtomicInteger();
             KahluaTable javaBridge = platform.newTable();
-            javaBridge.rawset("reset", (JavaFunction) (cf, n) -> { EmberRoutesBridge.reset(); return 0; });
+            javaBridge.rawset("reset", (JavaFunction) (cf, n) -> {
+                resetCount.incrementAndGet();
+                EmberRoutesBridge.reset();
+                return 0;
+            });
             javaBridge.rawset("syncSettlementAreas", (JavaFunction) (cf, n) -> {
                 String sid = (String) cf.get(0);
                 KahluaTable flat = (KahluaTable) cf.get(1);
@@ -166,21 +195,72 @@ public final class VerifyModule1 {
                 EmberRoutesBridge.invalidateSettlementWarehouse((String) cf.get(0));
                 return 0;
             });
+            javaBridge.rawset("getResetCount", (JavaFunction) (cf, n) -> {
+                cf.push(Double.valueOf(resetCount.get()));
+                return 1;
+            });
             env.rawset("EmberRoutesJava", javaBridge);
+            env.rawset("next", null);
 
             String testLua = """
-                local Store = require "EmberRoutes/SettlementStore"
-                local Geo = require "EmberRoutes/SettlementGeometry"
+                local function makeEvent()
+                    local ev = { _handlers = {} }
+                    function ev.Add(fn) ev._handlers[#ev._handlers + 1] = fn end
+                    function ev.Remove(fn)
+                        for i = #ev._handlers, 1, -1 do
+                            if ev._handlers[i] == fn then table.remove(ev._handlers, i) end
+                        end
+                    end
+                    function ev.fire(...)
+                        for i = 1, #ev._handlers do ev._handlers[i](...) end
+                    end
+                    return ev
+                end
+                Events = {
+                    OnInitGlobalModData = makeEvent(),
+                    OnGameStart = makeEvent(),
+                    OnMainMenuEnter = makeEvent(),
+                    OnTick = makeEvent(),
+                    OnTickEvenPaused = makeEvent(),
+                    LoadGridsquare = makeEvent(),
+                    ReuseGridsquare = makeEvent(),
+                    OnFillWorldObjectContextMenu = makeEvent(),
+                }
+
+                local Kernel = require "EmberRoutes/Kernel"
+                local Store = require "EmberRoutes/Settlement/SettlementStore"
+                local Geo = require "EmberRoutes/Settlement/SettlementGeometry"
+                require "EmberRoutes/Boot"
+
+                -- Test SettlementStore.onChanged idempotent dispose & snapshot iteration
+                local storeEvents = 0
+                local unsubSelf
+                unsubSelf = Store.onChanged(function()
+                    storeEvents = storeEvents + 1
+                    unsubSelf()
+                    unsubSelf()
+                end)
+                local secondCalls = 0
+                local unsubSecond = Store.onChanged(function()
+                    secondCalls = secondCalls + 1
+                end)
 
                 local s1, err = Store.createSettlement("Alpha", 100, 200, 103, 206)
                 assert(s1 ~= nil and err == nil, "createSettlement failed")
+                assert(storeEvents == 1 and secondCalls == 1, "both store listeners must fire without skipping")
                 assert(Geo.totalTiles(s1.areas) == 28, "expected exact 28 tiles")
 
                 local sOverlap, err2 = Store.createSettlement("Beta", 102, 205, 110, 210)
                 assert(sOverlap == nil and err2 == "TERRITORY_OVERLAP", "overlap should reject")
+                local conflict = Store.findOverlappingSettlement({ Geo.rectangle(102, 205, 110, 210) }, nil)
+                assert(conflict ~= nil and conflict.id == s1.id, "findOverlappingSettlement must return s1")
+                assert(Store.findOverlappingSettlement({ Geo.rectangle(102, 205, 110, 210) }, s1.id) == nil, "ignoreId must ignore self")
+                assert(Store.findOverlappingSettlement({ Geo.rectangle(500, 500, 505, 505) }, nil) == nil, "disjoint area must return nil")
 
                 local exp, expErr = Store.expandTerritory(s1.id, 104, 200, 107, 202)
                 assert(exp ~= nil and Geo.totalTiles(exp.areas) == 40, "expanded tiles should be 40")
+                assert(storeEvents == 1 and secondCalls == 2, "unsubscribed listener must not fire again")
+                unsubSecond()
                 assert(#Geo.extractOutlineSegments(exp.areas) == 6, "L-shape must have exact 6 outer segments with 0 inner seams")
 
                 local trimmed, trimErr = Store.trimTerritory(s1.id, 100, 200, 101, 206)
@@ -194,11 +274,103 @@ public final class VerifyModule1 {
 
                 assert(Store.deleteSettlement(s1.id) == true, "deleteSettlement failed")
                 assert(#Store.list() == 0, "store should be empty")
+
+                -- Test Kernel topological sort, LIFO + error isolation, acquireGlobalFlag, wrap bypass, Boot lifecycle
+                local orderLog, cleanLog = {}, {}
+                Kernel.plugin({
+                    name = "test-consumer",
+                    inject = { "testSvc" },
+                    apply = function(ctx)
+                        assert(ctx.testSvc and ctx.testSvc.val == 42, "inject must resolve provider registered later")
+                        orderLog[#orderLog + 1] = "consumer"
+                        ctx:effect(function()
+                            return function() cleanLog[#cleanLog + 1] = "c1" end
+                        end)
+                        ctx:effect(function()
+                            return function()
+                                cleanLog[#cleanLog + 1] = "c2-throws"
+                                error("simulated cleanup failure")
+                            end
+                        end)
+                    end,
+                })
+                Kernel.plugin({
+                    name = "test-provider",
+                    provides = { "testSvc" },
+                    apply = function(ctx)
+                        orderLog[#orderLog + 1] = "provider"
+                        ctx:provide("testSvc", { val = 42 })
+                    end,
+                })
+                Kernel.plugin({
+                    name = "test-isolated-skipped",
+                    inject = { "nonexistent-optional-svc" },
+                    isolated = true,
+                    apply = function() error("should not run") end,
+                })
+
+                assert(not Kernel.isBooted(), "Kernel must not boot on require")
+                Events.OnInitGlobalModData.fire(false)
+                assert(Kernel.isBooted(), "OnInitGlobalModData must boot Kernel via Boot.lua")
+                assert(orderLog[1] == "provider" and orderLog[2] == "consumer", "topological order violated")
+                assert(#Events.OnTick._handlers == 1, "WarehouseWatcher must attach 1 OnTick handler")
+                assert(#Events.OnFillWorldObjectContextMenu._handlers == 1, "DebugContextMenu must attach 1 menu handler")
+                Events.OnGameStart.fire()
+                assert(#Events.OnTick._handlers == 1, "Kernel.boot must be idempotent across OnGameStart")
+
+                -- Ref-counted acquireGlobalFlag (under Kahlua2 where global `next` is nil)
+                assert(next == nil, "sandbox must mirror B42 Kahlua2 where global `next` is nil")
+                local flagTbl = { disableWorldMenu = "externalModValue" }
+                local scA = Kernel.scope("A")
+                local scB = Kernel.scope("B")
+                local cleanupErrs = {}
+                local origPrint = print
+                print = function(msg)
+                    if tostring(msg):find("cleanup error", 1, true) then
+                        cleanupErrs[#cleanupErrs + 1] = tostring(msg)
+                    end
+                    return origPrint(msg)
+                end
+                scA:acquireGlobalFlag(flagTbl, "disableWorldMenu", true)
+                assert(flagTbl.disableWorldMenu == true, "scA must set flag")
+                scB:acquireGlobalFlag(flagTbl, "disableWorldMenu", true)
+                scA:dispose()
+                assert(flagTbl.disableWorldMenu == true, "flag must stay true while scB holds ref")
+                scB:dispose()
+                print = origPrint
+                assert(flagTbl.disableWorldMenu == "externalModValue", "flag must restore original value on zero refs")
+                assert(#cleanupErrs == 0, "acquireGlobalFlag dispose must produce zero cleanup errors without `next`")
+
+                -- Safe ctx:wrap with secondary mod wrap bypass + direct restore
+                local wrapHost = {
+                    calc = function(x) return x + 1 end,
+                    plain = function(x) return x * 2 end,
+                }
+                local scW = Kernel.scope("Wrap")
+                scW:wrap(wrapHost, "calc", function(base)
+                    return function(x) return base(x) + 10 end
+                end)
+                scW:wrap(wrapHost, "plain", function(base)
+                    return function(x) return base(x) + 5 end
+                end)
+                local origCalc = wrapHost.calc
+                wrapHost.calc = function(x) return origCalc(x) * 3 end
+                assert(wrapHost.calc(2) == 39, "wrapped + secondary mod must compute (2+1+10)*3")
+                assert(wrapHost.plain(4) == 13, "plain wrapped must compute 4*2+5")
+                local savedBefore = EmberRoutesJava.getResetCount()
+                Events.OnMainMenuEnter.fire()
+                assert(not Kernel.isBooted(), "OnMainMenuEnter must tear down Kernel")
+                assert(#Events.OnTick._handlers == 0 and #Events.OnFillWorldObjectContextMenu._handlers == 0, "teardown must unbind all events")
+                assert(cleanLog[1] == "c2-throws" and cleanLog[2] == "c1", "effects must dispose LIFO despite cleanup error")
+                assert(wrapHost.calc(2) == 9, "secondary mod must bypass disabled wrapper and call base -> (2+1)*3")
+                assert(wrapHost.plain(4) == 8, "uncontested wrapper must restore exact original function")
+                assert(EmberRoutesJava.getResetCount() > savedBefore, "teardown must reset Java bridge")
                 """;
 
             LuaClosure testFn = LuaCompiler.loadstring(testLua, "VerifyModule1Test.lua", env);
             LuaReturn res = caller.protectedCall(thread, testFn);
             if (!res.isSuccess()) {
+                if (res.getJavaException() != null) res.getJavaException().printStackTrace();
                 throw new AssertionError("Lua lifecycle test failed: " + res.getErrorString() + "\n" + res.getLuaStackTrace());
             }
             check(WarehouseFastIndex.findSettlementIdAt(102, 202) == null, "Java spatial index must be cleared after delete");
@@ -387,8 +559,65 @@ public final class VerifyModule1 {
                 }
             }
             check(patchCount == 21, "Expected exact 21 @Patch classes in root package 'emberroutes', got " + patchCount);
-            System.out.println("[VerifyModule1] 6/6 Verified all " + patchCount + " @Patch classes in root package 'emberroutes' & valid B42 targets.");
+            verifyLuaLayerBoundaries(luaRoot);
+            System.out.println("[VerifyModule1] 6/6 Verified all " + patchCount + " @Patch classes in root package 'emberroutes', valid B42 targets & Lua layer boundaries.");
         }
         System.out.println("[VerifyModule1] ALL CHECKS PASSED.");
+    }
+
+    private static void verifyLuaLayerBoundaries(Path luaRoot) throws Exception {
+        Path clientRoot = luaRoot.resolve("client");
+        List<String> clientMods = new ArrayList<>();
+        if (Files.isDirectory(clientRoot)) {
+            try (var s = Files.walk(clientRoot)) {
+                s.filter(p -> p.toString().endsWith(".lua")).forEach(p -> {
+                    String rel = clientRoot.relativize(p).toString().replace('\\', '/');
+                    clientMods.add(rel.substring(0, rel.length() - 4));
+                });
+            }
+        }
+        var blockComment = java.util.regex.Pattern.compile("--\\[(=*)\\[.*?\\]\\1\\]", java.util.regex.Pattern.DOTALL);
+        var lineComment = java.util.regex.Pattern.compile("--[^\\n]*");
+        var reqPat = java.util.regex.Pattern.compile("require\\s*\\(?\\s*[\"']([^\"']+)[\"']\\s*\\)?");
+        var eventsAddPat = java.util.regex.Pattern.compile("\\bEvents\\s*\\.\\s*[A-Za-z0-9_]+\\s*\\.\\s*Add\\s*\\(");
+        var rawDisablePat = java.util.regex.Pattern.compile("\\bdisableWorldMenu\\s*=(?!=)");
+
+        try (var s = Files.walk(luaRoot)) {
+            List<Path> files = s.filter(p -> p.toString().endsWith(".lua")).sorted().toList();
+            for (Path lf : files) {
+                String rel = luaRoot.relativize(lf).toString().replace('\\', '/');
+                if (rel.contains("/Translate/")) continue;
+                String[] parts = rel.split("/");
+                String side = parts[0];
+                String domain = parts.length >= 4 ? parts[2] : "";
+                String src = Files.readString(lf, StandardCharsets.UTF_8);
+                src = blockComment.matcher(src).replaceAll("");
+                src = lineComment.matcher(src).replaceAll("");
+
+                var rm = reqPat.matcher(src);
+                while (rm.find()) {
+                    String mod = rm.group(1);
+                    if ("shared".equals(side)) {
+                        check(!clientMods.contains(mod) && !mod.startsWith("EmberUI") && !mod.startsWith("EmberRoutes/UI") && !mod.startsWith("EmberRoutes/Warehouse"),
+                                "shared->client require forbidden: " + rel + " -> " + mod);
+                    }
+                    if ("shared/EmberRoutes/Kernel.lua".equals(rel)) {
+                        check(!mod.startsWith("EmberRoutes/") && !mod.startsWith("EmberUI"),
+                                "Kernel.lua must remain domain-agnostic: " + mod);
+                    }
+                    if ("Settlement".equals(domain) || "Warehouse".equals(domain) || "Npc".equals(domain) || "Work".equals(domain) || "Squad".equals(domain)) {
+                        check(!mod.startsWith("EmberRoutes/UI") && !mod.startsWith("EmberRoutes/Compat") && !mod.startsWith("EmberUI"),
+                                "Domain must not depend on UI/Compat: " + rel + " -> " + mod);
+                    }
+                }
+                if (!"Compat".equals(domain)) {
+                    check(!src.contains("getActivatedMods"), "getActivatedMods forbidden outside Compat/: " + rel);
+                }
+                if (!"shared/EmberRoutes/Kernel.lua".equals(rel) && !"client/EmberRoutes/Boot.lua".equals(rel)) {
+                    check(!eventsAddPat.matcher(src).find(), "Direct Events.*.Add forbidden outside Boot/Kernel: " + rel);
+                    check(!rawDisablePat.matcher(src).find(), "Direct disableWorldMenu write forbidden: " + rel);
+                }
+            }
+        }
     }
 }

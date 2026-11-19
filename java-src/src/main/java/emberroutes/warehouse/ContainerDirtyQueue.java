@@ -1,4 +1,4 @@
-package emberroutes;
+package emberroutes.warehouse;
 
 import java.util.Iterator;
 import java.util.Set;

@@ -1,8 +1,9 @@
-require "EmberRoutes/WarehouseWatcher"
-local SettlementStore = require "EmberRoutes/SettlementStore"
-local ZoneOverlay = require "EmberRoutes/ZoneOverlay"
-local ZoneEditorPanel = require "EmberRoutes/ZoneEditorPanel"
-local DebugWarehousePanel = require "EmberRoutes/DebugWarehousePanel"
+local EmberUI = require "EmberUI"
+local Kernel = require "EmberRoutes/Kernel"
+local SettlementStore = require "EmberRoutes/Settlement/SettlementStore"
+local ZoneOverlay = require "EmberRoutes/UI/ZoneOverlay"
+local ZoneEditorPanel = require "EmberRoutes/UI/ZoneEditorPanel"
+local DebugWarehousePanel = require "EmberRoutes/UI/DebugWarehousePanel"
 
 local function appendSquareContainerPrivacyOptions(sub, actor, gx, gy, z)
     local cell = getCell and getCell()
@@ -87,6 +88,20 @@ local function onFillWorldMenu(playerIndex, context, worldobjects, test)
     sub:addOption(borderLabel, actor, function()
         ZoneOverlay.toggleVisible()
     end)
+
+    sub:addOption(getText("ContextMenu_ER_ThemeSettings"), actor, function()
+        EmberUI.openThemeSettings("er.warehouse")
+    end)
 end
 
-Events.OnFillWorldObjectContextMenu.Add(onFillWorldMenu)
+local DebugContextMenu = {}
+
+Kernel.plugin({
+    name = "debug-context-menu",
+    inject = { "settlements" },
+    apply = function(ctx)
+        ctx:on(Events.OnFillWorldObjectContextMenu, onFillWorldMenu)
+    end,
+})
+
+return DebugContextMenu
