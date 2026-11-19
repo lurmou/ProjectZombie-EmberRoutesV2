@@ -7,6 +7,7 @@ local CachedList = require "EmberUI/Widgets/CachedList"
 local SettlementStore = require "EmberRoutes/SettlementStore"
 local Geometry = require "EmberRoutes/SettlementGeometry"
 local ZoneEditorPanel = require "EmberRoutes/ZoneEditorPanel"
+local Kernel = require "EmberRoutes/Kernel"
 
 local DebugWarehousePanel = {}
 local instance = nil
@@ -292,14 +293,8 @@ function PanelCtrl:projectIfDirty()
     CachedList.reconcile(self.itemList, self.cachedRows, rowCaption, rowKey, true, rev)
 end
 
-SettlementStore.onChanged(function()
-    if instance then
-        instance.storeDirty = true
-    end
-end)
-
 function DebugWarehousePanel.open(selectSettlementId)
-    if instance and instance.win then
+    if instance and instance.win and not instance.win.disposed then
         instance.win:addToUIManager()
         instance.win:setVisible(true)
         instance.win:bringToTop()
@@ -311,8 +306,11 @@ function DebugWarehousePanel.open(selectSettlementId)
         return instance
     end
 
+    local scope = Kernel.scope("DebugWarehousePanel")
+
     local ctrl = setmetatable({
         selectedIdx = 1,
+        scope = scope,
         storeDirty = true,
         viewDirty = true,
         cachedList = nil,
@@ -326,6 +324,16 @@ function DebugWarehousePanel.open(selectSettlementId)
         pad = 6,
     }, PanelCtrl)
 
+    scope:subscribe(SettlementStore, function()
+        if not ctrl.win or ctrl.win.disposed then return end
+        ctrl.storeDirty = true
+    end)
+    scope:defer(function()
+        if instance == ctrl then
+            instance = nil
+        end
+    end)
+
     local w, h = 516, 460
     local x = math.max(20, getCore():getScreenWidth() - w - 28)
     local y = 52
@@ -334,15 +342,11 @@ function DebugWarehousePanel.open(selectSettlementId)
         resizable = false,
         closeOnEscape = true,
         hostProps = { direction = "column", padding = 12, gap = 8 },
-        onClose = function()
-            if instance == ctrl then
-                instance = nil
-            end
-        end,
     })
     win:initialise()
     win:instantiate()
     win:addToUIManager()
+    EmberUI.PageLifecycle.attachExternalScope(win, scope)
 
     ctrl.win = win
     function ctrl:setX(nx) self.win:setX(nx) end

@@ -1,4 +1,5 @@
 local Geometry = require "EmberRoutes/SettlementGeometry"
+local Kernel = require "EmberRoutes/Kernel"
 
 local SettlementStore = {}
 
@@ -14,14 +15,34 @@ local function getRoot()
 end
 
 local function notifyChanged()
+    if #listeners == 0 then return end
+    local snap = {}
     for i = 1, #listeners do
-        listeners[i]()
+        snap[i] = listeners[i]
+    end
+    for i = 1, #snap do
+        local entry = snap[i]
+        if entry.active and entry.fn then
+            entry.fn()
+        end
     end
 end
 
 function SettlementStore.onChanged(fn)
-    if type(fn) == "function" then
-        listeners[#listeners + 1] = fn
+    if type(fn) ~= "function" then
+        return function() end
+    end
+    local entry = { fn = fn, active = true }
+    listeners[#listeners + 1] = entry
+    return function()
+        if not entry.active then return end
+        entry.active = false
+        for i = #listeners, 1, -1 do
+            if listeners[i] == entry then
+                table.remove(listeners, i)
+                break
+            end
+        end
     end
 end
 
@@ -193,5 +214,13 @@ function SettlementStore.reconcileAndMountAll()
     end
     notifyChanged()
 end
+
+Kernel.plugin({
+    name = "settlements",
+    provides = { "settlements" },
+    apply = function(ctx)
+        ctx:provide("settlements", SettlementStore)
+    end,
+})
 
 return SettlementStore

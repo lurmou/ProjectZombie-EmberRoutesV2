@@ -288,10 +288,12 @@ public final class PreviewModule1 {
         String sceneCode = """
             local EmberUI = require "EmberUI"
             EmberUI.Theme.applyPreset("ae2")
+            local Kernel = require "EmberRoutes/Kernel"
             local Store = require "EmberRoutes/SettlementStore"
             local Geo = require "EmberRoutes/SettlementGeometry"
             local Panel = require "EmberRoutes/DebugWarehousePanel"
             local Editor = require "EmberRoutes/ZoneEditorPanel"
+            Kernel.boot()
             local s = Store.createSettlement("Rosewood Outpost", 100, 100, 114, 114)
             Store.expandTerritory(s.id, 115, 100, 120, 108)
             Store.trimTerritory(s.id, 104, 104, 108, 108)
@@ -307,6 +309,8 @@ public final class PreviewModule1 {
             ed.dragRect = Geo.rectangle(100, 110, 104, 114)
             ed:pushEditorRenderState()
             ed.statusDirty = true
+            _G.__previewWin = win
+            _G.__previewEd = ed
             """;
         pcallLua(sceneCode);
         waitForAssets();
@@ -351,6 +355,19 @@ public final class PreviewModule1 {
             });
             Display.sync(30);
         }
+
+        pcallLua("""
+            local Kernel = require "EmberRoutes/Kernel"
+            local Editor = require "EmberRoutes/ZoneEditorPanel"
+            assert(ISWorldObjectContextMenu.disableWorldMenu == true, "Editor must lock disableWorldMenu")
+            Kernel.teardown()
+            assert(_G.__previewEd.win.disposed == true, "Kernel.teardown must close ZoneEditorPanel via attachExternalScope")
+            assert(_G.__previewWin.win.disposed == true, "Kernel.teardown must close DebugWarehousePanel via attachExternalScope")
+            assert(not ISWorldObjectContextMenu.disableWorldMenu, "Kernel.teardown must restore disableWorldMenu")
+            assert(Editor.getActive() == nil, "Editor active handle must clear on teardown")
+            _G.__previewWin = nil
+            _G.__previewEd = nil
+            """);
     }
 
     private static final Map<Character, Character> PREVIEW_S2T = Map.ofEntries(

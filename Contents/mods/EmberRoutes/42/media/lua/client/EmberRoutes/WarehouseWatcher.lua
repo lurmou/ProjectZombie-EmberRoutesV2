@@ -1,4 +1,5 @@
-local SettlementStore = require "EmberRoutes/SettlementStore"
+local Kernel = require "EmberRoutes/Kernel"
+require "EmberRoutes/SettlementStore"
 
 local WarehouseWatcher = {}
 
@@ -28,25 +29,23 @@ local function onReuseGridsquare(sq)
     end
 end
 
-Events.OnInitGlobalModData.Add(function()
-    SettlementStore.reconcileAndMountAll()
-end)
+Kernel.plugin({
+    name = "warehouse-watcher",
+    inject = { "settlements" },
+    apply = function(ctx)
+        local settlements = ctx.settlements
+        settlements.reconcileAndMountAll()
 
-Events.OnGameStart.Add(function()
-    SettlementStore.reconcileAndMountAll()
-end)
-
-Events.OnMainMenuEnter.Add(function()
-    if EmberRoutesJava then
-        EmberRoutesJava.reset()
-    end
-end)
-
-Events.OnTick.Add(onTick)
-if Events.OnTickEvenPaused then
-    Events.OnTickEvenPaused.Add(onTickEvenPaused)
-end
-Events.LoadGridsquare.Add(onLoadGridsquare)
-Events.ReuseGridsquare.Add(onReuseGridsquare)
+        ctx:on(Events.OnTick, onTick)
+        if Events.OnTickEvenPaused then
+            ctx:on(Events.OnTickEvenPaused, onTickEvenPaused)
+        end
+        ctx:on(Events.OnGameStart, function()
+            settlements.reconcileAndMountAll()
+        end)
+        ctx:on(Events.LoadGridsquare, onLoadGridsquare)
+        ctx:on(Events.ReuseGridsquare, onReuseGridsquare)
+    end,
+})
 
 return WarehouseWatcher

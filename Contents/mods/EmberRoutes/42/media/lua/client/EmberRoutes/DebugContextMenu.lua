@@ -1,4 +1,4 @@
-require "EmberRoutes/WarehouseWatcher"
+local Kernel = require "EmberRoutes/Kernel"
 local SettlementStore = require "EmberRoutes/SettlementStore"
 local ZoneOverlay = require "EmberRoutes/ZoneOverlay"
 local ZoneEditorPanel = require "EmberRoutes/ZoneEditorPanel"
@@ -89,4 +89,14 @@ local function onFillWorldMenu(playerIndex, context, worldobjects, test)
     end)
 end
 
-Events.OnFillWorldObjectContextMenu.Add(onFillWorldMenu)
+local DebugContextMenu = {}
+
+Kernel.plugin({
+    name = "debug-context-menu",
+    inject = { "settlements" },
+    apply = function(ctx)
+        ctx:on(Events.OnFillWorldObjectContextMenu, onFillWorldMenu)
+    end,
+})
+
+return DebugContextMenu

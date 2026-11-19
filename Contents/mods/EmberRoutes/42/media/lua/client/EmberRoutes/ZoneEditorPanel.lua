@@ -4,6 +4,7 @@ local Theme = EmberUI.Theme
 
 local Geometry = require "EmberRoutes/SettlementGeometry"
 local SettlementStore = require "EmberRoutes/SettlementStore"
+local Kernel = require "EmberRoutes/Kernel"
 
 local ZoneEditorPanel = {}
 local activeEditor = nil
@@ -206,11 +207,13 @@ function ZoneEditorPanel.open(editingSettlement, onSavedCallback)
         activeEditor.win:close()
     end
 
-    ISWorldObjectContextMenu.disableWorldMenu = true
+    local scope = Kernel.scope("ZoneEditorPanel")
+    scope:acquireGlobalFlag(ISWorldObjectContextMenu, "disableWorldMenu", true)
 
     local ctrl = setmetatable({
         editingSettlement = editingSettlement,
         onSavedCallback = onSavedCallback,
+        scope = scope,
         mode = "add",
         areas = editingSettlement and Geometry.cloneAreas(editingSettlement.areas) or {},
         history = {},
@@ -226,6 +229,15 @@ function ZoneEditorPanel.open(editingSettlement, onSavedCallback)
         hintIsError = false,
     }, EditorCtrl)
 
+    scope:defer(function()
+        if EmberRoutesJava and EmberRoutesJava.clearZoneEditorState then
+            EmberRoutesJava.clearZoneEditorState()
+        end
+        if activeEditor == ctrl then
+            activeEditor = nil
+        end
+    end)
+
     local winTitle = editingSettlement
         and getText("IGUI_ER_EditorTitleEdit", editingSettlement.name)
         or getText("IGUI_ER_EditorTitleCreate")
@@ -236,19 +248,11 @@ function ZoneEditorPanel.open(editingSettlement, onSavedCallback)
         resizable = false,
         closeOnEscape = true,
         hostProps = { direction = "column", padding = 10, gap = 6 },
-        onClose = function()
-            ISWorldObjectContextMenu.disableWorldMenu = false
-            if EmberRoutesJava and EmberRoutesJava.clearZoneEditorState then
-                EmberRoutesJava.clearZoneEditorState()
-            end
-            if activeEditor == ctrl then
-                activeEditor = nil
-            end
-        end,
     })
     win:initialise()
     win:instantiate()
     win:addToUIManager()
+    EmberUI.PageLifecycle.attachExternalScope(win, scope)
 
     ctrl.win = win
     function ctrl:setX(nx) self.win:setX(nx) end
