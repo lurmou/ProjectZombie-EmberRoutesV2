@@ -7,9 +7,14 @@ Closes EMB-xxx
 ## 核心改动摘要
 - 
 
+## 复用与重复检查
+- 已检索及复用的入口 / 未复用原因：
+- jscpd 新增相似片段及处理 / 未运行原因：
+
 ## 本地门禁验证
 - 对每项注明通过、失败或不适用及原因；不要把未执行的检查标成通过。
 - [ ] `./build.ps1` 构建通过
+- [ ] ArchUnit 容器补丁直接依赖检查（包含在构建中）
 - [ ] `node ../.workbuddy/tools/pz.mjs preflight .` 预检通过
 - [ ] `./tools/preview-ui.ps1` UI 预览检查通过（如涉及 UI）
 - [ ] `node ../.workbuddy/tools/pz.mjs doclink` 文档断链检查通过（如涉及文档）
