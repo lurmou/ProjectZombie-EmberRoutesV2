@@ -293,7 +293,7 @@ public final class PreviewModule1 {
             local Geo = require "EmberRoutes/Settlement/SettlementGeometry"
             local Panel = require "EmberRoutes/UI/DebugWarehousePanel"
             local Editor = require "EmberRoutes/UI/ZoneEditorPanel"
-            Kernel.boot()
+            Kernel.onWorldReady()
             local s = Store.createSettlement("Rosewood Outpost", 100, 100, 114, 114)
             Store.expandTerritory(s.id, 115, 100, 120, 108)
             Store.trimTerritory(s.id, 104, 104, 108, 108)

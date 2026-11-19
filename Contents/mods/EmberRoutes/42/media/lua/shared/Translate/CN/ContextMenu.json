@@ -8,5 +8,16 @@
     "ContextMenu_ER_UnmarkPrivateFmt": "恢复公共容器 (纳入据点仓): %1",
     "ContextMenu_ER_HideBorders": "隐藏地面领地边框",
     "ContextMenu_ER_ShowBorders": "显示地面领地边框",
-    "ContextMenu_ER_ThemeSettings": "界面主题与样式设置..."
+    "ContextMenu_ER_ThemeSettings": "界面主题与样式设置...",
+    "ContextMenu_ER_M2_Root": "NPC 躯壳与 EMBER 运动测试 (M2)",
+    "ContextMenu_ER_M2_SpawnTest": "在此生成测试 NPC (含背包/装备原件)",
+    "ContextMenu_ER_M2_WalkHereFmt": "步行前往此处 [%1]",
+    "ContextMenu_ER_M2_RunHereFmt": "跑步前往此处 [%1]",
+    "ContextMenu_ER_M2_StopFmt": "紧急停步 [%1]",
+    "ContextMenu_ER_M2_PhaseOutFmt": "离屏冻结快照 (Phase Out) [%1]",
+    "ContextMenu_ER_M2_PhaseInFmt": "快照唤醒重现 (Phase In) [%1]",
+    "ContextMenu_ER_M2_InspectFmt": "检查 NPC 槽位与物品 ID [%1]",
+    "ContextMenu_ER_M2_SaveNow": "立即序列化写入 NPC 二进制存档",
+    "ContextMenu_ER_M2_KillFmt": "击杀 NPC (摸尸原件守恒测试) [%1]",
+    "ContextMenu_ER_M2_DespawnAll": "清理全部测试 NPC"
 }

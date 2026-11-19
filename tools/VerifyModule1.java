@@ -1,13 +1,21 @@
 import emberroutes.EmberRoutesBridge;
+import emberroutes.npc.NpcManager;
+import emberroutes.npc.NpcSnapshot;
 import emberroutes.warehouse.ContainerDirtyQueue;
 import emberroutes.warehouse.TerritoryContour;
 import emberroutes.warehouse.WarehouseFastIndex;
 import emberroutes.warehouse.WarehouseFingerprint;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarEntry;
@@ -22,16 +30,19 @@ import se.krka.kahlua.vm.JavaFunction;
 import se.krka.kahlua.vm.KahluaTable;
 import se.krka.kahlua.vm.KahluaThread;
 import se.krka.kahlua.vm.LuaClosure;
+import zombie.GameWindow;
 import zombie.Lua.LuaManager;
 import zombie.core.Core;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
 import zombie.inventory.types.DrainableComboItem;
 import zombie.inventory.types.Food;
+import zombie.inventory.types.InventoryContainer;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 import zombie.iso.objects.IsoStove;
+import zombie.network.GameServer;
 import zombie.scripting.objects.Item;
 
 /**
@@ -81,7 +92,7 @@ public final class VerifyModule1 {
         } finally {
             Core.debug = prevDebug;
         }
-        System.out.println("[VerifyModule1] 1/6 All " + luaFiles.size() + " Lua files compiled cleanly in Kahlua2 (normal + debug).");
+        System.out.println("[VerifyModule1] 1/7 All " + luaFiles.size() + " Lua files compiled cleanly in Kahlua2 (normal + debug).");
 
         // 2. ContainerDirtyQueue 坐标位打包与零分配排空测试（含负坐标与地下室 Z=-2）
         ContainerDirtyQueue.reset();
@@ -96,7 +107,7 @@ public final class VerifyModule1 {
             check(ContainerDirtyQueue.unpackY(p) == c[1], "unpackY mismatch for " + c[1]);
             check(ContainerDirtyQueue.unpackZ(p) == c[2], "unpackZ mismatch for " + c[2]);
         }
-        System.out.println("[VerifyModule1] 2/6 ContainerDirtyQueue signed coordinate packing & zero-alloc drain passed.");
+        System.out.println("[VerifyModule1] 2/7 ContainerDirtyQueue signed coordinate packing & zero-alloc drain passed.");
 
         // 3. WarehouseFingerprint 槽位敏感性、浮点量化与原位状态哈希校验
         WarehouseFingerprint fp1 = new WarehouseFingerprint(new int[]{101, 202, 303}, 12.341, 999L);
@@ -106,7 +117,7 @@ public final class VerifyModule1 {
         check(fp1.matches(fp2), "Quantized 0.01kg weight should match");
         check(!fp1.matches(fpSwapped), "Swapped middle slot must be detected");
         check(!fp1.matches(fpStateDiff), "In-place state change (uses/rotten/fluid/condition) must be detected");
-        System.out.println("[VerifyModule1] 3/6 WarehouseFingerprint slot identity, weight quantization & state hash passed.");
+        System.out.println("[VerifyModule1] 3/7 WarehouseFingerprint slot identity, weight quantization & state hash passed.");
 
         // 4. 在真实 Kahlua VM 中执行 SettlementGeometry + SettlementStore + Java WarehouseFastIndex 闭环测试
         {
@@ -178,11 +189,35 @@ public final class VerifyModule1 {
             env.rawset("ModData", modDataApi);
 
             AtomicInteger resetCount = new AtomicInteger();
+            AtomicInteger warehouseResetCount = new AtomicInteger();
+            AtomicInteger npcResetCount = new AtomicInteger();
+            AtomicInteger loadNpcCount = new AtomicInteger();
+            AtomicInteger mockMoveSeq = new AtomicInteger(0);
+            java.util.List<KahluaTable> mockMoveEventQueue = new java.util.ArrayList<>();
+            java.util.Map<String, KahluaTable> mockMoveStates = new java.util.HashMap<>();
             KahluaTable javaBridge = platform.newTable();
             javaBridge.rawset("reset", (JavaFunction) (cf, n) -> {
                 resetCount.incrementAndGet();
+                mockMoveStates.clear();
+                mockMoveEventQueue.clear();
                 EmberRoutesBridge.reset();
                 return 0;
+            });
+            javaBridge.rawset("resetWarehouse", (JavaFunction) (cf, n) -> {
+                warehouseResetCount.incrementAndGet();
+                EmberRoutesBridge.resetWarehouse();
+                return 0;
+            });
+            javaBridge.rawset("resetNpcs", (JavaFunction) (cf, n) -> {
+                npcResetCount.incrementAndGet();
+                mockMoveStates.clear();
+                mockMoveEventQueue.clear();
+                EmberRoutesBridge.resetNpcs();
+                return 0;
+            });
+            javaBridge.rawset("diagnosticTimeNanos", (JavaFunction) (cf, n) -> {
+                cf.push(Double.valueOf((double) System.nanoTime()));
+                return 1;
             });
             javaBridge.rawset("syncSettlementAreas", (JavaFunction) (cf, n) -> {
                 String sid = (String) cf.get(0);
@@ -199,10 +234,116 @@ public final class VerifyModule1 {
                 cf.push(Double.valueOf(resetCount.get()));
                 return 1;
             });
+            javaBridge.rawset("getWarehouseResetCount", (JavaFunction) (cf, n) -> {
+                cf.push(Double.valueOf(warehouseResetCount.get()));
+                return 1;
+            });
+            javaBridge.rawset("getNpcResetCount", (JavaFunction) (cf, n) -> {
+                cf.push(Double.valueOf(npcResetCount.get()));
+                return 1;
+            });
+            javaBridge.rawset("getLoadNpcCount", (JavaFunction) (cf, n) -> {
+                cf.push(Double.valueOf(loadNpcCount.get()));
+                return 1;
+            });
+            javaBridge.rawset("tickWarehouse", (JavaFunction) (cf, n) -> {
+                cf.push(Boolean.valueOf(EmberRoutesBridge.tickWarehouse()));
+                return 1;
+            });
+            javaBridge.rawset("flushDirtyContainers", (JavaFunction) (cf, n) -> {
+                cf.push(Boolean.valueOf(EmberRoutesBridge.flushDirtyContainers()));
+                return 1;
+            });
+            javaBridge.rawset("loadNpcsFromSave", (JavaFunction) (cf, n) -> {
+                loadNpcCount.incrementAndGet();
+                cf.push(Double.valueOf(0.0));
+                return 1;
+            });
+            javaBridge.rawset("tickNpcs", (JavaFunction) (cf, n) -> 0);
+            javaBridge.rawset("moveNpcTo", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                double seq = mockMoveSeq.incrementAndGet();
+                KahluaTable st = platform.newTable();
+                st.rawset("exists", Boolean.TRUE);
+                st.rawset("status", "MOVING");
+                st.rawset("reason", "MOVING");
+                st.rawset("seq", Double.valueOf(seq));
+                st.rawset("settledSeq", Double.valueOf(0.0));
+                st.rawset("moving", Boolean.TRUE);
+                mockMoveStates.put(npcId, st);
+                cf.push(Double.valueOf(seq));
+                return 1;
+            });
+            javaBridge.rawset("stopNpcMove", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                KahluaTable st = mockMoveStates.get(npcId);
+                if (st != null) {
+                    st.rawset("status", "INTERRUPTED");
+                    st.rawset("reason", "STOPPED");
+                    st.rawset("settledSeq", st.rawget("seq"));
+                    st.rawset("moving", Boolean.FALSE);
+                }
+                cf.push(Boolean.TRUE);
+                return 1;
+            });
+            javaBridge.rawset("setMockNpcSettled", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                String status = (String) cf.get(1);
+                String reason = (String) cf.get(2);
+                KahluaTable st = mockMoveStates.get(npcId);
+                if (st != null) {
+                    st.rawset("status", status);
+                    st.rawset("reason", reason);
+                    st.rawset("settledSeq", st.rawget("seq"));
+                    st.rawset("moving", Boolean.FALSE);
+                    KahluaTable ev = platform.newTable();
+                    ev.rawset("npcId", npcId);
+                    ev.rawset("seq", st.rawget("seq"));
+                    ev.rawset("status", status);
+                    ev.rawset("reason", reason);
+                    mockMoveEventQueue.add(ev);
+                }
+                return 0;
+            });
+            javaBridge.rawset("drainNpcMoveEvents", (JavaFunction) (cf, n) -> {
+                if (mockMoveEventQueue.isEmpty()) {
+                    cf.push(null);
+                    return 1;
+                }
+                KahluaTable out = platform.newTable();
+                for (int i = 0; i < mockMoveEventQueue.size(); i++) {
+                    out.rawset(Double.valueOf(i + 1), mockMoveEventQueue.get(i));
+                }
+                mockMoveEventQueue.clear();
+                cf.push(out);
+                return 1;
+            });
+            javaBridge.rawset("getNpcMoveStatus", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                KahluaTable st = mockMoveStates.get(npcId);
+                if (st == null) {
+                    st = platform.newTable();
+                    st.rawset("exists", Boolean.FALSE);
+                    st.rawset("status", "MISSING");
+                    st.rawset("reason", "MISSING");
+                    st.rawset("seq", Double.valueOf(0.0));
+                    st.rawset("settledSeq", Double.valueOf(0.0));
+                    st.rawset("moving", Boolean.FALSE);
+                }
+                cf.push(st);
+                return 1;
+            });
             env.rawset("EmberRoutesJava", javaBridge);
             env.rawset("next", null);
 
             String testLua = """
+                local haloCalls = {}
+                HaloTextHelper = {
+                    addText = function(chr, txt) haloCalls[#haloCalls + 1] = { m = "addText", c = chr, t = txt } end,
+                    addTextWithArrow = function(chr, txt) haloCalls[#haloCalls + 1] = { m = "addTextWithArrow", c = chr, t = txt } end,
+                    addGoodText = function(chr, txt) haloCalls[#haloCalls + 1] = { m = "addGoodText", c = chr, t = txt } end,
+                    addBadText = function(chr, txt) haloCalls[#haloCalls + 1] = { m = "addBadText", c = chr, t = txt } end,
+                }
                 local function makeEvent()
                     local ev = { _handlers = {} }
                     function ev.Add(fn) ev._handlers[#ev._handlers + 1] = fn end
@@ -219,6 +360,8 @@ public final class VerifyModule1 {
                 Events = {
                     OnInitGlobalModData = makeEvent(),
                     OnGameStart = makeEvent(),
+                    OnCreatePlayer = makeEvent(),
+                    OnPreMapLoad = makeEvent(),
                     OnMainMenuEnter = makeEvent(),
                     OnTick = makeEvent(),
                     OnTickEvenPaused = makeEvent(),
@@ -226,11 +369,25 @@ public final class VerifyModule1 {
                     ReuseGridsquare = makeEvent(),
                     OnFillWorldObjectContextMenu = makeEvent(),
                 }
+                local mockSimDt = 0.25
+                getGameTime = function()
+                    return {
+                        getGameWorldSecondsSinceLastUpdate = function() return mockSimDt end,
+                    }
+                end
 
                 local Kernel = require "EmberRoutes/Kernel"
                 local Store = require "EmberRoutes/Settlement/SettlementStore"
                 local Geo = require "EmberRoutes/Settlement/SettlementGeometry"
+                local NpcLoco = require "EmberRoutes/Npc/NpcLocomotionPort"
                 require "EmberRoutes/Boot"
+
+                -- Test standalone Scope before session boot (required by offline preview-ui.ps1)
+                local preBootClosed = false
+                local standaloneSc = Kernel.scope("preview-standalone")
+                standaloneSc:defer(function() preBootClosed = true end)
+                standaloneSc:dispose()
+                assert(preBootClosed == true, "standalone scope must work before world ready")
 
                 -- Test SettlementStore.onChanged idempotent dispose & snapshot iteration
                 local storeEvents = 0
@@ -275,48 +432,132 @@ public final class VerifyModule1 {
                 assert(Store.deleteSettlement(s1.id) == true, "deleteSettlement failed")
                 assert(#Store.list() == 0, "store should be empty")
 
-                -- Test Kernel topological sort, LIFO + error isolation, acquireGlobalFlag, wrap bypass, Boot lifecycle
-                local orderLog, cleanLog = {}, {}
-                Kernel.plugin({
-                    name = "test-consumer",
-                    inject = { "testSvc" },
-                    apply = function(ctx)
-                        assert(ctx.testSvc and ctx.testSvc.val == 42, "inject must resolve provider registered later")
-                        orderLog[#orderLog + 1] = "consumer"
-                        ctx:effect(function()
+                -- Test Staged Kernel: ModData vs WorldReady, 5-stage deterministic pipeline, dual clock, fault isolation, Compat/Addon isolation
+                local stageLog, cleanLog, playerCreatedLog, addonRan = {}, {}, {}, false
+                Kernel.registerModule({
+                    id = "test-stage-probe",
+                    onModDataReady = function()
+                        stageLog[#stageLog + 1] = "moddata"
+                    end,
+                    onWorldReady = function(scope)
+                        stageLog[#stageLog + 1] = "world"
+                        scope:effect(function()
                             return function() cleanLog[#cleanLog + 1] = "c1" end
                         end)
-                        ctx:effect(function()
+                        scope:effect(function()
                             return function()
                                 cleanLog[#cleanLog + 1] = "c2-throws"
                                 error("simulated cleanup failure")
                             end
                         end)
                     end,
+                    onPlayerCreated = function(idx, chr)
+                        playerCreatedLog[#playerCreatedLog + 1] = tostring(idx) .. ":" .. tostring(chr.tag)
+                    end,
+                    ticks = {
+                        { stage = "MACRO_WORLD", fn = function(ft, dt, st) stageLog[#stageLog + 1] = "MACRO:" .. tostring(ft) .. ":" .. string.format("%.2f", st) end },
+                        { stage = "SOFT_LOCKS", fn = function() stageLog[#stageLog + 1] = "SOFT_THROWS"; error("boom-in-soft") end },
+                        { stage = "AGENT_BRAIN", fn = function(ft, dt, st) stageLog[#stageLog + 1] = "BRAIN:" .. string.format("%.2f", dt) end },
+                    },
                 })
-                Kernel.plugin({
-                    name = "test-provider",
-                    provides = { "testSvc" },
-                    apply = function(ctx)
-                        orderLog[#orderLog + 1] = "provider"
-                        ctx:provide("testSvc", { val = 42 })
+                Kernel.registerCompat({
+                    id = "test-broken-compat",
+                    when = function() return true end,
+                    apply = function() error("isolated compat boom") end,
+                })
+                EmberRoutes.registerAddon({
+                    id = "test-addon",
+                    apply = function(scope, api)
+                        assert(api and api.settlements == Store and api.npcLocomotion == NpcLoco, "addon must receive public EmberRoutes.api")
+                        addonRan = true
                     end,
                 })
-                Kernel.plugin({
-                    name = "test-isolated-skipped",
-                    inject = { "nonexistent-optional-svc" },
-                    isolated = true,
-                    apply = function() error("should not run") end,
-                })
 
-                assert(not Kernel.isBooted(), "Kernel must not boot on require")
+                -- Before boot: 1 single OnTick + 1 OnTickEvenPaused + 0 LoadGridsquare/ReuseGridsquare Lua hooks
+                assert(not Kernel.isModDataReady() and not Kernel.isWorldReady(), "Kernel must not boot on require")
+                assert(#Events.OnTick._handlers == 1, "Must register exact 1 single-entry OnTick handler")
+                assert(#Events.OnTickEvenPaused._handlers == 1, "Must register exact 1 OnTickEvenPaused handler")
+                assert(#Events.LoadGridsquare._handlers == 0 and #Events.ReuseGridsquare._handlers == 0,
+                    "LoadGridsquare/ReuseGridsquare must stay in Java Patch_IsoChunk with 0 Lua hooks")
+
+                -- Phase 1: OnInitGlobalModData (background loader thread) must NOT trigger world mount or NPC load
                 Events.OnInitGlobalModData.fire(false)
-                assert(Kernel.isBooted(), "OnInitGlobalModData must boot Kernel via Boot.lua")
-                assert(orderLog[1] == "provider" and orderLog[2] == "consumer", "topological order violated")
-                assert(#Events.OnTick._handlers == 1, "WarehouseWatcher must attach 1 OnTick handler")
-                assert(#Events.OnFillWorldObjectContextMenu._handlers == 1, "DebugContextMenu must attach 1 menu handler")
+                assert(Kernel.isModDataReady() and not Kernel.isWorldReady(), "OnInitGlobalModData must only boot moddata phase")
+                assert(EmberRoutesJava.getWarehouseResetCount() == 0 and EmberRoutesJava.getLoadNpcCount() == 0,
+                    "World mount & NPC load must wait until OnGameStart")
+                assert(stageLog[1] == "moddata" and #stageLog == 1, "Only onModDataReady should run on OnInitGlobalModData")
+
+                -- Phase 2: OnGameStart (main thread) runs onWorldReady exactly once; warehouse rescan NEVER resets NPCs
                 Events.OnGameStart.fire()
-                assert(#Events.OnTick._handlers == 1, "Kernel.boot must be idempotent across OnGameStart")
+                assert(Kernel.isWorldReady(), "OnGameStart must activate world phase")
+                assert(addonRan == true, "Addon must activate after core onWorldReady")
+                assert(EmberRoutesJava.getWarehouseResetCount() == 1, "Warehouse must mount exactly once on OnGameStart")
+                assert(EmberRoutesJava.getResetCount() == 0 and EmberRoutesJava.getNpcResetCount() == 0,
+                    "Warehouse mount must NOT call global reset() or resetNpcs()")
+                assert(EmberRoutesJava.getLoadNpcCount() == 1, "NPC load must run exactly once on OnGameStart")
+                assert(#Events.OnFillWorldObjectContextMenu._handlers == 1, "DebugContextMenu must attach 1 menu handler")
+
+                -- Idempotent OnGameStart + warehouse rescan isolation check
+                Events.OnGameStart.fire()
+                assert(EmberRoutesJava.getWarehouseResetCount() == 1 and EmberRoutesJava.getLoadNpcCount() == 1,
+                    "Repeated OnGameStart must remain idempotent")
+                Store.reconcileAndMountAll()
+                assert(EmberRoutesJava.getWarehouseResetCount() == 2 and EmberRoutesJava.getResetCount() == 0 and EmberRoutesJava.getNpcResetCount() == 0,
+                    "Warehouse rescan must only call resetWarehouse() and never wipe NPCs")
+
+                -- Same-save respawn OnCreatePlayer dispatch
+                Events.OnCreatePlayer.fire(0, { tag = "RespawnedHero" })
+                assert(#playerCreatedLog == 1 and playerCreatedLog[1] == "0:RespawnedHero", "OnCreatePlayer must dispatch to modules")
+
+                -- Single-entry 5-stage deterministic pipeline + fault isolation + dual clock
+                stageLog = {}
+                Events.OnTick.fire(10)
+                assert(stageLog[1] == "SOFT_THROWS" and stageLog[2] == "BRAIN:0.25" and stageLog[3] == "MACRO:10:0.25",
+                    "5-stage order, fault isolation & dual clock failed: " .. tostring(stageLog[1]) .. "," .. tostring(stageLog[2]) .. "," .. tostring(stageLog[3]))
+                Events.OnTickEvenPaused.fire(0)
+
+                -- M2 HaloTextGuard test: suppress non-local player overhead text, allow local player
+                local npcChar = { isLocalPlayer = function() return false end }
+                local localChar = { isLocalPlayer = function() return true end }
+                HaloTextHelper.addText(npcChar, "npc-xp")
+                HaloTextHelper.addTextWithArrow(npcChar, "npc-arrow")
+                HaloTextHelper.addGoodText(npcChar, "npc-good")
+                HaloTextHelper.addBadText(npcChar, "npc-bad")
+                assert(#haloCalls == 0, "HaloTextHelper must suppress non-local NPC calls")
+                HaloTextHelper.addText(localChar, "player-xp")
+                HaloTextHelper.addTextWithArrow(localChar, "player-arrow")
+                assert(#haloCalls == 2, "HaloTextHelper must allow local player calls")
+
+                -- M2 NpcLocomotionPort batch-drain contract test: zero-alloc nil when idle -> batch fire on settle
+                local arrivalLog = {}
+                local unsubPersist = NpcLoco.onArrival("npc_1", function(id, status, reason)
+                    arrivalLog[#arrivalLog + 1] = "persist:" .. id .. ":" .. status .. ":" .. tostring(reason)
+                end)
+                NpcLoco.moveTo("npc_1", 10.5, 20.5, 0, {
+                    run = true,
+                    onArrival = function(id, status, reason)
+                        arrivalLog[#arrivalLog + 1] = "oneshot:" .. id .. ":" .. status .. ":" .. tostring(reason)
+                    end,
+                })
+                Events.OnTick.fire(11)
+                assert(#arrivalLog == 0, "callback must wait until batch move event arrives")
+                EmberRoutesJava.setMockNpcSettled("npc_1", "ARRIVED", "REACHED")
+                Events.OnTick.fire(12)
+                assert(#arrivalLog == 2, "both oneshot & persistent arrival callbacks must fire once")
+                assert(arrivalLog[1] == "oneshot:npc_1:ARRIVED:REACHED", "unexpected oneshot log")
+                assert(arrivalLog[2] == "persist:npc_1:ARRIVED:REACHED", "unexpected persistent log")
+                Events.OnTick.fire(13)
+                assert(#arrivalLog == 2, "arrival callbacks must not refire on later ticks")
+                unsubPersist()
+
+                local stopLog = {}
+                NpcLoco.moveTo("npc_2", 30, 40, 0, {
+                    onArrival = function(id, status, reason)
+                        stopLog[#stopLog + 1] = id .. ":" .. status .. ":" .. tostring(reason)
+                    end,
+                })
+                NpcLoco.stop("npc_2")
+                assert(#stopLog == 1 and stopLog[1] == "npc_2:INTERRUPTED:STOPPED", "stop must settle with INTERRUPTED")
 
                 -- Ref-counted acquireGlobalFlag (under Kahlua2 where global `next` is nil)
                 assert(next == nil, "sandbox must mirror B42 Kahlua2 where global `next` is nil")
@@ -359,12 +600,14 @@ public final class VerifyModule1 {
                 assert(wrapHost.plain(4) == 13, "plain wrapped must compute 4*2+5")
                 local savedBefore = EmberRoutesJava.getResetCount()
                 Events.OnMainMenuEnter.fire()
-                assert(not Kernel.isBooted(), "OnMainMenuEnter must tear down Kernel")
-                assert(#Events.OnTick._handlers == 0 and #Events.OnFillWorldObjectContextMenu._handlers == 0, "teardown must unbind all events")
+                assert(not Kernel.isWorldReady() and not Kernel.isModDataReady(), "OnMainMenuEnter must tear down Kernel")
+                assert(#Events.OnFillWorldObjectContextMenu._handlers == 0, "teardown must unbind session-scoped menu handler")
                 assert(cleanLog[1] == "c2-throws" and cleanLog[2] == "c1", "effects must dispose LIFO despite cleanup error")
                 assert(wrapHost.calc(2) == 9, "secondary mod must bypass disabled wrapper and call base -> (2+1)*3")
                 assert(wrapHost.plain(4) == 8, "uncontested wrapper must restore exact original function")
                 assert(EmberRoutesJava.getResetCount() > savedBefore, "teardown must reset Java bridge")
+                HaloTextHelper.addText(npcChar, "restored-after-teardown")
+                assert(#haloCalls == 3, "HaloTextGuard must cleanly unwrap on teardown")
                 """;
 
             LuaClosure testFn = LuaCompiler.loadstring(testLua, "VerifyModule1Test.lua", env);
@@ -518,7 +761,7 @@ public final class VerifyModule1 {
             EmberRoutesBridge.clearCategoryOverrides();
             EmberRoutesBridge.reset();
         }
-        System.out.println("[VerifyModule1] 4/6 & 5/6 B42 live container blacklist, ER_Private, OFFLINE_CACHED & AE2 ticker tests passed.");
+        System.out.println("[VerifyModule1] 4/7 & 5/7 B42 live container blacklist, ER_Private, OFFLINE_CACHED & AE2 ticker tests passed.");
 
         // 6. TerritoryContour 与 ZombieBuddy @Patch 根包归属及目标方法真实性门禁
         {
@@ -558,9 +801,125 @@ public final class VerifyModule1 {
                     }
                 }
             }
-            check(patchCount == 21, "Expected exact 21 @Patch classes in root package 'emberroutes', got " + patchCount);
+            check(patchCount == 25, "Expected exact 25 @Patch classes in root package 'emberroutes', got " + patchCount);
+            // 验证 NpcManager 防空写存档门闩：未成功 loadFromCurrentSave 前，saveAllToDisk 必须拒绝覆写返回 false
+            NpcManager.reset();
+            check(!NpcManager.isLoadedForCurrentSave(), "After reset, loadedForCurrentSave must be false");
+            check(!NpcManager.saveAllToDisk(), "saveAllToDisk MUST refuse to overwrite save before loadFromCurrentSave");
+            check(EmberRoutesBridge.drainNpcMoveEvents() == null, "Idle drainNpcMoveEvents must return null (zero alloc)");
             verifyLuaLayerBoundaries(luaRoot);
-            System.out.println("[VerifyModule1] 6/6 Verified all " + patchCount + " @Patch classes in root package 'emberroutes', valid B42 targets & Lua layer boundaries.");
+            System.out.println("[VerifyModule1] 6/7 Verified all " + patchCount + " @Patch classes in root package 'emberroutes', save latch, zero-alloc drain & Lua layer boundaries.");
+        }
+
+        // 7. M2 NpcSnapshot 二进制存读档与 100% InventoryItem.id / 嵌套背包原件守恒契约校验
+        {
+            Item appleScript = new Item();
+            Food apple = new Food("Base", "Apple", "Apple", appleScript);
+            apple.setScriptItem(appleScript);
+            apple.id = 77002;
+            apple.setAge(3.5f);
+            apple.getModData().rawset("ER_Origin", "Farm-7");
+
+            Item tapeScript = new Item();
+            DrainableComboItem tape = new DrainableComboItem("Base", "DuctTape", "DuctTape", tapeScript);
+            tape.setScriptItem(tapeScript);
+            tape.id = 77003;
+            tape.setUseDelta(0.25f);
+            tape.setCurrentUses(2);
+
+            Item bagScript = new Item();
+            InventoryContainer bag;
+            boolean prevServer = GameServer.server;
+            try {
+                GameServer.server = true;
+                bag = new InventoryContainer("Base", "Bag_Schoolbag", "Bag_Schoolbag", "Item_Bag_Schoolbag");
+            } finally {
+                GameServer.server = prevServer;
+            }
+            bag.setScriptItem(bagScript);
+            bag.id = 77001;
+            InventoryItem childItem = new InventoryItem("Base", "Hammer", "Hammer", new Item());
+            childItem.id = 77004;
+            bag.getInventory().getItems().add(childItem);
+
+            ItemContainer srcContainer = new ItemContainer();
+            srcContainer.getItems().add(apple);
+            srcContainer.getItems().add(tape);
+            srcContainer.getItems().add(bag);
+
+            NpcSnapshot.InventorySnapshot invSnap = NpcSnapshot.captureInventory(
+                    srcContainer, null, tape, apple, null, null);
+            NpcSnapshot src = new NpcSnapshot();
+            src.npcId = "npc_verify_1";
+            src.displayName = "RunnerAlpha";
+            src.x = 1234.5f;
+            src.y = 5678.25f;
+            src.z = 1.0f;
+            src.dirAngleDeg = 45.0f;
+            src.worldVersion = 249;
+            src.applyInventorySnapshot(invSnap);
+            src.wornLocations = new String[]{"base:back"};
+            src.wornItemIndexes = new int[]{2};
+            src.attachedLocations = new String[]{"Belt Left"};
+            src.attachedItemIndexes = new int[]{1};
+
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (DataOutputStream dos = new DataOutputStream(baos)) {
+                dos.writeInt(NpcSnapshot.FILE_MAGIC);
+                dos.writeInt(NpcSnapshot.FILE_VERSION);
+                dos.writeInt(1);
+                src.writeTo(dos);
+            }
+
+            NpcSnapshot dst;
+            try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(baos.toByteArray()))) {
+                check(dis.readInt() == NpcSnapshot.FILE_MAGIC, "EMBN magic mismatch");
+                check(dis.readInt() == NpcSnapshot.FILE_VERSION, "EMBN version mismatch");
+                check(dis.readInt() == 1, "Record count mismatch");
+                dst = NpcSnapshot.readFrom(dis);
+            }
+
+            check("npc_verify_1".equals(dst.npcId), "npcId mismatch");
+            check("RunnerAlpha".equals(dst.displayName), "displayName mismatch");
+            check(Math.abs(dst.x - 1234.5f) < 1e-4f && Math.abs(dst.y - 5678.25f) < 1e-4f && dst.z == 1.0f, "coords mismatch");
+            check(Math.abs(dst.dirAngleDeg - 45.0f) < 1e-4f && dst.worldVersion == 249, "dir/version mismatch");
+            check(Arrays.equals(src.inventoryData, dst.inventoryData), "Serialized ByteBuffer payload must round-trip bit-for-bit");
+            check(dst.primaryItemIndex == src.primaryItemIndex && dst.primaryItemIndex >= 0, "Primary hand index mismatch");
+            check(dst.secondaryItemIndex == src.secondaryItemIndex && dst.secondaryItemIndex >= 0, "Secondary hand index mismatch");
+            check(Arrays.equals(src.wornLocations, dst.wornLocations) && Arrays.equals(src.wornItemIndexes, dst.wornItemIndexes),
+                    "Worn slot indices must round-trip exactly");
+            check(Arrays.equals(src.attachedLocations, dst.attachedLocations) && Arrays.equals(src.attachedItemIndexes, dst.attachedItemIndexes),
+                    "Attached slot indices must round-trip exactly");
+
+            // 验证 ByteBuffer 内部 ItemContainer 头与 compress group 计数
+            ByteBuffer invBuf = ByteBuffer.wrap(dst.inventoryData);
+            String containerType = GameWindow.ReadString(invBuf);
+            check(containerType != null, "Container type header missing");
+            invBuf.get(); // explored byte
+            short distinctEntries = invBuf.getShort();
+            check(distinctEntries == 3, "Expected 3 serialized CompressIdenticalItems groups, got " + distinctEntries);
+
+            // 直接验证真实 B42 Food 与 DrainableComboItem saveWithSize -> loadItem id/ModData/uses 原件守恒
+            ByteBuffer appleBuf = ByteBuffer.allocate(2048);
+            apple.saveWithSize(appleBuf, false);
+            appleBuf.flip();
+            Food loadedApple = new Food("Base", "Apple", "Apple", appleScript);
+            loadedApple.setScriptItem(appleScript);
+            InventoryItem resApple = InventoryItem.loadItem(appleBuf, 249, false, loadedApple);
+            check(resApple == loadedApple && loadedApple.id == 77002, "Food InventoryItem.id 77002 must survive ByteBuffer round-trip");
+            check(loadedApple.hasModData() && "Farm-7".equals(loadedApple.getModData().rawget("ER_Origin")),
+                    "Food ModData ER_Origin must survive ByteBuffer round-trip");
+
+            ByteBuffer tapeBuf = ByteBuffer.allocate(2048);
+            tape.saveWithSize(tapeBuf, false);
+            tapeBuf.flip();
+            DrainableComboItem loadedTape = new DrainableComboItem("Base", "DuctTape", "DuctTape", tapeScript);
+            loadedTape.setScriptItem(tapeScript);
+            InventoryItem resTape = InventoryItem.loadItem(tapeBuf, 249, false, loadedTape);
+            check(resTape == loadedTape && loadedTape.id == 77003, "Drainable InventoryItem.id 77003 must survive ByteBuffer round-trip");
+            check(loadedTape.getCurrentUses() == 2, "Drainable currentUses must remain 2, got " + loadedTape.getCurrentUses());
+
+            System.out.println("[VerifyModule1] 7/7 NpcSnapshot ByteBuffer binary format, InventoryItem.id & nested container conservation verified.");
         }
         System.out.println("[VerifyModule1] ALL CHECKS PASSED.");
     }
@@ -581,6 +940,7 @@ public final class VerifyModule1 {
         var reqPat = java.util.regex.Pattern.compile("require\\s*\\(?\\s*[\"']([^\"']+)[\"']\\s*\\)?");
         var eventsAddPat = java.util.regex.Pattern.compile("\\bEvents\\s*\\.\\s*[A-Za-z0-9_]+\\s*\\.\\s*Add\\s*\\(");
         var rawDisablePat = java.util.regex.Pattern.compile("\\bdisableWorldMenu\\s*=(?!=)");
+        var globalResetPat = java.util.regex.Pattern.compile("\\bEmberRoutesJava\\s*\\.\\s*reset\\s*\\(");
 
         try (var s = Files.walk(luaRoot)) {
             List<Path> files = s.filter(p -> p.toString().endsWith(".lua")).sorted().toList();
@@ -612,6 +972,9 @@ public final class VerifyModule1 {
                 }
                 if (!"Compat".equals(domain)) {
                     check(!src.contains("getActivatedMods"), "getActivatedMods forbidden outside Compat/: " + rel);
+                }
+                if (!"shared/EmberRoutes/Kernel.lua".equals(rel)) {
+                    check(!globalResetPat.matcher(src).find(), "Direct EmberRoutesJava.reset() forbidden outside Kernel.lua: " + rel);
                 }
                 if (!"shared/EmberRoutes/Kernel.lua".equals(rel) && !"client/EmberRoutes/Boot.lua".equals(rel)) {
                     check(!eventsAddPat.matcher(src).find(), "Direct Events.*.Add forbidden outside Boot/Kernel: " + rel);

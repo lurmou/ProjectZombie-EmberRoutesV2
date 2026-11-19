@@ -5,6 +5,13 @@ EmberRoutesJava = EmberRoutesJava or {}
 
 function EmberRoutesJava.reset() end
 
+function EmberRoutesJava.resetWarehouse() end
+
+function EmberRoutesJava.resetNpcs() end
+
+---@return number
+function EmberRoutesJava.diagnosticTimeNanos() end
+
 ---@param settlementId string
 ---@param flatRects table
 ---@return number
@@ -102,4 +109,89 @@ function EmberRoutesJava.isZoneOverlayVisible() end
 function EmberRoutesJava.syncZoneEditorState(editingSettlementId, mode, flatPreviewRects, hasDrag, dragX, dragY, dragW, dragH, hasCursor, cursorX, cursorY) end
 
 function EmberRoutesJava.clearZoneEditorState() end
+
+---@param x number
+---@param y number
+---@param z number
+---@param female boolean
+---@param optionalName string
+---@return string
+function EmberRoutesJava.spawnNpc(x, y, z, female, optionalName) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.despawnNpc(npcId) end
+
+---@return number
+function EmberRoutesJava.despawnAllNpcs() end
+
+---@return table
+function EmberRoutesJava.listNpcIds() end
+
+---@param npcId string
+---@return table
+function EmberRoutesJava.getNpcInfo(npcId) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.phaseOutNpc(npcId) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.phaseInNpc(npcId) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.killNpc(npcId) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.giveNpcTestKit(npcId) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.inspectNpcInventoryIds(npcId) end
+
+function EmberRoutesJava.tickNpcs() end
+
+---@param sq any
+function EmberRoutesJava.onNpcSquareLoaded(sq) end
+
+---@return boolean
+function EmberRoutesJava.saveNpcsToSave() end
+
+---@return number
+function EmberRoutesJava.loadNpcsFromSave() end
+
+---@param npcId string
+---@param x number
+---@param y number
+---@param z number
+---@param running boolean
+---@return number
+function EmberRoutesJava.moveNpcTo(npcId, x, y, z, running) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.stopNpcMove(npcId) end
+
+---@param npcId string
+---@param running boolean
+---@return boolean
+function EmberRoutesJava.setNpcRunning(npcId, running) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.isNpcMoving(npcId) end
+
+---@param npcId string
+---@return table
+function EmberRoutesJava.getNpcMoveStatus(npcId) end
+
+---@return table
+function EmberRoutesJava.drainNpcMoveEvents() end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.getNpcDebugLine(npcId) end
 

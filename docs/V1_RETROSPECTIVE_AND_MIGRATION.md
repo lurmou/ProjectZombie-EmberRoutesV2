@@ -92,7 +92,7 @@
 | **DEC-005**<br>资产唯一结算入口（离屏接缝） | 防止宏观模拟与在场实体双写复制物品 | 原则完全正确，是商队虚实转换的安全底线 | **完整保留核心不变量**：在场期仅实体操作实物；离屏 `phaseOut` 卸载实体入 `VehiclesDB2 / ByteBuffer` 后才移交宏观路线推进 |
 | **DEC-006**<br>入口形状校验 + 执行点复验 | 消除中间调用链层层重复全量校验 | 有效降低了中间层冗余守卫 | **保留精髓**：UI/配置提交时验形状，动作真正落地（取物/放物/扣料）瞬间直接向原版容器/逻辑复验实物 |
 | **DEC-007**<br>分级工作量预算与降级序 | 防止无依据硬写“50ms”伪预算或丢弃关键结算 | Lua 侧自建复杂预算调度器本身带来了额外的心智与代码负担 | **用架构消除轮询税**：容器靠 `@Patch` 无锁脏队列实现静止 **0 扫描**；寻路靠单帧 1 人仲裁队列削峰；`tickAI` 低频分摊 |
-| **DEC-009**<br>唯一领域注册面 | 解决新增工种需到处改硬编码清单与退休表的问题 | 受制于 V1 既有 126 条跨域边，只做到了元数据表面收敛 | **升级为裁剪版 Cordis 微内核**（见 [ARCHITECTURE.md](ARCHITECTURE.md) §3–§4）：工种、分类器、UI 页签与 `Compat` 插件统一走声明式注入与 LIFO 回收 |
+| **DEC-009**<br>唯一领域注册面 | 解决新增工种需到处改硬编码清单与退休表的问题 | 受制于 V1 既有 126 条跨域边，只做到了元数据表面收敛 | **升级为分阶段仿真内核 + 强契约扩展点**（见 [ARCHITECTURE.md](ARCHITECTURE.md) §3–§4）：内部核心域 100% 静态 `require` + DAG 门禁，工种/分拣/分类器走强契约注册表，UI 槽位直复用 `EmberUI.SlotRegistry`，第三方适配走隔离 `Compat` 槽与 RAII `Scope` 回收 |
 | **DEC-010 / 011**<br>安全分档位化、士气慢变量不碰原版数值 | 拒绝给玩家虚假精确数字，禁止无依据篡改原版角色战斗/健康属性 | 避免了数值崩坏与玩家误解 | **完整保留产品原则**：UI 展示实数与清晰阻塞原因（如缺何种材料/工具），不造伪科学百分比 |
 
 ---
@@ -137,9 +137,9 @@
 - **V1 & V2 M1 早期病灶**：
   1. **目录缺乏适度归类**：V1 的 `emberroutes/probe/` 平铺 50+ 个 Java 文件、`UI/` 单目录堆积 132 个 Lua 文件；而 V2 M1 初版也把所有 Lua 脚本与 Java 类全部直接平铺在根目录；
   2. **全局副作用裸奔**：散装 `Events.*.Add` 无卸载、裸写 `ISWorldObjectContextMenu.disableWorldMenu = false`、`prerender` 内无意调 `SettlementStore.list()` 新建临时表、[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/warehouse/WarehouseFastIndex.java) 硬编码英文物品子串分类。
-- **V2 根治设计（[ARCHITECTURE.md](ARCHITECTURE.md) §3 & §7 微内核 + 按需分层目录）**：
-  - **实用主义领域分包**：不设死板的文件数上限或单文件套壳，但拒绝把所有业务堆在根目录——核心入口（`Main.java` / `EmberRoutesBridge.java`、`Kernel.lua` / `Boot.lua`）留根，业务代码按 `warehouse / npc / patches` 与 `Settlement / Warehouse / Npc / Work / UI / Compat` 自然归类，后续随模块增长与维护需要再渐进拆分子目录；
-  - **微内核生命周期托管**：统一经 `Kernel.lua` 托管会话级 `ctx:on / ctx:effect / ctx:wrap` 与面板级 `ctx:scope` + `acquireGlobalFlag` 引用计数守卫；分类升级为“插件规则链 + B42 原版 `ItemTag` 优先”，第三方模组适配全部隔离在 `Compat/<ModKey>.lua` 内按需挂载、退档逆序清零。
+- **V2 根治设计（[ARCHITECTURE.md](ARCHITECTURE.md) §3 & §7 分阶段仿真内核 + 域级 DAG 目录）**：
+  - **实用主义领域分包与静态 DAG**：核心入口（`Main.java` / `EmberRoutesBridge.java` / `Patch_*.java`、`Kernel.lua` / `Boot.lua`）留根，业务代码按 `warehouse / npc` 与 `Settlement / Warehouse / Npc / Work / UI / Compat` 自然归类，并由 `check_arch.py` 强制校验域级单向依赖与循环 `require`；
+  - **分阶段生命周期与 RAII `Scope` 托管**：`Kernel.lua` 区分 `onModDataReady`（后台加载线程）与 `onWorldReady`（主线程），通过单入口 5 阶段双时钟管线 + Java `Patch_IsoChunk / Patch_IngameExit` 消除开车跨语言洪峰与退档引用残留；UI 面板经 `Scope` + `acquireGlobalFlag` 与 `EmberUI.PageLifecycle` 双向回收，第三方模组适配隔离于 `Compat/<ModKey>.lua`。
 
 ---
 

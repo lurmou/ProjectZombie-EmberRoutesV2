@@ -27,6 +27,18 @@ class ArchitectureBoundaryTest {
     void productionContainerPatchesDoNotDirectlyDependOnKahlua() {
 	JavaClasses classes = new ClassFileImporter().importPath(Path.of(System.getProperty("emberroutes.mainClasses")));
 	checkPatch(classes, "emberroutes.Patch_ItemContainer");
+	checkPatch(classes, "emberroutes.Patch_GameWindowSave");
+	checkPatch(classes, "emberroutes.Patch_IngameExit");
+	checkPatch(classes, "emberroutes.Patch_IsoChunk");
+	checkPatch(classes, "emberroutes.Patch_WorldRender");
+    }
+
+    @Test
+    void npcDomainDoesNotDependOnBridgeOrPatches() {
+	JavaClasses classes = new ClassFileImporter().importPath(Path.of(System.getProperty("emberroutes.mainClasses")));
+	noClasses().that().resideInAPackage("emberroutes.npc..")
+		.should().dependOnClassesThat().haveNameMatching("emberroutes\\.(EmberRoutesBridge|Patch_.*)")
+		.check(classes);
     }
 
     @Test

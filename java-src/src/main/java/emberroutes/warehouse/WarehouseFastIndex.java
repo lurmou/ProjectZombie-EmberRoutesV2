@@ -518,6 +518,10 @@ public final class WarehouseFastIndex {
     static final class SettlementState {
         final String settlementId;
         final List<int[]> rects = new ArrayList<>(); // 2D rects: [x, y, w, h]
+        int minX = Integer.MAX_VALUE;
+        int minY = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE; // exclusive
+        int maxY = Integer.MIN_VALUE; // exclusive
         final Map<String, ContainerContribution> containers = new HashMap<>();
         final Map<Long, Set<String>> squareIndex = new HashMap<>();
         final Aggregate aggregate = new Aggregate();
@@ -528,7 +532,43 @@ public final class WarehouseFastIndex {
             this.settlementId = settlementId;
         }
 
+        void recomputeBounds() {
+            int bx0 = Integer.MAX_VALUE;
+            int by0 = Integer.MAX_VALUE;
+            int bx1 = Integer.MIN_VALUE;
+            int by1 = Integer.MIN_VALUE;
+            for (int i = 0, n = rects.size(); i < n; i++) {
+                int[] r = rects.get(i);
+                if (r[0] < bx0) bx0 = r[0];
+                if (r[1] < by0) by0 = r[1];
+                int rx1 = r[0] + r[2];
+                int ry1 = r[1] + r[3];
+                if (rx1 > bx1) bx1 = rx1;
+                if (ry1 > by1) by1 = ry1;
+            }
+            this.minX = bx0;
+            this.minY = by0;
+            this.maxX = bx1;
+            this.maxY = by1;
+        }
+
+        boolean intersectsBox(int x0, int y0, int x1, int y1) {
+            if (rects.isEmpty() || x1 <= minX || x0 >= maxX || y1 <= minY || y0 >= maxY) {
+                return false;
+            }
+            for (int i = 0, n = rects.size(); i < n; i++) {
+                int[] r = rects.get(i);
+                if (x1 > r[0] && x0 < r[0] + r[2] && y1 > r[1] && y0 < r[1] + r[3]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         boolean contains2D(int x, int y) {
+            if (x < minX || x >= maxX || y < minY || y >= maxY) {
+                return false;
+            }
             for (int i = 0, n = rects.size(); i < n; i++) {
                 int[] r = rects.get(i);
                 if (x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3]) {
@@ -688,6 +728,7 @@ public final class WarehouseFastIndex {
         }
         s.rects.clear();
         s.rects.addAll(TerritoryContour.normalizeDisjoint(rawRects));
+        s.recomputeBounds();
         TerritoryRenderer.syncSettlement(settlementId, s.rects);
 
         boolean changed = s.revision == 0;
@@ -861,6 +902,77 @@ public final class WarehouseFastIndex {
         if (owner != null && markSquareUnloadedInternal(owner, sq.getX(), sq.getY(), sq.getZ())) {
             markSnapshotDirty(owner);
         }
+    }
+
+    /**
+     * Chunk 级主线程区块加载感知（由底层 Chunk 传感器直接触发，零 Kahlua 跨语言调用）：
+     * 野外无据点相交的 Chunk 仅做 O(1) 整数包围盒判断即直接返回。
+     */
+    public static void onChunkLoaded(IsoChunk chunk) {
+        processChunkSquares(chunk, true);
+    }
+
+    /**
+     * Chunk 级主线程区块回收感知（在 {@code IsoChunk.doReuseGridsquares @OnEnter} 触发，零 Kahlua 跨语言调用）：
+     * 将被回收的据点容器切换为 {@code OFFLINE_CACHED} 保留最后已知快照并停掉对应节拍器。
+     */
+    public static void onChunkUnloaded(IsoChunk chunk) {
+        processChunkSquares(chunk, false);
+    }
+
+    private static void processChunkSquares(IsoChunk chunk, boolean loaded) {
+        if (chunk == null || SETTLEMENTS.isEmpty()) return;
+        int x0 = chunk.wx * 8;
+        int y0 = chunk.wy * 8;
+        List<SettlementState> overlapping = collectOverlappingSettlements(x0, y0, x0 + 8, y0 + 8);
+        if (overlapping == null) return;
+
+        int minZ = chunk.getMinLevel();
+        int maxZ = chunk.getMaxLevel();
+        Set<SettlementState> dirty = null;
+        for (int z = minZ; z <= maxZ; z++) {
+            for (int ly = 0; ly < 8; ly++) {
+                int wy = y0 + ly;
+                for (int lx = 0; lx < 8; lx++) {
+                    int wx = x0 + lx;
+                    SettlementState owner = findOwnerInList(overlapping, wx, wy);
+                    if (owner == null) continue;
+                    IsoGridSquare sq = chunk.getGridSquare(lx, ly, z);
+                    if (sq == null) continue;
+                    boolean changed = loaded
+                            ? scanSquareInternal(owner, sq, true)
+                            : markSquareUnloadedInternal(owner, wx, wy, z);
+                    if (changed) {
+                        if (dirty == null) dirty = new HashSet<>();
+                        dirty.add(owner);
+                    }
+                }
+            }
+        }
+        if (dirty != null) {
+            for (SettlementState s : dirty) {
+                markSnapshotDirty(s);
+            }
+        }
+    }
+
+    private static List<SettlementState> collectOverlappingSettlements(int x0, int y0, int x1, int y1) {
+        List<SettlementState> matched = null;
+        for (SettlementState s : SETTLEMENTS.values()) {
+            if (s.intersectsBox(x0, y0, x1, y1)) {
+                if (matched == null) matched = new ArrayList<>(2);
+                matched.add(s);
+            }
+        }
+        return matched;
+    }
+
+    private static SettlementState findOwnerInList(List<SettlementState> list, int x, int y) {
+        for (int i = 0, n = list.size(); i < n; i++) {
+            SettlementState s = list.get(i);
+            if (s.contains2D(x, y)) return s;
+        }
+        return null;
     }
 
     /**
