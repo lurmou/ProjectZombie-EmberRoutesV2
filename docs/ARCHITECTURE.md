@@ -65,6 +65,7 @@ flowchart TD
 1. **L0 字节码补丁层（`emberroutes.patches.*`）**：
    - 只做最薄的无损钩子（`@Patch.OnEnter` / `@Patch.OnExit`），严禁修改原版方法返回值或吞掉原版调用（参考 [Patch_ItemContainer.java](../java-src/src/main/java/emberroutes/patches/Patch_ItemContainer.java)）；
    - 因区块流式加载可能在后台线程触发 `ItemContainer.load`，补丁内**严禁触碰非线程安全的 `KahluaTable` 或调用 Lua 闭包**，只能写入并发无锁结构（如 [ContainerDirtyQueue.java](../java-src/src/main/java/emberroutes/ContainerDirtyQueue.java)）。
+   - Gradle 的 ArchUnit 测试检查 `Patch_ItemContainer` 及其内部类不直接依赖 Kahlua 类；它不能证明间接调用或运行时线程安全，仍须审查完整调用链。
 2. **L1 Java 底座层（`emberroutes.*`）**：
    - 独占承担大规模格点遍历、全楼层世界容器聚合（[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/WarehouseFastIndex.java)）、`IsoRegions` 屋顶封闭查询（[EmberRoutesBridge.java](../java-src/src/main/java/emberroutes/EmberRoutesBridge.java)）、C++ `PathfindNative` 路径拉直与 `ByteBuffer` 实体存读档；
    - Java 层对具体第三方工坊模组保持 **0 硬编码感知**，但向 Lua 暴露规则覆盖入口（如物品分类覆盖表），避免在 Java 中写死封闭白名单。
