@@ -1,5 +1,6 @@
 package emberroutes;
 
+import emberroutes.warehouse.ContainerDirtyQueue;
 import me.zed_0xff.zombie_buddy.Patch;
 import zombie.inventory.ItemContainer;
 import zombie.iso.IsoGridSquare;

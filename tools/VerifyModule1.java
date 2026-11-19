@@ -1,8 +1,8 @@
-import emberroutes.ContainerDirtyQueue;
 import emberroutes.EmberRoutesBridge;
-import emberroutes.TerritoryContour;
-import emberroutes.WarehouseFastIndex;
-import emberroutes.WarehouseFingerprint;
+import emberroutes.warehouse.ContainerDirtyQueue;
+import emberroutes.warehouse.TerritoryContour;
+import emberroutes.warehouse.WarehouseFastIndex;
+import emberroutes.warehouse.WarehouseFingerprint;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -217,8 +217,8 @@ public final class VerifyModule1 {
                 }
 
                 local Kernel = require "EmberRoutes/Kernel"
-                local Store = require "EmberRoutes/SettlementStore"
-                local Geo = require "EmberRoutes/SettlementGeometry"
+                local Store = require "EmberRoutes/Settlement/SettlementStore"
+                local Geo = require "EmberRoutes/Settlement/SettlementGeometry"
                 require "EmberRoutes/Boot"
 
                 -- Test SettlementStore.onChanged idempotent dispose & snapshot iteration
@@ -533,8 +533,65 @@ public final class VerifyModule1 {
                 }
             }
             check(patchCount == 21, "Expected exact 21 @Patch classes in root package 'emberroutes', got " + patchCount);
-            System.out.println("[VerifyModule1] 6/6 Verified all " + patchCount + " @Patch classes in root package 'emberroutes' & valid B42 targets.");
+            verifyLuaLayerBoundaries(luaRoot);
+            System.out.println("[VerifyModule1] 6/6 Verified all " + patchCount + " @Patch classes in root package 'emberroutes', valid B42 targets & Lua layer boundaries.");
         }
         System.out.println("[VerifyModule1] ALL CHECKS PASSED.");
+    }
+
+    private static void verifyLuaLayerBoundaries(Path luaRoot) throws Exception {
+        Path clientRoot = luaRoot.resolve("client");
+        List<String> clientMods = new ArrayList<>();
+        if (Files.isDirectory(clientRoot)) {
+            try (var s = Files.walk(clientRoot)) {
+                s.filter(p -> p.toString().endsWith(".lua")).forEach(p -> {
+                    String rel = clientRoot.relativize(p).toString().replace('\\', '/');
+                    clientMods.add(rel.substring(0, rel.length() - 4));
+                });
+            }
+        }
+        var blockComment = java.util.regex.Pattern.compile("--\\[(=*)\\[.*?\\]\\1\\]", java.util.regex.Pattern.DOTALL);
+        var lineComment = java.util.regex.Pattern.compile("--[^\\n]*");
+        var reqPat = java.util.regex.Pattern.compile("require\\s*\\(?\\s*[\"']([^\"']+)[\"']\\s*\\)?");
+        var eventsAddPat = java.util.regex.Pattern.compile("\\bEvents\\s*\\.\\s*[A-Za-z0-9_]+\\s*\\.\\s*Add\\s*\\(");
+        var rawDisablePat = java.util.regex.Pattern.compile("\\bdisableWorldMenu\\s*=(?!=)");
+
+        try (var s = Files.walk(luaRoot)) {
+            List<Path> files = s.filter(p -> p.toString().endsWith(".lua")).sorted().toList();
+            for (Path lf : files) {
+                String rel = luaRoot.relativize(lf).toString().replace('\\', '/');
+                if (rel.contains("/Translate/")) continue;
+                String[] parts = rel.split("/");
+                String side = parts[0];
+                String domain = parts.length >= 4 ? parts[2] : "";
+                String src = Files.readString(lf, StandardCharsets.UTF_8);
+                src = blockComment.matcher(src).replaceAll("");
+                src = lineComment.matcher(src).replaceAll("");
+
+                var rm = reqPat.matcher(src);
+                while (rm.find()) {
+                    String mod = rm.group(1);
+                    if ("shared".equals(side)) {
+                        check(!clientMods.contains(mod) && !mod.startsWith("EmberUI") && !mod.startsWith("EmberRoutes/UI") && !mod.startsWith("EmberRoutes/Warehouse"),
+                                "shared->client require forbidden: " + rel + " -> " + mod);
+                    }
+                    if ("shared/EmberRoutes/Kernel.lua".equals(rel)) {
+                        check(!mod.startsWith("EmberRoutes/") && !mod.startsWith("EmberUI"),
+                                "Kernel.lua must remain domain-agnostic: " + mod);
+                    }
+                    if ("Settlement".equals(domain) || "Warehouse".equals(domain) || "Npc".equals(domain) || "Work".equals(domain) || "Squad".equals(domain)) {
+                        check(!mod.startsWith("EmberRoutes/UI") && !mod.startsWith("EmberRoutes/Compat") && !mod.startsWith("EmberUI"),
+                                "Domain must not depend on UI/Compat: " + rel + " -> " + mod);
+                    }
+                }
+                if (!"Compat".equals(domain)) {
+                    check(!src.contains("getActivatedMods"), "getActivatedMods forbidden outside Compat/: " + rel);
+                }
+                if (!"shared/EmberRoutes/Kernel.lua".equals(rel) && !"client/EmberRoutes/Boot.lua".equals(rel)) {
+                    check(!eventsAddPat.matcher(src).find(), "Direct Events.*.Add forbidden outside Boot/Kernel: " + rel);
+                    check(!rawDisablePat.matcher(src).find(), "Direct disableWorldMenu write forbidden: " + rel);
+                }
+            }
+        }
     }
 }

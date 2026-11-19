@@ -1,5 +1,5 @@
 local Kernel = require "EmberRoutes/Kernel"
-require "EmberRoutes/SettlementStore"
+require "EmberRoutes/Settlement/SettlementStore"
 
 local WarehouseWatcher = {}
 

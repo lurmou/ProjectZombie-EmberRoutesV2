@@ -1,8 +1,8 @@
 local Kernel = require "EmberRoutes/Kernel"
 
-require "EmberRoutes/SettlementStore"
-require "EmberRoutes/WarehouseWatcher"
-require "EmberRoutes/DebugContextMenu"
+require "EmberRoutes/Settlement/SettlementStore"
+require "EmberRoutes/Warehouse/WarehouseWatcher"
+require "EmberRoutes/UI/DebugContextMenu"
 
 local Boot = {}
 

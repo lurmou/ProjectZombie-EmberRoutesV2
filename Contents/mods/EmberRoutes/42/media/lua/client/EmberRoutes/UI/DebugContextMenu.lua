@@ -1,8 +1,8 @@
 local Kernel = require "EmberRoutes/Kernel"
-local SettlementStore = require "EmberRoutes/SettlementStore"
-local ZoneOverlay = require "EmberRoutes/ZoneOverlay"
-local ZoneEditorPanel = require "EmberRoutes/ZoneEditorPanel"
-local DebugWarehousePanel = require "EmberRoutes/DebugWarehousePanel"
+local SettlementStore = require "EmberRoutes/Settlement/SettlementStore"
+local ZoneOverlay = require "EmberRoutes/UI/ZoneOverlay"
+local ZoneEditorPanel = require "EmberRoutes/UI/ZoneEditorPanel"
+local DebugWarehousePanel = require "EmberRoutes/UI/DebugWarehousePanel"
 
 local function appendSquareContainerPrivacyOptions(sub, actor, gx, gy, z)
     local cell = getCell and getCell()

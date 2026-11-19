@@ -62,12 +62,12 @@ flowchart TD
 
 ### 跨语言硬性边界
 
-1. **L0 字节码补丁层（`emberroutes.patches.*`）**：
-   - 只做最薄的无损钩子（`@Patch.OnEnter` / `@Patch.OnExit`），严禁修改原版方法返回值或吞掉原版调用（参考 [Patch_ItemContainer.java](../java-src/src/main/java/emberroutes/patches/Patch_ItemContainer.java)）；
-   - 因区块流式加载可能在后台线程触发 `ItemContainer.load`，补丁内**严禁触碰非线程安全的 `KahluaTable` 或调用 Lua 闭包**，只能写入并发无锁结构（如 [ContainerDirtyQueue.java](../java-src/src/main/java/emberroutes/ContainerDirtyQueue.java)）。
+1. **L0 字节码补丁层（根包 `emberroutes.Patch_*`）**：
+   - 因 ZombieBuddy `PatchEngine.collectPatches` 仅按根包精确匹配扫描，**所有 `Patch_*` 类必须严格留在根包 `emberroutes` 下**；只做最薄的无损钩子（`@Patch.OnEnter` / `@Patch.OnExit`），严禁修改原版方法返回值或吞掉原版调用（参考 [Patch_ItemContainer.java](../java-src/src/main/java/emberroutes/Patch_ItemContainer.java)）；
+   - 因区块流式加载可能在后台线程触发 `ItemContainer.load`，补丁内**严禁触碰非线程安全的 `KahluaTable` 或调用 Lua 闭包**，只能写入并发无锁结构（如 [ContainerDirtyQueue.java](../java-src/src/main/java/emberroutes/warehouse/ContainerDirtyQueue.java)）。
    - Gradle 的 ArchUnit 测试检查 `Patch_ItemContainer` 及其内部类不直接依赖 Kahlua 类；它不能证明间接调用或运行时线程安全，仍须审查完整调用链。
 2. **L1 Java 底座层（`emberroutes.*`）**：
-   - 独占承担大规模格点遍历、全楼层世界容器聚合（[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/WarehouseFastIndex.java)）、`IsoRegions` 屋顶封闭查询（[EmberRoutesBridge.java](../java-src/src/main/java/emberroutes/EmberRoutesBridge.java)）、C++ `PathfindNative` 路径拉直与 `ByteBuffer` 实体存读档；
+   - 独占承担大规模格点遍历、全楼层世界容器聚合（[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/warehouse/WarehouseFastIndex.java)）、`IsoRegions` 屋顶封闭查询（[EmberRoutesBridge.java](../java-src/src/main/java/emberroutes/EmberRoutesBridge.java)）、C++ `PathfindNative` 路径拉直与 `ByteBuffer` 实体存读档；
    - Java 层对具体第三方工坊模组保持 **0 硬编码感知**，但向 Lua 暴露规则覆盖入口（如物品分类覆盖表），避免在 Java 中写死封闭白名单。
 3. **L2 微内核与 L3 插件层（Lua）**：
    - 负责会话生命周期编排、领域规则配置、原子动作调度、UI 投影展示及第三方模组桥接。
@@ -84,9 +84,9 @@ flowchart TD
 | :--- | :--- |
 | `EmberRoutes.plugin(def)` | 登记插件声明：`{ name = string, inject = string[]?, optional = string[]?, when = (fun():boolean)?, apply = fun(ctx) }`。文件 `require` 期仅入表登记，**0 运行时副作用**。 |
 | `ctx:provide(name, service)` | 在当前存档会话根上下文注册唯一权威服务（如 `'settlements'`、`'warehouse'`、`'work'`）。重名覆盖直接报错拒绝，防止静默篡改。 |
-| `ctx:effect(fn)` | 注册可逆副作用：`fn` 可直接作为清理函数，或执行初始化后返回 `cleanupFn`。销毁时严格按 **LIFO（后进先出）** 顺序调用，每个清理器独立 `pcall` 捕获异常并写日志，单点失败绝不阻断后续资源释放。 |
+| `ctx:effect(fn)` / `ctx:defer(cleanupFn)` | 注册可逆副作用：`effect(fn)` 执行初始化并捕获其返回的 `cleanupFn`，`defer(cleanupFn)` 直接压入清理闭包。销毁时严格按 **LIFO（后进先出）** 顺序调用，每个清理器独立 `pcall` 捕获异常并写日志，单点失败绝不阻断后续资源释放。 |
 | `ctx:on(eventObj, handler)` | 安全绑定 PZ 原版事件（如 `ctx:on(Events.OnTick, onTick)`），内部立即执行 `eventObj.Add(handler)` 并在当前作用域压入 `eventObj.Remove(handler)` 清理器。 |
-| `ctx:subscribe(store, fn)` | 适配数据层监听（如 [SettlementStore.lua](../Contents/mods/EmberRoutes/42/media/lua/shared/EmberRoutes/SettlementStore.lua)），要求所有监听注册接口统一返回幂等 `dispose()` 闭包并自动纳入当前作用域回收。 |
+| `ctx:subscribe(store, fn)` | 适配数据层监听（如 [SettlementStore.lua](../Contents/mods/EmberRoutes/42/media/lua/shared/EmberRoutes/Settlement/SettlementStore.lua)），要求所有监听注册接口统一返回幂等 `dispose()` 闭包并自动纳入当前作用域回收。 |
 | `ctx:acquireGlobalFlag(tbl, key, val)` | **全局状态引用计数守卫**：针对 `ISWorldObjectContextMenu.disableWorldMenu` 等多模组共享全局布尔位，首次获取时快照外部原始值并写入 `val`；仅当本模组内所有持有作用域均释放后才还原初始值，杜绝盲写 `false` 踩坏其他模组状态。 |
 | `ctx:wrap(tbl, method, factory)` | **安全方法包装器**：包装原版或全局表函数（如 `HaloTextHelper`、`ISWidgetHandCraftControl`）。作用域卸载时：若 `tbl[method]` 仍为本包装函数则直接恢复原函数；若已被后加载的其他模组二次包装，则切换内部 `active = false` 旁路直通原函数，绝不撕裂后加载模组的调用链。 |
 | `ctx:scope(label)` | 从当前上下文派生轻量级子作用域（用于 UI 窗口、临时选区工具），仅包含 `effect / on / subscribe / acquireGlobalFlag / wrap / dispose` 能力，窗口 `close()` 时调用 `scope:dispose()` 一次性对称清空。 |
@@ -118,9 +118,9 @@ flowchart TD
 
 | 子系统 / 资源类型 | 1. 创建 / 挂载端（Mount & Claim） | 2. 正常释放 / 裁剪端（Normal Release） | 3. 异常打断 / 卸载 / 读档端（Interrupt & Teardown） |
 | :--- | :--- | :--- | :--- |
-| **存档会话与全局事件**<br>（现 [WarehouseWatcher.lua](../Contents/mods/EmberRoutes/42/media/lua/client/EmberRoutes/WarehouseWatcher.lua#L24-L40)、[DebugContextMenu.lua](../Contents/mods/EmberRoutes/42/media/lua/client/EmberRoutes/DebugContextMenu.lua#L59)） | `OnInitGlobalModData` / `OnGameStart` 触发 `Kernel.boot()`，经 `ctx:on` 统一挂载 `OnTick`、`LoadGridsquare`、右键菜单钩子 | 插件显式停用时调用对应 Fiber `dispose()`，触发 `Events.*.Remove` | `OnMainMenuEnter` 触发根 `ctx:dispose()` LIFO 全量解绑 + [EmberRoutesBridge.java](../java-src/src/main/java/emberroutes/EmberRoutesBridge.java#L24-L27) `reset()` 清空跨档缓存 |
-| **据点领地与容器索引**<br>（现 [SettlementStore.lua](../Contents/mods/EmberRoutes/42/media/lua/shared/EmberRoutes/SettlementStore.lua#L94-L195)、[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/WarehouseFastIndex.java#L280-L401)） | `commitSettlement` 写入 `ModData` 并调 `syncSettlementAreas` 扫描领地内 `minLevel..maxLevel` 全楼层容器 | `trimTerritory` 裁剪移出格贡献；`deleteSettlement` 调 `invalidateSettlementWarehouse` 摘除整个据点 | 区块卸载 `ReuseGridsquare` 标为 `CONTAINER_UNLOADED`；退档/重进存档由 `reconcileAndMountAll` 先 `reset()` 再按持久矩形重挂载 |
-| **UI 窗口与全局开关**<br>（现 [ZoneEditorPanel.lua](../Contents/mods/EmberRoutes/42/media/lua/client/EmberRoutes/ZoneEditorPanel.lua#L250-L314)、[DebugWarehousePanel.lua](../Contents/mods/EmberRoutes/42/media/lua/client/EmberRoutes/DebugWarehousePanel.lua#L275-L330)） | `Panel.open` 创建 `self.scope = ctx:scope(...)`，通过 `scope:acquireGlobalFlag` 锁定 `disableWorldMenu` 并订阅 `SettlementStore` | 玩家点击保存/取消或按 `ESC` 调 `self:close()`，触发 `self.scope:dispose()` 对称解绑订阅并按引用计数恢复 `disableWorldMenu` | 面板回调异常或直接退回主菜单时，父级根 `ctx:dispose()` 兜底强制销毁所有存活子 `scope`，确保 `disableWorldMenu` 绝不卡死 |
+| **存档会话与全局事件**<br>（现 [WarehouseWatcher.lua](../Contents/mods/EmberRoutes/42/media/lua/client/EmberRoutes/Warehouse/WarehouseWatcher.lua)、[DebugContextMenu.lua](../Contents/mods/EmberRoutes/42/media/lua/client/EmberRoutes/UI/DebugContextMenu.lua)） | `OnInitGlobalModData` / `OnGameStart` 触发 `Kernel.boot()`，经 `ctx:on` 统一挂载 `OnTick`、`LoadGridsquare`、右键菜单钩子 | 插件显式停用时调用对应 Fiber `dispose()`，触发 `Events.*.Remove` | `OnMainMenuEnter` 触发根 `ctx:dispose()` LIFO 全量解绑 + [EmberRoutesBridge.java](../java-src/src/main/java/emberroutes/EmberRoutesBridge.java#L27-L31) `reset()` 清空跨档缓存 |
+| **据点领地与容器索引**<br>（现 [SettlementStore.lua](../Contents/mods/EmberRoutes/42/media/lua/shared/EmberRoutes/Settlement/SettlementStore.lua)、[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/warehouse/WarehouseFastIndex.java)） | `commitSettlement` 写入 `ModData` 并调 `syncSettlementAreas` 扫描领地内 `minLevel..maxLevel` 全楼层容器 | `trimTerritory` 裁剪移出格贡献；`deleteSettlement` 调 `invalidateSettlementWarehouse` 摘除整个据点 | 区块卸载 `ReuseGridsquare` 标为 `CONTAINER_UNLOADED`；退档/重进存档由 `reconcileAndMountAll` 先 `reset()` 再按持久矩形重挂载 |
+| **UI 窗口与全局开关**<br>（现 [ZoneEditorPanel.lua](../Contents/mods/EmberRoutes/42/media/lua/client/EmberRoutes/UI/ZoneEditorPanel.lua)、[DebugWarehousePanel.lua](../Contents/mods/EmberRoutes/42/media/lua/client/EmberRoutes/UI/DebugWarehousePanel.lua)） | `Panel.open` 创建 `self.scope = ctx:scope(...)`，通过 `scope:acquireGlobalFlag` 锁定 `disableWorldMenu` 并订阅 `SettlementStore` | 玩家点击保存/取消或按 `ESC` 调 `self:close()`，触发 `self.scope:dispose()` 对称解绑订阅并按引用计数恢复 `disableWorldMenu` | 面板回调异常或直接退回主菜单时，父级根 `ctx:dispose()` 兜底强制销毁所有存活子 `scope`，确保 `disableWorldMenu` 绝不卡死 |
 | **NPC 躯壳、软锁与借用工具**<br>（M2–M3 规划契约） | `NpcManager` 生成非玩家槽 `IsoNPC`；工作前打 `30s` 内存软预约锁，借用工具在 `item:getModData()` 写轻量来源戳 | 动作正常走完交付入仓，释放内存软预约；空闲时归还工具并将来源戳置 `nil` 恢复原版 RLE 压缩 | 饥饿/遇敌抢占直接停动画（`3.0s` 起身硬超时复位），内存软锁立即失效；离屏 `phaseOut` / `GameWindow.save` 写 `ByteBuffer` 快照，下次空闲自动归还带戳工具 |
 
 ---
@@ -133,7 +133,7 @@ flowchart TD
 
 1. **原件实例 100% 守恒**：全链路操作真实 `InventoryItem`、`ItemContainer` 与 `BaseVehicle` 实例，保留原 `id`、耐久、流体、配件与第三方模组写入的 `ModData`；严禁“删物按 `fullType` 重刷”或触碰封闭的 `item:getAttributes()`。
 2. **数据驱动的分类规则链（替代硬编码字符串）**：
-   - 演进方向：将 [WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/WarehouseFastIndex.java#L60-L97) 的分类逻辑升级为 **「Lua/外部插件显式规则表优先 $\rightarrow$ B42 原版 `ItemTag` / `Food` / `FluidContainer` 属性推导 $\rightarrow$ `Category / DisplayCategory` 兜底」**；
+   - 演进方向：将 [WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/warehouse/WarehouseFastIndex.java) 的分类逻辑升级为 **「Lua/外部插件显式规则表优先 $\rightarrow$ B42 原版 `ItemTag` / `Food` / `FluidContainer` 属性推导 $\rightarrow$ `Category / DisplayCategory` 兜底」**；
    - 任何模组物品只要遵循 B42 原版脚本属性或 `ItemTag` 即自动归类；极端非标物品由轻量 `Compat` 插件注入分类映射，无需改动 Java 核心。
 3. **复用原版世界与配方语义**：工坊制作走原版 `HandcraftLogic / CraftLogic`，商队路网读 `WorldMapStreets`（自动兼容含 `streets.xml` 的第三方地图模组），真车虚实转换走 `VehiclesDB2` + `BaseVehicle.save(ByteBuffer)`（自动兼容第三方载具模组）。
 
@@ -223,9 +223,9 @@ EmberRoutesV2/
 │   └── V1_RETROSPECTIVE_AND_MIGRATION.md               # L2 V1 遗产盘点、踩坑台账与缺陷根治对照
 │
 ├── java-src/src/main/java/emberroutes/
-│   ├── Main.java                                       # ZombieBuddy 入口（织入 patches + 暴露桥接门面）
+│   ├── Main.java                                       # ZombieBuddy 入口（织入根包 @Patch + 暴露桥接门面）
 │   ├── EmberRoutesBridge.java                          # Lua 静态桥接门面（EmberRoutesJava，只做薄委托）
-│   ├── patches/                                        # L0 字节码无损传感器（Patch_ItemContainer 等）
+│   ├── Patch_*.java                                    # L0 字节码无损传感器（ZombieBuddy 根包铁律，Patch_* 须留根包）
 │   ├── warehouse/                                      # 世界容器脏队列、2D 领地空间查表与增量仓储索引
 │   ├── npc/                                            # [M2+] IsoNPC 躯壳、ByteBuffer 快照与寻路运动实现
 │   ├── caravan/                                        # [M6 按需] 路网拓扑与 VehiclesDB2 真车虚实封装

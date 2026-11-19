@@ -2,8 +2,8 @@ local EmberUI = require "EmberUI"
 local UI = EmberUI.UI
 local Theme = EmberUI.Theme
 
-local Geometry = require "EmberRoutes/SettlementGeometry"
-local SettlementStore = require "EmberRoutes/SettlementStore"
+local Geometry = require "EmberRoutes/Settlement/SettlementGeometry"
+local SettlementStore = require "EmberRoutes/Settlement/SettlementStore"
 local Kernel = require "EmberRoutes/Kernel"
 
 local ZoneEditorPanel = {}

@@ -1,4 +1,4 @@
-local Geometry = require "EmberRoutes/SettlementGeometry"
+local Geometry = require "EmberRoutes/Settlement/SettlementGeometry"
 local Kernel = require "EmberRoutes/Kernel"
 
 local SettlementStore = {}

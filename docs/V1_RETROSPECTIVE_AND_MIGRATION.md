@@ -86,7 +86,7 @@
 | V1 决策编号与主题 | V1 当时的背景与初衷 | V1 实际落地暴露的副作用 | V2 的正式裁决与替代设计 |
 | :--- | :--- | :--- | :--- |
 | **DEC-001**<br>单业务链切分纪律 | 防止按代码目录切任务导致半截子工程 | 方向正确，但后期多会话并行开发打破了单链实机验收节奏 | **强化升级**：固化为 [MODULE_MAP.md](MODULE_MAP.md) 的 M1–M6 串行实机门禁，M4 严格一次只接一个工种 |
-| **DEC-002 / 008**<br>版本化不可变快照 | 消灭跨层深拷贝开销与并发读写脏数据 | Lua 层仍残留不少状态包装与 `UPDATING` 中间态假死 | **下沉 Java 极简化**：如 [WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/WarehouseFastIndex.java#L580-L585) 直接维护 `revision` + 常驻只读 `front` 快照表 |
+| **DEC-002 / 008**<br>版本化不可变快照 | 消灭跨层深拷贝开销与并发读写脏数据 | Lua 层仍残留不少状态包装与 `UPDATING` 中间态假死 | **下沉 Java 极简化**：如 [WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/warehouse/WarehouseFastIndex.java) 直接维护 `revision` + 常驻只读 `front` 快照表 |
 | **DEC-003**<br>废除双实现，收敛单一权威 | 早期 Lua/Java 双实现按 `resources>=4` 切换，维护两套不变量极易分叉 | 收敛方向完全正确，但把 `JobStore` 事务写进 Java `LaborCommitKernel` 仍背负了沉重账本 | **保留“单实现零 fallback”，剥离事务账本**：Java 专职空间/容器索引、寻路与 `ByteBuffer` 快照；Lua 专职规则与轻量调度 |
 | **DEC-004**<br>`Claims` 与 `Obligation` 双持久账本 | 试图保证任意断电/异常下工具、持货、炉火责任可证明结清 | **V1 最大复杂度源头**：催生 `COLD_ADOPT_FAILED`、`RECONCILE_REQUIRED`、`CommitFence`，异常即冻结据点 | **彻底废弃**：物理原件本就存于世界容器或 `IsoNPC` 真实背包中；改用 **内存 `30s` 软预约 + 工具自身 `ModData` 来源戳空闲归还** |
 | **DEC-005**<br>资产唯一结算入口（离屏接缝） | 防止宏观模拟与在场实体双写复制物品 | 原则完全正确，是商队虚实转换的安全底线 | **完整保留核心不变量**：在场期仅实体操作实物；离屏 `phaseOut` 卸载实体入 `VehiclesDB2 / ByteBuffer` 后才移交宏观路线推进 |
@@ -136,7 +136,7 @@
 ### 顽疾 6：目录无序平铺、全局钩子泄漏与第三方模组互踩
 - **V1 & V2 M1 早期病灶**：
   1. **目录缺乏适度归类**：V1 的 `emberroutes/probe/` 平铺 50+ 个 Java 文件、`UI/` 单目录堆积 132 个 Lua 文件；而 V2 M1 初版也把所有 Lua 脚本与 Java 类全部直接平铺在根目录；
-  2. **全局副作用裸奔**：散装 `Events.*.Add` 无卸载、裸写 `ISWorldObjectContextMenu.disableWorldMenu = false`、`prerender` 内无意调 `SettlementStore.list()` 新建临时表、[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/WarehouseFastIndex.java#L60-L97) 硬编码英文物品子串分类。
+  2. **全局副作用裸奔**：散装 `Events.*.Add` 无卸载、裸写 `ISWorldObjectContextMenu.disableWorldMenu = false`、`prerender` 内无意调 `SettlementStore.list()` 新建临时表、[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/warehouse/WarehouseFastIndex.java) 硬编码英文物品子串分类。
 - **V2 根治设计（[ARCHITECTURE.md](ARCHITECTURE.md) §3 & §7 微内核 + 按需分层目录）**：
   - **实用主义领域分包**：不设死板的文件数上限或单文件套壳，但拒绝把所有业务堆在根目录——核心入口（`Main.java` / `EmberRoutesBridge.java`、`Kernel.lua` / `Boot.lua`）留根，业务代码按 `warehouse / npc / patches` 与 `Settlement / Warehouse / Npc / Work / UI / Compat` 自然归类，后续随模块增长与维护需要再渐进拆分子目录；
   - **微内核生命周期托管**：统一经 `Kernel.lua` 托管会话级 `ctx:on / ctx:effect / ctx:wrap` 与面板级 `ctx:scope` + `acquireGlobalFlag` 引用计数守卫；分类升级为“插件规则链 + B42 原版 `ItemTag` 优先”，第三方模组适配全部隔离在 `Compat/<ModKey>.lua` 内按需挂载、退档逆序清零。

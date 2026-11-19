@@ -4,9 +4,9 @@ local Theme = EmberUI.Theme
 local Chrome = EmberUI.Chrome
 local CachedList = require "EmberUI/Widgets/CachedList"
 
-local SettlementStore = require "EmberRoutes/SettlementStore"
-local Geometry = require "EmberRoutes/SettlementGeometry"
-local ZoneEditorPanel = require "EmberRoutes/ZoneEditorPanel"
+local SettlementStore = require "EmberRoutes/Settlement/SettlementStore"
+local Geometry = require "EmberRoutes/Settlement/SettlementGeometry"
+local ZoneEditorPanel = require "EmberRoutes/UI/ZoneEditorPanel"
 local Kernel = require "EmberRoutes/Kernel"
 
 local DebugWarehousePanel = {}
