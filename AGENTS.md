@@ -8,6 +8,8 @@
 - **原版 B42 全链路源码前置通读（严禁碎片化摸象）**：本机完整可读 Java 反编译源码位于 `D:/Software/GameApp/steam/steamapps/common/ProjectZomboid/zombie反编译源码`，原版动画树位于 `.../media/AnimSets`，原版 Lua 位于 `.../media/lua`（详见 [.agents/rules/vanilla-full-chain-audit.md](.agents/rules/vanilla-full-chain-audit.md)）。凡涉及引擎机制（运动、动画、TimedAction、战斗、容器、载具、UI），**动工前必须直接在 `zombie反编译源码` 中一次性通读从入口到结算的完整端到端调用链与真玩家原生分支**；严禁拿 `javap -c` 切局部片段盲人摸象，严禁未核清原版默认参数与门控条件就塞魔法倍率让用户反复实机试错。
 - **异常反馈三步法**：收到报错或交互异常反馈时，严禁直接打补丁改代码；必须先查日志（`C:/Users/MuMu/Zomboid/console.txt`）与调用链定位根因，给出至少 2 个方案权衡，**等用户确认选型后再改代码**。
 - **方案闭环三要素**：系统性方案必须明确指出「创建/挂载端」「正常释放/裁剪端」「异常打断/卸载/读档端」的代码位置。
+- **进度同步单一权威（Linear）**：项目需求、里程碑（M1–M6）、任务状态与验收进度**统一通过 Linear（团队 `EmberRoutesV2` / Key `EMB`，项目 `EmberRoutes V2`）同步维护**；**严禁在本地新建进度单、状态台账或开发流水文档**。
+- **协作入口**：涉及开发、PR 或 Linear 任务时，先读取并执行 [Linear–GitHub 工作流](.agents/rules/linear-github-workflow.md)；纯只读排查和仅入库依照其中的旁路处理。
 
 ## 2. 核心架构与边界红线
 
