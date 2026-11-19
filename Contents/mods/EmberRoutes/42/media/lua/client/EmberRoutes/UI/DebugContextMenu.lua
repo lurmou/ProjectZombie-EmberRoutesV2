@@ -1,3 +1,4 @@
+local EmberUI = require "EmberUI"
 local Kernel = require "EmberRoutes/Kernel"
 local SettlementStore = require "EmberRoutes/Settlement/SettlementStore"
 local ZoneOverlay = require "EmberRoutes/UI/ZoneOverlay"
@@ -86,6 +87,10 @@ local function onFillWorldMenu(playerIndex, context, worldobjects, test)
         or getText("ContextMenu_ER_ShowBorders")
     sub:addOption(borderLabel, actor, function()
         ZoneOverlay.toggleVisible()
+    end)
+
+    sub:addOption(getText("ContextMenu_ER_ThemeSettings"), actor, function()
+        EmberUI.openThemeSettings("er.warehouse")
     end)
 end
 

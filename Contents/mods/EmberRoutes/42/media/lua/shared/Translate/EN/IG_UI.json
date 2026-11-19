@@ -26,5 +26,14 @@
     "IGUI_ER_EditorAddingFmt": "Expanding %1x%2 (+%3) -> Preview %4 tiles (release Left-Click)",
     "IGUI_ER_EditorErasingFmt": "Erasing %1x%2 (-%3) -> Preview %4 tiles (release Left-Click)",
     "IGUI_ER_EditorSummaryFmt": "Territory Area: %1 tiles (auto-indexes all floors on Save)",
-    "IGUI_ER_MsgRejectedPrefix": "Cannot save: "
+    "IGUI_ER_EditorOverlapFmt": "Overlaps existing settlement [%1] (cannot expand here)",
+    "IGUI_ER_MsgRejectedPrefix": "Cannot save: ",
+    "IGUI_ER_ThemeMod_Warehouse": "Warehouse Panel",
+    "IGUI_ER_ThemeMod_ZoneEditor": "Zone Editor",
+    "IGUI_ER_ThemeCol_CountText": "Item Count Text",
+    "IGUI_ER_ThemeCol_DegradedText": "Degraded Alert Text",
+    "IGUI_ER_ThemeCol_StorageText": "Storage Summary Text",
+    "IGUI_ER_ThemeCol_PatchText": "Engine Stats Text",
+    "IGUI_ER_ThemeCol_EraseActive": "Erase Mode Active Fill",
+    "IGUI_ER_ThemeCol_SummaryText": "Area Summary Text"
 }

@@ -4,6 +4,10 @@ local Kernel, Scope = {}, {}
 local registry, registryIdx, flagGuards, rootCtx = {}, {}, {}, nil
 
 local function noop() end
+local function isTableEmpty(t)
+    for _ in pairs(t) do return false end
+    return true
+end
 local function safeCall(fn, ...)
     local ok, err = pcall(fn, ...)
     if not ok then print("[EmberRoutes.Kernel] cleanup error: " .. tostring(err)) end
@@ -84,7 +88,7 @@ function Scope:acquireGlobalFlag(tbl, key, val)
         rec.count = rec.count - 1
         if rec.count <= 0 then
             tbl[key] = rec.orig; byKey[key] = nil
-            if next(byKey) == nil then flagGuards[tbl] = nil end
+            if isTableEmpty(byKey) then flagGuards[tbl] = nil end
         end
     end)
 end

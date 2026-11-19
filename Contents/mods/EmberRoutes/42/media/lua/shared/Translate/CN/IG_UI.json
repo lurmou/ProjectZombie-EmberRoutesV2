@@ -26,5 +26,14 @@
     "IGUI_ER_EditorAddingFmt": "正在扩建 %1x%2 (+%3 格) -> 预览面积 %4 格 (松手落定)",
     "IGUI_ER_EditorErasingFmt": "正在擦除 %1x%2 (-%3 格) -> 预览剩余 %4 格 (松手落定)",
     "IGUI_ER_EditorSummaryFmt": "当前领地总面积: %1 格 (保存自动贯通全楼层容器)",
-    "IGUI_ER_MsgRejectedPrefix": "无法保存: "
+    "IGUI_ER_EditorOverlapFmt": "与已有据点 [%1] 领地重合，禁止划入",
+    "IGUI_ER_MsgRejectedPrefix": "无法保存: ",
+    "IGUI_ER_ThemeMod_Warehouse": "实时仓储面板",
+    "IGUI_ER_ThemeMod_ZoneEditor": "据点划区编辑器",
+    "IGUI_ER_ThemeCol_CountText": "物资数量文本色",
+    "IGUI_ER_ThemeCol_DegradedText": "降级损毁计数色",
+    "IGUI_ER_ThemeCol_StorageText": "仓储概览文本色",
+    "IGUI_ER_ThemeCol_PatchText": "引擎状态信息色",
+    "IGUI_ER_ThemeCol_EraseActive": "擦除模式高亮底色",
+    "IGUI_ER_ThemeCol_SummaryText": "面积统计文本色"
 }

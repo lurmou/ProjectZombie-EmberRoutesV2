@@ -7,5 +7,6 @@
     "ContextMenu_ER_MarkPrivateFmt": "Mark Private (Exclude Storage): %1",
     "ContextMenu_ER_UnmarkPrivateFmt": "Restore Public (Include Storage): %1",
     "ContextMenu_ER_HideBorders": "Hide Territory Borders",
-    "ContextMenu_ER_ShowBorders": "Show Territory Borders"
+    "ContextMenu_ER_ShowBorders": "Show Territory Borders",
+    "ContextMenu_ER_ThemeSettings": "Theme & UI Style Settings..."
 }

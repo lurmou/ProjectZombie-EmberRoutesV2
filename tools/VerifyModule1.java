@@ -126,11 +126,21 @@ public final class VerifyModule1 {
                 }
                 if ("EmberUI".equals(modName) || modName.startsWith("EmberUI/")) {
                     KahluaTable stub = platform.newTable();
+                    KahluaTable themeStub = platform.newTable();
+                    themeStub.rawset("registerModule", (JavaFunction) (cf, n) -> 0);
+                    themeStub.rawset("getModuleColor", (JavaFunction) (cf, n) -> {
+                        KahluaTable col = platform.newTable();
+                        col.rawset("r", 1.0); col.rawset("g", 1.0); col.rawset("b", 1.0); col.rawset("a", 1.0);
+                        cf.push(col);
+                        return 1;
+                    });
+                    themeStub.rawset("panel", platform.newTable());
                     stub.rawset("UI", platform.newTable());
-                    stub.rawset("Theme", platform.newTable());
+                    stub.rawset("Theme", themeStub);
                     stub.rawset("Chrome", platform.newTable());
                     stub.rawset("WindowHost", platform.newTable());
                     stub.rawset("PageLifecycle", platform.newTable());
+                    stub.rawset("openThemeSettings", (JavaFunction) (cf, n) -> 0);
                     loaded.rawset(modName, stub);
                     callFrame.push(stub);
                     return 1;
@@ -190,6 +200,7 @@ public final class VerifyModule1 {
                 return 1;
             });
             env.rawset("EmberRoutesJava", javaBridge);
+            env.rawset("next", null);
 
             String testLua = """
                 local function makeEvent()
@@ -241,6 +252,10 @@ public final class VerifyModule1 {
 
                 local sOverlap, err2 = Store.createSettlement("Beta", 102, 205, 110, 210)
                 assert(sOverlap == nil and err2 == "TERRITORY_OVERLAP", "overlap should reject")
+                local conflict = Store.findOverlappingSettlement({ Geo.rectangle(102, 205, 110, 210) }, nil)
+                assert(conflict ~= nil and conflict.id == s1.id, "findOverlappingSettlement must return s1")
+                assert(Store.findOverlappingSettlement({ Geo.rectangle(102, 205, 110, 210) }, s1.id) == nil, "ignoreId must ignore self")
+                assert(Store.findOverlappingSettlement({ Geo.rectangle(500, 500, 505, 505) }, nil) == nil, "disjoint area must return nil")
 
                 local exp, expErr = Store.expandTerritory(s1.id, 104, 200, 107, 202)
                 assert(exp ~= nil and Geo.totalTiles(exp.areas) == 40, "expanded tiles should be 40")
@@ -303,17 +318,28 @@ public final class VerifyModule1 {
                 Events.OnGameStart.fire()
                 assert(#Events.OnTick._handlers == 1, "Kernel.boot must be idempotent across OnGameStart")
 
-                -- Ref-counted acquireGlobalFlag
+                -- Ref-counted acquireGlobalFlag (under Kahlua2 where global `next` is nil)
+                assert(next == nil, "sandbox must mirror B42 Kahlua2 where global `next` is nil")
                 local flagTbl = { disableWorldMenu = "externalModValue" }
                 local scA = Kernel.scope("A")
                 local scB = Kernel.scope("B")
+                local cleanupErrs = {}
+                local origPrint = print
+                print = function(msg)
+                    if tostring(msg):find("cleanup error", 1, true) then
+                        cleanupErrs[#cleanupErrs + 1] = tostring(msg)
+                    end
+                    return origPrint(msg)
+                end
                 scA:acquireGlobalFlag(flagTbl, "disableWorldMenu", true)
                 assert(flagTbl.disableWorldMenu == true, "scA must set flag")
                 scB:acquireGlobalFlag(flagTbl, "disableWorldMenu", true)
                 scA:dispose()
                 assert(flagTbl.disableWorldMenu == true, "flag must stay true while scB holds ref")
                 scB:dispose()
+                print = origPrint
                 assert(flagTbl.disableWorldMenu == "externalModValue", "flag must restore original value on zero refs")
+                assert(#cleanupErrs == 0, "acquireGlobalFlag dispose must produce zero cleanup errors without `next`")
 
                 -- Safe ctx:wrap with secondary mod wrap bypass + direct restore
                 local wrapHost = {

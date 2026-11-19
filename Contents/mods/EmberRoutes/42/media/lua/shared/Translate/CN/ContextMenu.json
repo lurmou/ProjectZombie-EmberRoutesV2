@@ -7,5 +7,6 @@
     "ContextMenu_ER_MarkPrivateFmt": "设为私密容器 (排除公共仓): %1",
     "ContextMenu_ER_UnmarkPrivateFmt": "恢复公共容器 (纳入据点仓): %1",
     "ContextMenu_ER_HideBorders": "隐藏地面领地边框",
-    "ContextMenu_ER_ShowBorders": "显示地面领地边框"
+    "ContextMenu_ER_ShowBorders": "显示地面领地边框",
+    "ContextMenu_ER_ThemeSettings": "界面主题与样式设置..."
 }

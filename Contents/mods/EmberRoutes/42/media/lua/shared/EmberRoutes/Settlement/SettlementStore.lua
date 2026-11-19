@@ -70,19 +70,29 @@ local function syncToJava(record)
     end
 end
 
-local function overlapsOtherSettlement(root, ignoreId, areas)
-    for sid, s in pairs(root.settlements) do
-        if sid ~= ignoreId and type(s.areas) == "table" then
-            for i = 1, #areas do
-                for j = 1, #s.areas do
-                    if Geometry.overlap(areas[i], s.areas[j], 0) then
-                        return true
+function SettlementStore.findOverlappingSettlement(areas, ignoreId)
+    if type(areas) ~= "table" or #areas == 0 then return nil end
+    local root = getRoot()
+    for i = 1, #root.order do
+        local sid = root.order[i]
+        if sid ~= ignoreId then
+            local s = root.settlements[sid]
+            if s and type(s.areas) == "table" then
+                for aIdx = 1, #areas do
+                    local ra = areas[aIdx]
+                    if Geometry.valid(ra) then
+                        for bIdx = 1, #s.areas do
+                            local rb = s.areas[bIdx]
+                            if Geometry.valid(rb) and Geometry.overlap(ra, rb, 0) then
+                                return s
+                            end
+                        end
                     end
                 end
             end
         end
     end
-    return false
+    return nil
 end
 
 function SettlementStore.list()
@@ -125,7 +135,7 @@ function SettlementStore.commitSettlement(settlementId, name, areas)
     end
 
     local root = getRoot()
-    if overlapsOtherSettlement(root, settlementId, compacted) then
+    if SettlementStore.findOverlappingSettlement(compacted, settlementId) ~= nil then
         return nil, "TERRITORY_OVERLAP"
     end
 

@@ -12,6 +12,21 @@ local Kernel = require "EmberRoutes/Kernel"
 local DebugWarehousePanel = {}
 local instance = nil
 
+if Theme.registerModule then
+    Theme.registerModule({
+        id = "er.warehouse",
+        labelKey = "IGUI_ER_ThemeMod_Warehouse",
+        label = "Warehouse Panel",
+        order = 10,
+        colors = {
+            { key = "countText",    labelKey = "IGUI_ER_ThemeCol_CountText",    label = "Item Count Text",      default = "accent" },
+            { key = "degradedText", labelKey = "IGUI_ER_ThemeCol_DegradedText", label = "Degraded Alert Text",  default = "warning" },
+            { key = "storageText",  labelKey = "IGUI_ER_ThemeCol_StorageText",  label = "Storage Summary Text", default = "success" },
+            { key = "patchText",    labelKey = "IGUI_ER_ThemeCol_PatchText",    label = "Engine Stats Text",    default = "accent" },
+        },
+    })
+end
+
 local PanelCtrl = {}
 PanelCtrl.__index = PanelCtrl
 
@@ -33,12 +48,13 @@ local WAREHOUSE_LIST_STYLE = {
         if list.selected == entry.index then
             Chrome.roundedFill(list, 2, y + 1, list.width - 12, h - 2, Theme.selected)
         elseif entry.index % 2 == 0 then
-            list:drawRect(2, y, list.width - 12, h - 1, 0.14, 0.16, 0.20, 0.35)
+            local pt = Theme.panel
+            list:drawRect(2, y, list.width - 12, h - 1, 0.30, pt.r, pt.g, pt.b)
         end
         local vis = entry.item and entry.item.visual
         if vis then
             Theme.text(list, vis.leftText, 8, y + 4, Theme.textColor, UIFont.Small)
-            local rightCol = vis.hasDegraded and Theme.warning or Theme.accent
+            local rightCol = Theme.getModuleColor("er.warehouse", vis.hasDegraded and "degradedText" or "countText")
             list:drawTextRight(vis.rightText, list:getWidth() - 12, y + 4, rightCol.r, rightCol.g, rightCol.b, rightCol.a or 1.0, UIFont.Small)
         end
         return y + h
@@ -339,6 +355,7 @@ function DebugWarehousePanel.open(selectSettlementId)
     local y = 52
     local win = EmberUI.WindowHost:new(x, y, w, h, {
         title = getText("IGUI_ER_PanelTitle"),
+        moduleId = "er.warehouse",
         resizable = false,
         closeOnEscape = true,
         hostProps = { direction = "column", padding = 12, gap = 8 },
@@ -363,8 +380,8 @@ function DebugWarehousePanel.open(selectSettlementId)
     ctrl.btnDelete = UI.Button(getText("IGUI_ER_BtnDeleteSettlement"), ctrl, PanelCtrl.onDeleteSettlement, { h = 24 })
 
     ctrl.lblTerritory = UI.Label("", { h = 18, truncate = true })
-    ctrl.lblStorage = UI.Label("", { h = 18, color = Theme.success, truncate = true })
-    ctrl.lblPatch = UI.Label("", { h = 18, color = Theme.accent, truncate = true })
+    ctrl.lblStorage = UI.Label("", { h = 18, color = Theme.getModuleColor("er.warehouse", "storageText"), truncate = true })
+    ctrl.lblPatch = UI.Label("", { h = 18, color = Theme.getModuleColor("er.warehouse", "patchText"), truncate = true })
     ctrl.loadMeter = UI.StatMeter(0, { h = 10 })
 
     ctrl.itemList = UI.List({
