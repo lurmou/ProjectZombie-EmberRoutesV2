@@ -22,16 +22,40 @@ if Theme.registerModule then
     })
 end
 
+local function isModalBlocking()
+    if not UIManager then return false end
+    if UIManager.isModalVisible and UIManager.isModalVisible() then
+        return true
+    end
+    if UIManager.getModal then
+        local modal = UIManager.getModal()
+        if modal and modal:isVisible() then
+            return true
+        end
+    end
+    return false
+end
+
 local function isPointOverAnyVisibleWindow(mx, my)
+    if type(mx) ~= "number" or type(my) ~= "number" or not UIManager or not UIManager.getUI then
+        return false
+    end
     local uiList = UIManager.getUI()
     if not uiList then return false end
+    local tooltip = UIManager.getToolTip and UIManager.getToolTip() or nil
     for i = 0, uiList:size() - 1 do
         local el = uiList:get(i)
-        if el and el:isVisible() then
-            local ax, ay = el:getX(), el:getY()
-            local aw, ah = el:getWidth(), el:getHeight()
-            if mx >= ax and my >= ay and mx < ax + aw and my < ay + ah then
-                return true
+        if el and el ~= tooltip and el:isVisible() then
+            if el.isPointOver then
+                if el:isPointOver(mx, my) then
+                    return true
+                end
+            else
+                local ax, ay = el:getX(), el:getY()
+                local aw, ah = el:getWidth(), el:getHeight()
+                if mx >= ax and my >= ay and mx < ax + aw and my < ay + ah then
+                    return true
+                end
             end
         end
     end
@@ -45,13 +69,31 @@ end
 local EditorCtrl = {}
 EditorCtrl.__index = EditorCtrl
 
-function EditorCtrl:pickMouseTile()
+function EditorCtrl:isAlive()
+    if self.disposed then return false end
+    if self.scope and self.scope:isDisposed() then return false end
+    if not self.win or self.win.disposed then return false end
+    if self.win.getIsVisible and not self.win:getIsVisible() then return false end
+    return true
+end
+
+function EditorCtrl:clearDragState()
+    self.dragging = false
+    self._mouseInitiatedDrag = false
+    self.anchorX = nil
+    self.anchorY = nil
+    self.dragRect = nil
+    self.dragConflict = nil
+end
+
+function EditorCtrl:pickMouseTile(mx, my)
     local actor = getSpecificPlayer(0)
     if not actor then return nil, nil, 0 end
     local z = math.floor(actor:getZ())
-    local mx, my = getMouseX(), getMouseY()
-    local gx = math.floor(screenToIsoX(0, mx, my, z))
-    local gy = math.floor(screenToIsoY(0, mx, my, z))
+    local sx = mx or getMouseX()
+    local sy = my or getMouseY()
+    local gx = math.floor(screenToIsoX(0, sx, sy, z))
+    local gy = math.floor(screenToIsoY(0, sx, sy, z))
     return gx, gy, z
 end
 
@@ -89,6 +131,9 @@ end
 
 --- 仅在网格选点/模式/撤销变更时向 Java TerritoryRenderer 推送一次（渲染帧零 Lua 调用）。
 function EditorCtrl:pushEditorRenderState()
+    if self.disposed or (self.scope and self.scope:isDisposed()) or (self.win and self.win.disposed) then
+        return
+    end
     self.previewAreas = self:computePreviewAreas()
     self.previewTiles = Geometry.totalTiles(self.previewAreas)
     self.baseTiles = Geometry.totalTiles(self.areas)
@@ -174,7 +219,141 @@ function EditorCtrl:onClear()
     self.statusDirty = true
 end
 
+function EditorCtrl:finishDrag()
+    if self.dragging and self.dragRect then
+        if self.dragConflict then
+            self.errorMsg = getText("IGUI_ER_EditorOverlapFmt", tostring(self.dragConflict.name))
+        else
+            if #self.history >= 16 then
+                table.remove(self.history, 1)
+            end
+            self.history[#self.history + 1] = Geometry.cloneAreas(self.areas)
+            self.areas = self:computePreviewAreas()
+            self.errorMsg = nil
+            self:refreshButtonStyles()
+        end
+    end
+    self:clearDragState()
+    self:updateHoverConflict()
+    self:pushEditorRenderState()
+    self.statusDirty = true
+end
+
+function EditorCtrl:onWorldMouseDown(mx, my)
+    if not self:isAlive() or (self.win and self.win.moving) or isModalBlocking() then
+        return
+    end
+    local sx = mx or getMouseX()
+    local sy = my or getMouseY()
+    if isPointOverAnyVisibleWindow(sx, sy) then
+        return
+    end
+    local gx, gy, gz = self:pickMouseTile(sx, sy)
+    if not gx then return end
+
+    local startRect = Geometry.rectangle(gx, gy, gx, gy)
+    local conflict = self:findRectConflict(startRect)
+    if conflict then
+        self.cursorX = gx
+        self.cursorY = gy
+        self.cursorValid = true
+        self.previewZ = gz
+        self.cursorConflict = conflict
+        self.errorMsg = getText("IGUI_ER_EditorOverlapFmt", tostring(conflict.name))
+        self:pushEditorRenderState()
+        self.statusDirty = true
+        return
+    end
+
+    self.anchorX = gx
+    self.anchorY = gy
+    self.cursorX = gx
+    self.cursorY = gy
+    self.cursorValid = true
+    self.cursorConflict = nil
+    self.previewZ = gz
+    self.dragging = true
+    self._mouseInitiatedDrag = true
+    self.dragRect = startRect
+    self.dragConflict = nil
+    self.errorMsg = nil
+    self:pushEditorRenderState()
+    self.statusDirty = true
+end
+
+function EditorCtrl:onWorldMouseMove(mx, my)
+    if not self:isAlive() or (self.win and self.win.moving) then
+        return
+    end
+    local sx = mx or getMouseX()
+    local sy = my or getMouseY()
+    if self.dragging and self._mouseInitiatedDrag and type(isMouseButtonDown) == "function" and not isMouseButtonDown(0) then
+        self:finishDrag()
+        return
+    end
+    local overWindow = (not self.dragging) and (isModalBlocking() or isPointOverAnyVisibleWindow(sx, sy))
+    self._lastUiCheckX = sx
+    self._lastUiCheckY = sy
+    local gx, gy, gz = self:pickMouseTile(sx, sy)
+    if not gx then return end
+    local validNow = not overWindow
+    if gx ~= self.cursorX or gy ~= self.cursorY or gz ~= self.previewZ or validNow ~= self.cursorValid then
+        self.cursorX = gx
+        self.cursorY = gy
+        self.cursorValid = validNow
+        self.previewZ = gz
+        if self.dragging and self.anchorX then
+            local rect = Geometry.rectangle(self.anchorX, self.anchorY, gx, gy)
+            if rect then
+                self.dragRect = rect
+                self.dragConflict = self:findRectConflict(rect)
+            end
+            self.errorMsg = nil
+        else
+            self:updateHoverConflict()
+            if validNow and not self.cursorConflict then
+                self.errorMsg = nil
+            end
+        end
+        self:pushEditorRenderState()
+        self.statusDirty = true
+    end
+end
+
+function EditorCtrl:onWorldMouseUp()
+    if not self:isAlive() then return end
+    if self.dragging then
+        self:finishDrag()
+    end
+end
+
+function EditorCtrl:syncUiGuardTick()
+    if not self:isAlive() then return end
+    if self.dragging and self._mouseInitiatedDrag and type(isMouseButtonDown) == "function" and not isMouseButtonDown(0) then
+        self:finishDrag()
+        return
+    end
+    if not self.dragging and self.cursorValid and type(getMouseX) == "function" and type(getMouseY) == "function" then
+        local mx, my = getMouseX(), getMouseY()
+        if mx ~= self._lastUiCheckX or my ~= self._lastUiCheckY then
+            self._lastUiCheckX = mx
+            self._lastUiCheckY = my
+            if isModalBlocking() or isPointOverAnyVisibleWindow(mx, my) then
+                self.cursorValid = false
+                self.cursorConflict = nil
+                self:pushEditorRenderState()
+                self.statusDirty = true
+            end
+        end
+    end
+end
+
 function EditorCtrl:onSave()
+    if self.dragging then
+        self:clearDragState()
+        self:updateHoverConflict()
+        self:pushEditorRenderState()
+    end
     local name = self.nameEntry and self.nameEntry:getText() or ""
     local targetId = self:getEditingId()
     local saved, err = SettlementStore.commitSettlement(targetId, name, self.areas)
@@ -276,16 +455,20 @@ function ZoneEditorPanel.open(editingSettlement, onSavedCallback)
         editingSettlement = editingSettlement,
         onSavedCallback = onSavedCallback,
         scope = scope,
+        disposed = false,
         mode = "add",
         areas = editingSettlement and Geometry.cloneAreas(editingSettlement.areas) or {},
         history = {},
         dragging = false,
+        _mouseInitiatedDrag = false,
         dragRect = nil,
         dragConflict = nil,
         cursorX = 0,
         cursorY = 0,
         cursorValid = false,
         cursorConflict = nil,
+        _lastUiCheckX = nil,
+        _lastUiCheckY = nil,
         previewZ = 0,
         statusDirty = true,
         lineHint = "",
@@ -294,6 +477,10 @@ function ZoneEditorPanel.open(editingSettlement, onSavedCallback)
     }, EditorCtrl)
 
     scope:defer(function()
+        ctrl.disposed = true
+        ctrl:clearDragState()
+        ctrl.cursorValid = false
+        ctrl.cursorConflict = nil
         if EmberRoutesJava and EmberRoutesJava.clearZoneEditorState then
             EmberRoutesJava.clearZoneEditorState()
         end
@@ -360,102 +547,36 @@ function ZoneEditorPanel.open(editingSettlement, onSavedCallback)
     })
     win:setContentSpec(spec)
 
-    win.onMouseDownOutside = function(_, x, y)
-        local mx, my = getMouseX(), getMouseY()
-        if isPointOverAnyVisibleWindow(mx, my) then
-            return false
-        end
-        local gx, gy, gz = ctrl:pickMouseTile()
-        if not gx then return false end
-
-        local startRect = Geometry.rectangle(gx, gy, gx, gy)
-        local conflict = ctrl:findRectConflict(startRect)
-        if conflict then
-            ctrl.cursorX = gx
-            ctrl.cursorY = gy
-            ctrl.cursorValid = true
-            ctrl.previewZ = gz
-            ctrl.cursorConflict = conflict
-            ctrl.errorMsg = getText("IGUI_ER_EditorOverlapFmt", tostring(conflict.name))
-            ctrl:pushEditorRenderState()
-            ctrl.statusDirty = true
-            return true
-        end
-
-        ctrl.anchorX = gx
-        ctrl.anchorY = gy
-        ctrl.cursorX = gx
-        ctrl.cursorY = gy
-        ctrl.cursorValid = true
-        ctrl.cursorConflict = nil
-        ctrl.previewZ = gz
-        ctrl.dragging = true
-        ctrl.dragRect = startRect
-        ctrl.dragConflict = nil
-        ctrl.errorMsg = nil
-        ctrl:pushEditorRenderState()
-        ctrl.statusDirty = true
-        return true
+    if Events and Events.OnMouseDown then
+        scope:on(Events.OnMouseDown, function(mx, my)
+            ctrl:onWorldMouseDown(mx, my)
+        end)
+    end
+    if Events and Events.OnMouseMove then
+        scope:on(Events.OnMouseMove, function(mx, my)
+            ctrl:onWorldMouseMove(mx, my)
+        end)
+    end
+    if Events and Events.OnMouseUp then
+        scope:on(Events.OnMouseUp, function()
+            ctrl:onWorldMouseUp()
+        end)
     end
 
-    win.onMouseMoveOutside = function(_, dx, dy)
-        local mx, my = getMouseX(), getMouseY()
-        local overWindow = (not ctrl.dragging) and isPointOverAnyVisibleWindow(mx, my)
-        local gx, gy, gz = ctrl:pickMouseTile()
-        if not gx then return end
-        local validNow = not overWindow
-        if gx ~= ctrl.cursorX or gy ~= ctrl.cursorY or gz ~= ctrl.previewZ or validNow ~= ctrl.cursorValid then
-            ctrl.cursorX = gx
-            ctrl.cursorY = gy
-            ctrl.cursorValid = validNow
-            ctrl.previewZ = gz
-            if ctrl.dragging and ctrl.anchorX then
-                local rect = Geometry.rectangle(ctrl.anchorX, ctrl.anchorY, gx, gy)
-                if rect then
-                    ctrl.dragRect = rect
-                    ctrl.dragConflict = ctrl:findRectConflict(rect)
-                end
-                ctrl.errorMsg = nil
-            else
-                ctrl:updateHoverConflict()
-                if validNow and not ctrl.cursorConflict then
-                    ctrl.errorMsg = nil
-                end
-            end
-            ctrl:pushEditorRenderState()
-            ctrl.statusDirty = true
+    local baseUpdate = win.update or (EmberUI.WindowHost and EmberUI.WindowHost.update)
+    win.update = function(self)
+        if type(baseUpdate) == "function" then
+            baseUpdate(self)
         end
+        ctrl:syncUiGuardTick()
     end
 
-    win.onMouseUpOutside = function(_, x, y)
-        if ctrl.dragging and ctrl.dragRect then
-            if ctrl.dragConflict then
-                ctrl.errorMsg = getText("IGUI_ER_EditorOverlapFmt", tostring(ctrl.dragConflict.name))
-            else
-                if #ctrl.history >= 16 then
-                    table.remove(ctrl.history, 1)
-                end
-                ctrl.history[#ctrl.history + 1] = Geometry.cloneAreas(ctrl.areas)
-                ctrl.areas = ctrl:computePreviewAreas()
-                ctrl.errorMsg = nil
-                ctrl:refreshButtonStyles()
-            end
-        end
-        ctrl.dragging = false
-        ctrl.anchorX = nil
-        ctrl.anchorY = nil
-        ctrl.dragRect = nil
-        ctrl.dragConflict = nil
-        ctrl:updateHoverConflict()
-        ctrl:pushEditorRenderState()
-        ctrl.statusDirty = true
-        return true
-    end
-
-    local basePrerender = EmberUI.WindowHost.prerender
+    local basePrerender = EmberUI.WindowHost and EmberUI.WindowHost.prerender
     win.prerender = function(self)
         ctrl:projectStatusIfDirty()
-        basePrerender(self)
+        if type(basePrerender) == "function" then
+            basePrerender(self)
+        end
     end
 
     ctrl:refreshButtonStyles()

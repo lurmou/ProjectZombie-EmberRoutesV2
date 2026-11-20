@@ -210,10 +210,12 @@ function SettlementStore.deleteSettlement(settlementId)
     return true
 end
 
---- 读档/进游戏同步：清空上一局静态缓存，重新挂载所有已存据点的全楼层世界容器。
+--- 读档/进游戏同步：仅清空仓储与领地渲染缓存（绝不波及 IsoNPC），重新挂载所有已存据点的全楼层世界容器。
 function SettlementStore.reconcileAndMountAll()
     if not EmberRoutesJava then return end
-    EmberRoutesJava.reset()
+    if EmberRoutesJava.resetWarehouse then
+        EmberRoutesJava.resetWarehouse()
+    end
 
     local root = getRoot()
     for i = 1, #root.order do
@@ -225,11 +227,11 @@ function SettlementStore.reconcileAndMountAll()
     notifyChanged()
 end
 
-Kernel.plugin({
-    name = "settlements",
-    provides = { "settlements" },
-    apply = function(ctx)
-        ctx:provide("settlements", SettlementStore)
+Kernel.exposeApi("settlements", SettlementStore)
+Kernel.registerModule({
+    id = "settlements",
+    onModDataReady = function()
+        getRoot()
     end,
 })
 

@@ -283,6 +283,18 @@ public final class PreviewModule1 {
             snap.rawset("rows", rows);
             return cf.push(snap);
         });
+        jb.rawset("getNpcId", (JavaFunction) (cf, n) -> cf.push(null));
+        jb.rawset("isNpcAttached", (JavaFunction) (cf, n) -> cf.push(Boolean.FALSE));
+        jb.rawset("getNpcDisplayName", (JavaFunction) (cf, n) -> cf.push(null));
+        jb.rawset("getNpcObject", (JavaFunction) (cf, n) -> cf.push(null));
+        jb.rawset("loadNpcsFromSave", (JavaFunction) (cf, n) -> cf.push(Double.valueOf(0)));
+        jb.rawset("saveNpcsToSave", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("tickNpcs", (JavaFunction) (cf, n) -> 0);
+        jb.rawset("getNpcInfo", (JavaFunction) (cf, n) -> cf.push(null));
+        jb.rawset("startNpcFollow", (JavaFunction) (cf, n) -> cf.push(Boolean.FALSE));
+        jb.rawset("stopNpcFollow", (JavaFunction) (cf, n) -> cf.push(Boolean.FALSE));
+        jb.rawset("isNpcFollowing", (JavaFunction) (cf, n) -> cf.push(Boolean.FALSE));
+        jb.rawset("getNpcFollowState", (JavaFunction) (cf, n) -> cf.push("INACTIVE"));
         LuaManager.env.rawset("EmberRoutesJava", jb);
 
         String sceneCode = """
@@ -293,7 +305,7 @@ public final class PreviewModule1 {
             local Geo = require "EmberRoutes/Settlement/SettlementGeometry"
             local Panel = require "EmberRoutes/UI/DebugWarehousePanel"
             local Editor = require "EmberRoutes/UI/ZoneEditorPanel"
-            Kernel.boot()
+            Kernel.onWorldReady()
             local s = Store.createSettlement("Rosewood Outpost", 100, 100, 114, 114)
             Store.expandTerritory(s.id, 115, 100, 120, 108)
             Store.trimTerritory(s.id, 104, 104, 108, 108)
@@ -368,6 +380,173 @@ public final class PreviewModule1 {
             _G.__previewWin = nil
             _G.__previewEd = nil
             """);
+
+        renderNpcInventoryPreview(outDir, lang);
+    }
+
+    private static void renderNpcInventoryPreview(Path outDir, String lang) throws Exception {
+        boolean isCn = "CN".equals(lang);
+        KahluaTable mock = LuaManager.platform.newTable();
+        mock.rawset("hdrType", isCn ? "類型" : "Type");
+        mock.rawset("hdrCat", isCn ? "分類" : "Category");
+        mock.rawset("npc1", isCn ? "艾莉絲" : "Alice Mercer");
+        mock.rawset("bag1", isCn ? "登山包" : "Hiking Bag");
+        mock.rawset("npc2", isCn ? "馬庫斯" : "Marcus Vance");
+        mock.rawset("bag2", isCn ? "主物品欄" : "Main Inventory");
+        String[][] mockRowData = isCn ? new String[][] {
+            {"消防斧", "武器", "0.75", "0.45", "0.25"},
+            {"急救繃帶 x4", "醫療", "0.85", "0.32", "0.32"},
+            {"消毒酒精", "醫療", "0.35", "0.72", "0.90"},
+            {"罐頭豆子", "食物", "0.45", "0.80", "0.45"},
+            {"手電筒", "裝備", "0.90", "0.78", "0.30"},
+        } : new String[][] {
+            {"Fire Axe", "Weapon", "0.75", "0.45", "0.25"},
+            {"Bandage x4", "Medical", "0.85", "0.32", "0.32"},
+            {"Disinfectant", "Medical", "0.35", "0.72", "0.90"},
+            {"Canned Beans", "Food", "0.45", "0.80", "0.45"},
+            {"Flashlight", "Gear", "0.90", "0.78", "0.30"},
+        };
+        KahluaTable mockRows = LuaManager.platform.newTable();
+        for (int i = 0; i < mockRowData.length; i++) {
+            KahluaTable r = LuaManager.platform.newTable();
+            r.rawset("name", mockRowData[i][0]);
+            r.rawset("cat", mockRowData[i][1]);
+            r.rawset("r", Double.valueOf(Double.parseDouble(mockRowData[i][2])));
+            r.rawset("g", Double.valueOf(Double.parseDouble(mockRowData[i][3])));
+            r.rawset("b", Double.valueOf(Double.parseDouble(mockRowData[i][4])));
+            mockRows.rawset(Double.valueOf(i + 1), r);
+        }
+        mock.rawset("rows", mockRows);
+        LuaManager.env.rawset("__previewInvMock", mock);
+
+        pcallLua("""
+            local EmberUI = require "EmberUI"
+            local Kernel = require "EmberRoutes/Kernel"
+            local NpcInv = require "EmberRoutes/UI/NpcInventoryPanel"
+            Kernel.onWorldReady()
+            local mock = _G.__previewInvMock
+
+            local function makeMockInventoryWidget(bagSelected)
+                local p = ISPanel:new(0, 0, 380, 420)
+                p.background = false
+                p:initialise()
+                local hdrType = mock.hdrType
+                local hdrCat = mock.hdrCat
+                local rows = mock.rows
+                p.render = function(self)
+                    local w, h = self:getWidth(), self:getHeight()
+                    local btnSize = 36
+                    local paneW = w - btnSize
+                    self:drawRect(0, 0, w, h, 0.78, 0.04, 0.05, 0.07)
+                    self:drawRect(paneW, 0, btnSize, h, 0.70, 0.03, 0.04, 0.05)
+                    self:drawRect(0, 0, paneW, 20, 0.85, 0.09, 0.11, 0.14)
+                    self:drawText(hdrType, 36, 3, 0.82, 0.85, 0.90, 1.0, UIFont.Small)
+                    local catX = math.max(170, paneW - 92)
+                    self:drawText(hdrCat, catX, 3, 0.82, 0.85, 0.90, 1.0, UIFont.Small)
+                    self:drawRectBorder(0, 0, paneW, 20, 0.55, 0.32, 0.35, 0.42)
+                    for idx = 1, #rows do
+                        local row = rows[idx]
+                        local ry = 20 + (idx - 1) * 24
+                        if idx == 2 then
+                            self:drawRect(1, ry, paneW - 2, 23, 0.32, 0.24, 0.48, 0.72)
+                        elseif idx % 2 == 0 then
+                            self:drawRect(1, ry, paneW - 2, 23, 0.35, 0.07, 0.09, 0.12)
+                        end
+                        self:drawRect(8, ry + 4, 16, 16, 0.90, row.r, row.g, row.b)
+                        self:drawText(row.name, 32, ry + 4, 0.92, 0.94, 0.96, 1.0, UIFont.Small)
+                        self:drawText(row.cat, catX, ry + 4, 0.65, 0.70, 0.78, 1.0, UIFont.Small)
+                    end
+                    for sIdx = 1, 2 do
+                        local sy = (sIdx - 1) * btnSize + 4
+                        if (bagSelected and sIdx == 2) or (not bagSelected and sIdx == 1) then
+                            self:drawRect(paneW + 3, sy, btnSize - 6, btnSize - 6, 0.65, 0.45, 0.48, 0.54)
+                        end
+                        self:drawRectBorder(paneW + 3, sy, btnSize - 6, btnSize - 6, 0.60, 0.38, 0.42, 0.50)
+                        local tag = sIdx == 1 and "INV" or "BAG"
+                        self:drawText(tag, paneW + 7, sy + 9, 0.88, 0.90, 0.94, 1.0, UIFont.Small)
+                    end
+                    self:drawRectBorder(paneW, 0, btnSize, h, 0.55, 0.35, 0.38, 0.44)
+                    self:drawRectBorder(0, 0, w, h, 0.75, 0.32, 0.35, 0.42)
+                end
+                return p
+            end
+
+            local c1 = NpcInv.displayPanel(nil, {}, {
+                npcId = "npc_prev_1",
+                displayName = mock.npc1,
+                x = 50, y = 20, width = 400, height = 500,
+                previewBlocked = false,
+                previewContainerName = mock.bag1,
+                previewContainerWeight = 12.4,
+                previewContainerCapacity = 22,
+                previewWidget = makeMockInventoryWidget(true),
+            })
+            local c2 = NpcInv.displayPanel(nil, {}, {
+                npcId = "npc_prev_2",
+                displayName = mock.npc2,
+                x = 490, y = 20, width = 380, height = 500,
+                previewBlocked = true,
+                previewContainerName = mock.bag2,
+                previewContainerWeight = 6.2,
+                previewContainerCapacity = 50,
+                previewWidget = makeMockInventoryWidget(false),
+            })
+            _G.__previewInv1 = c1
+            _G.__previewInv2 = c2
+            _G.__previewInvMock = nil
+            """);
+
+        for (int frame = 0; frame < 4; frame++) {
+            Display.processMessages();
+            GameWindow.fileSystem.updateAsyncTransactions();
+            final int fIdx = frame;
+            RenderThread.invokeOnRenderContext(() -> {
+                GL11.glViewport(0, 0, WIDTH, HEIGHT);
+                GL11.glClearColor(0.10f, 0.12f, 0.14f, 1f);
+                GL11.glDisable(GL11.GL_SCISSOR_TEST);
+                GL11.glDisable(GL11.GL_STENCIL_TEST);
+                GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_STENCIL_BUFFER_BIT);
+                GL11.glEnable(GL11.GL_BLEND);
+                GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
+
+                SpriteRenderer r = SpriteRenderer.instance;
+                r.prePopulating();
+                PreviewFrame.resetStencilDepth();
+                r.glDoStartFrame(WIDTH, HEIGHT, 1, -1);
+                r.StartShader(SceneShaderStore.defaultShaderId, -1);
+
+                PreviewFrame.flushPendingUI();
+                for (var el : new ArrayList<>(UIManager.getUI())) {
+                    if (el.isVisible()) {
+                        el.update();
+                        el.render();
+                    }
+                }
+
+                r.glDoEndFrame();
+                r.pushFrameDown();
+                r.acquireStateForRendering(() -> false);
+                r.postRender();
+
+                if (fIdx == 3) {
+                    capturePng(outDir.resolve("preview-npc-inv-" + lang + ".png"));
+                }
+                Display.update();
+            });
+            Display.sync(30);
+        }
+
+        pcallLua("""
+            local Kernel = require "EmberRoutes/Kernel"
+            local NpcInv = require "EmberRoutes/UI/NpcInventoryPanel"
+            Kernel.teardown()
+            assert(_G.__previewInv1.win.disposed == true, "Kernel.teardown must close NpcInventoryPanel 1")
+            assert(_G.__previewInv2.win.disposed == true, "Kernel.teardown must close NpcInventoryPanel 2")
+            assert(NpcInv.getActive("npc_prev_1") == nil and NpcInv.getActive("npc_prev_2") == nil,
+                "Active NPC inventory map must clear on teardown")
+            _G.__previewInv1 = nil
+            _G.__previewInv2 = nil
+            """);
     }
 
     private static final Map<Character, Character> PREVIEW_S2T = Map.ofEntries(
@@ -386,7 +565,12 @@ public final class PreviewModule1 {
         Map.entry('开', '開'), Map.entry('落', '落'), Map.entry('楼', '樓'), Map.entry('盘', '盤'),
         Map.entry('当', '當'), Map.entry('积', '積'), Map.entry('贯', '貫'), Map.entry('预', '預'),
         Map.entry('览', '覽'), Map.entry('扩', '擴'), Map.entry('松', '鬆'), Map.entry('态', '態'),
-        Map.entry('唤', '喚'), Map.entry('节', '節'), Map.entry('损', '損'), Map.entry('苹', '蘋')
+        Map.entry('唤', '喚'), Map.entry('节', '節'), Map.entry('损', '損'), Map.entry('苹', '蘋'),
+        Map.entry('随', '隨'), Map.entry('医', '醫'), Map.entry('疗', '療'), Map.entry('栏', '欄'),
+        Map.entry('远', '遠'), Map.entry('内', '內'), Map.entry('绷', '繃'), Map.entry('带', '帶'),
+        Map.entry('头', '頭'), Map.entry('丝', '絲'), Map.entry('马', '馬'), Map.entry('库', '庫'),
+        Map.entry('类', '類'), Map.entry('别', '別'), Map.entry('电', '電'), Map.entry('装', '裝'),
+        Map.entry('备', '備')
     );
 
     private static float isoX(float gx, float gy) {
@@ -441,7 +625,12 @@ public final class PreviewModule1 {
     private static void pcallLua(String code) throws IOException {
         Object[] res = LuaManager.thread.pcall(LuaCompiler.loadstring(code, "preview-scene", LuaManager.env), new Object[0]);
         if (!Boolean.TRUE.equals(res[0])) {
-            throw new IllegalStateException("Lua error: " + (res.length > 1 ? res[1] : "") + (res.length > 2 ? "\n" + res[2] : ""));
+            Throwable cause = (res.length > 3 && res[3] instanceof Throwable t) ? t : null;
+            if (cause == null && res.length > 1 && res[1] instanceof Throwable t) cause = t;
+            String msg = "Lua error: " + (res.length > 1 ? res[1] : "")
+                + (res.length > 2 ? "\n" + res[2] : "")
+                + (cause != null ? "\ncause=" + cause : "");
+            throw new IllegalStateException(msg, cause);
         }
     }
 

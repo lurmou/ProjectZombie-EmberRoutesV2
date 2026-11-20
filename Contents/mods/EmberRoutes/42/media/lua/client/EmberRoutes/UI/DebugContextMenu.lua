@@ -1,6 +1,8 @@
 local EmberUI = require "EmberUI"
 local Kernel = require "EmberRoutes/Kernel"
 local SettlementStore = require "EmberRoutes/Settlement/SettlementStore"
+local NpcRuntime = require "EmberRoutes/Npc/NpcRuntime"
+local NpcLocomotionPort = require "EmberRoutes/Npc/NpcLocomotionPort"
 local ZoneOverlay = require "EmberRoutes/UI/ZoneOverlay"
 local ZoneEditorPanel = require "EmberRoutes/UI/ZoneEditorPanel"
 local DebugWarehousePanel = require "EmberRoutes/UI/DebugWarehousePanel"
@@ -33,6 +35,104 @@ local function appendSquareContainerPrivacyOptions(sub, actor, gx, gy, z)
         sub:addOption(optText, actor, function()
             EmberRoutesJava.setContainerObjectPrivate(targetObj, not isPriv)
             EmberRoutesJava.flushDirtyContainers()
+        end)
+    end
+end
+
+local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z)
+    local m2Sub = ISContextMenu:getNew(context)
+    local m2Opt = parentSub:addOption(getText("ContextMenu_ER_M2_Root"), nil, nil)
+    context:addSubMenu(m2Opt, m2Sub)
+
+    local tx, ty, tz = gx + 0.5, gy + 0.5, z
+
+    m2Sub:addOption(getText("ContextMenu_ER_M2_SpawnTest"), actor, function()
+        local id = NpcRuntime.spawn(tx, ty, tz, false)
+        if id then
+            local summary = NpcRuntime.giveTestKit(id)
+            print("[EmberRoutes][M2] Spawned " .. tostring(id) .. " -> " .. tostring(summary))
+        else
+            print("[EmberRoutes][M2] Spawn failed at " .. tostring(tx) .. "," .. tostring(ty) .. "," .. tostring(tz))
+        end
+    end)
+
+    local ids = NpcRuntime.listIds()
+    local targetId = ids and #ids > 0 and ids[#ids] or nil
+    if targetId then
+        local info = NpcRuntime.getInfo(targetId)
+        m2Sub:addOption(getText("ContextMenu_ER_M2_WalkHereFmt", targetId), actor, function()
+            NpcLocomotionPort.moveTo(targetId, tx, ty, tz, {
+                run = false,
+                onArrival = function(id, status, reason)
+                    print("[EmberRoutes][M2] Walk callback " .. tostring(id) .. ": " .. tostring(status) .. " (" .. tostring(reason) .. ")")
+                end,
+            })
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_RunHereFmt", targetId), actor, function()
+            NpcLocomotionPort.moveTo(targetId, tx, ty, tz, {
+                run = true,
+                onArrival = function(id, status, reason)
+                    print("[EmberRoutes][M2] Run callback " .. tostring(id) .. ": " .. tostring(status) .. " (" .. tostring(reason) .. ")")
+                end,
+            })
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_StopFmt", targetId), actor, function()
+            NpcLocomotionPort.stop(targetId)
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_FollowAll"), actor, function()
+            local pIdx = actor and actor.getPlayerNum and actor:getPlayerNum() or 0
+            for i = 1, #ids do
+                NpcLocomotionPort.follow(ids[i], { playerIndex = pIdx })
+            end
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_StopFollowAll"), actor, function()
+            for i = 1, #ids do
+                NpcLocomotionPort.stopFollow(ids[i])
+            end
+        end)
+
+        if info and info.phasedIn then
+            m2Sub:addOption(getText("ContextMenu_ER_M2_PhaseOutFmt", targetId), actor, function()
+                local ok = NpcRuntime.phaseOut(targetId)
+                print("[EmberRoutes][M2] PhaseOut " .. tostring(targetId) .. " -> " .. tostring(ok))
+            end)
+        else
+            m2Sub:addOption(getText("ContextMenu_ER_M2_PhaseInFmt", targetId), actor, function()
+                local ok = NpcRuntime.phaseIn(targetId)
+                print("[EmberRoutes][M2] PhaseIn " .. tostring(targetId) .. " -> " .. tostring(ok))
+            end)
+        end
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_InspectFmt", targetId), actor, function()
+            local latest = NpcRuntime.getInfo(targetId)
+            local invLog = NpcRuntime.inspectInventoryIds(targetId)
+            print("[EmberRoutes][M2] Inspect " .. tostring(invLog))
+            if latest then
+                print("[EmberRoutes][M2] Status=" .. tostring(latest.moveStatus)
+                    .. " numPlayers=" .. tostring(latest.playerNumPlayers)
+                    .. " isLocalPlayer=" .. tostring(latest.isLocalPlayer)
+                    .. " debug=" .. tostring(latest.debugLine))
+            end
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_SaveNow"), actor, function()
+            local ok = NpcRuntime.saveNow()
+            print("[EmberRoutes][M2] SaveNow -> " .. tostring(ok))
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_KillFmt", targetId), actor, function()
+            local invBefore = NpcRuntime.inspectInventoryIds(targetId)
+            local ok = NpcRuntime.kill(targetId)
+            print("[EmberRoutes][M2] Kill " .. tostring(targetId) .. " ok=" .. tostring(ok) .. " invBefore=" .. tostring(invBefore))
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_DespawnAll"), actor, function()
+            local n = NpcRuntime.despawnAll()
+            print("[EmberRoutes][M2] Despawned count=" .. tostring(n))
         end)
     end
 end
@@ -92,15 +192,16 @@ local function onFillWorldMenu(playerIndex, context, worldobjects, test)
     sub:addOption(getText("ContextMenu_ER_ThemeSettings"), actor, function()
         EmberUI.openThemeSettings("er.warehouse")
     end)
+
+    appendM2NpcSubmenu(sub, context, actor, gx, gy, z)
 end
 
 local DebugContextMenu = {}
 
-Kernel.plugin({
-    name = "debug-context-menu",
-    inject = { "settlements" },
-    apply = function(ctx)
-        ctx:on(Events.OnFillWorldObjectContextMenu, onFillWorldMenu)
+Kernel.registerModule({
+    id = "debug-context-menu",
+    onWorldReady = function(scope)
+        scope:on(Events.OnFillWorldObjectContextMenu, onFillWorldMenu)
     end,
 })
 
