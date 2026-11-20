@@ -94,6 +94,7 @@ public final class EmberCorridor {
         this.segStartX = startX;
         this.segStartY = startY;
         this.segStartZ = startZ;
+        this.lastLevel = startZ;
     }
 
     /** 构造同层净空直达走廊（0 帧延迟快通）。 */
@@ -219,7 +220,8 @@ public final class EmberCorridor {
                 }
 
                 if (cz != nz || (sqCur != null && sqCur.HasStairs())) {
-                    out.add(simpleNode(cur.x, cur.y, cz, NodeKind.STAIR));
+                    float[] norm = resolveStairNormal(rawPath, i, sqCur, exactGoalX, exactGoalY);
+                    out.add(new CorridorNode(cur.x, cur.y, cz, NodeKind.STAIR, norm[0], norm[1], 0, 0, 0, 0));
                     i++;
                     continue;
                 }
@@ -244,7 +246,9 @@ public final class EmberCorridor {
         if (out.isEmpty()) {
             appendGoal(out, exactGoalX, exactGoalY, exactGoalZ, actorX, actorY);
         }
-        return new EmberCorridor(out, actorX, actorY, actorZ);
+        EmberCorridor corridor = new EmberCorridor(out, actorX, actorY, actorZ);
+        corridor.advanceInitialNodes(actorX, actorY, actorZ);
+        return corridor;
     }
 
     public int getIndex() {
@@ -259,6 +263,30 @@ public final class EmberCorridor {
         return index >= nodes.size();
     }
 
+    public String formatCurrentNode() {
+        if (nodes == null || nodes.isEmpty()) return "EMPTY";
+        if (index < 0 || index >= nodes.size()) return "DONE(" + index + "/" + nodes.size() + ")";
+        return formatNode(index, nodes.get(index));
+    }
+
+    public String formatHeadSummary() {
+        if (nodes == null || nodes.isEmpty()) return "EMPTY";
+        StringBuilder sb = new StringBuilder();
+        int lim = Math.min(4, nodes.size());
+        for (int k = 0; k < lim; k++) {
+            if (k > 0) sb.append(" -> ");
+            sb.append(formatNode(k, nodes.get(k)));
+        }
+        if (nodes.size() > lim) {
+            sb.append(" ...(").append(nodes.size()).append(')');
+        }
+        return sb.toString();
+    }
+
+    private static String formatNode(int idx, CorridorNode nd) {
+        return String.format(java.util.Locale.US, "#%d:%s@(%.2f,%.2f,%d)", idx, nd.kind.name(), nd.x, nd.y, nd.z);
+    }
+
     /** 推进已跨越的走廊节点/半平面，并评估是否已满足终点到达（含点积越界保护）。 */
     public boolean advanceAndCheckGoal(IsoPlayer actor) {
         return advanceAndCheckGoal(actor, false);
@@ -271,7 +299,7 @@ public final class EmberCorridor {
         float y = actor.getY();
         int z = EmberTargetProjector.levelOf(actor.getZ());
 
-        if (lastLevel != Integer.MIN_VALUE && lastLevel != z && nodes.get(index).z != z) {
+        if (nodes.get(index).z != z) {
             for (int k = index + 1; k < nodes.size(); k++) {
                 if (nodes.get(k).z == z) {
                     setIndexAndAnchor(k, x, y, z);
@@ -480,7 +508,27 @@ public final class EmberCorridor {
                 float lat = Math.abs(dx * node.normalY - dy * node.normalX);
                 yield dist <= 0.20F || (fwd >= 0.0F && lat <= 0.60F);
             }
-            case STAIR -> dist <= 0.28F;
+            case STAIR -> {
+                if (dist <= 0.32F) {
+                    yield true;
+                }
+                if (node.normalX * node.normalX + node.normalY * node.normalY > 0.5F) {
+                    float fwd = dx * node.normalX + dy * node.normalY;
+                    float lat = Math.abs(dx * node.normalY - dy * node.normalX);
+                    if (fwd >= -0.04F && lat <= 0.65F) {
+                        yield true;
+                    }
+                }
+                float segDx = node.x - segStartX;
+                float segDy = node.y - segStartY;
+                float segLen = (float) Math.hypot(segDx, segDy);
+                if (segLen > 0.10F) {
+                    float passed = (dx * segDx + dy * segDy) / segLen;
+                    float lat = Math.abs(dx * segDy - dy * segDx) / segLen;
+                    yield passed >= 0.0F && lat <= 0.65F;
+                }
+                yield false;
+            }
             case WAYPOINT -> {
                 if (dist <= 0.30F) yield true;
                 float segDx = node.x - segStartX;
@@ -554,6 +602,74 @@ public final class EmberCorridor {
         IsoGridSquare edge = dx > 0 ? b : a;
         return edge.getProperties().has(IsoFlagType.HoppableW)
                 || edge.getProperties().has(IsoFlagType.TallHoppableW);
+    }
+
+    private void advanceInitialNodes(float actorX, float actorY, int actorZ) {
+        if (nodes.isEmpty()) {
+            return;
+        }
+        if (nodes.get(index).z != actorZ) {
+            for (int k = index + 1; k < nodes.size(); k++) {
+                if (nodes.get(k).z == actorZ) {
+                    setIndexAndAnchor(k, actorX, actorY, actorZ);
+                    break;
+                }
+            }
+        }
+        while (index + 1 < nodes.size()) {
+            CorridorNode cur = nodes.get(index);
+            if (cur.kind == NodeKind.GOAL || cur.z != actorZ) {
+                break;
+            }
+            if (hasPassedIntermediate(actorX, actorY, cur)) {
+                advanceOne(cur);
+                continue;
+            }
+            if (cur.kind == NodeKind.WAYPOINT && cur.normalX * cur.normalX + cur.normalY * cur.normalY > 0.5F) {
+                float dx = actorX - cur.x;
+                float dy = actorY - cur.y;
+                float fwd = dx * cur.normalX + dy * cur.normalY;
+                float lat = Math.abs(dx * cur.normalY - dy * cur.normalX);
+                if (fwd >= 0.0F && lat <= 0.45F) {
+                    advanceOne(cur);
+                    continue;
+                }
+            }
+            break;
+        }
+    }
+
+    private static float[] resolveStairNormal(
+            Path rawPath, int i, IsoGridSquare sqCur, float exactGoalX, float exactGoalY) {
+        PathNode cur = rawPath.getNode(i);
+        if (i + 1 < rawPath.size()) {
+            PathNode nxt = rawPath.getNode(i + 1);
+            float dx = nxt.x - cur.x;
+            float dy = nxt.y - cur.y;
+            float len = (float) Math.hypot(dx, dy);
+            if (len > 1.0E-4F) {
+                return new float[]{dx / len, dy / len};
+            }
+        }
+        if (i > 0) {
+            PathNode prev = rawPath.getNode(i - 1);
+            float dx = cur.x - prev.x;
+            float dy = cur.y - prev.y;
+            float len = (float) Math.hypot(dx, dy);
+            if (len > 1.0E-4F) {
+                return new float[]{dx / len, dy / len};
+            }
+        }
+        if (sqCur != null && sqCur.HasStairsNorth()) {
+            return new float[]{0.0F, exactGoalY >= cur.y ? 1.0F : -1.0F};
+        }
+        if (sqCur != null && sqCur.HasStairsWest()) {
+            return new float[]{exactGoalX >= cur.x ? 1.0F : -1.0F, 0.0F};
+        }
+        float dx = exactGoalX - cur.x;
+        float dy = exactGoalY - cur.y;
+        float len = (float) Math.hypot(dx, dy);
+        return len > 1.0E-4F ? new float[]{dx / len, dy / len} : new float[]{0.0F, -1.0F};
     }
 
     private static CorridorNode simpleNode(float x, float y, int z, NodeKind kind) {

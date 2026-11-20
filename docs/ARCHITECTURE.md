@@ -180,6 +180,22 @@ flowchart TD
 - **NPC 微观执行态**：单点身体控制队列、寻路折线、批移动终结事件队列、`BaseAction` 计时进度、`30s` 软预约锁（以 `simTime` 计时）、`TEMP_PROP` 闲暇道具全部纯内存驻留，打断或重载即天然释放，**永不产生死锁烂账**；
 - **借用工具自动归回**：唯一允许落于物品自身的轻量标记是在真实工具 `InventoryItem:getModData()` 写入借出来源容器键，NPC 空闲自检时直接寻址归还并置 `nil`。
 
+### 5.3 NPC 双大脑分层决策架构（M3：`BrainRouter`：`SETTLEMENT` vs `SQUAD`）
+
+从 M3（`EMB-12`）起，每名 `IsoNPC` 在 `AGENT_BRAIN` 阶段的决策层摒弃 V1“多状态机各自抢占”与“纯通用效用曲线”的混乱模型，采用 **「顶层职责硬分叉（`BrainRouter`）+ 据点确定性优先级树 + 轻量效用闲暇 + 共享执行层」**：
+
+```mermaid
+flowchart TD
+    Root["BrainRouter（AGENT_BRAIN 单入口）"] --> Mode{"当前职责模式"}
+    Mode -- "SETTLEMENT / 据点自治态<br/>（类环世界 Colony ThinkTree）" --> CB["1. 遇险逃离 / 守卫防务(M5)<br/>2. 生理急需（NeedsPolicy 滞回：空闲 0.25/0.20 → 工作 0.50）<br/>3. 睡眠（跨楼层 SeatingManager + 内存座位锁）<br/>4. 归还借用工具（ModData 来源戳）<br/>5. 前置预检 + 30s 内存软锁通过的当班工种<br/>6. 闲暇生活（轻量模拟人生式效用选点 + TEMP_PROP + 10~15s 驻留锁）"]
+    Mode -- "SQUAD / 征召跟随态<br/>（类环世界 Drafted）" --> SB["完全屏蔽据点床铺 / 仓库 / 工种队列<br/>1. 玩家实时指令（跟随 / 驻守 / 撤退）<br/>2. ROE 交战与防卫（M5：近远战 / 弹药 / 防黑枪）<br/>3. 战间随身轻自理（仅消耗随身绷带/干粮，绝不离队找床）<br/>4. 编队跟速与警戒（复用 Java EmberFollow）"]
+    CB --> Exec["共享执行层：BaseAction（3.0s 起身硬超时） + NpcLocomotionPort + Java IsoNPC/Ember 小脑"]
+    SB --> Exec
+```
+
+- **`SETTLEMENT ↔ SQUAD` 零烂账无缝切换**：切换只修改纯内存模式枚举，并立即打断当前 `BaseAction`、释放内存 `30s` 软预约与座位锁；所有实物与借出工具完全依赖背包真实原件及 `InventoryItem:getModData()` 来源戳自愈。
+- **域级 DAG 天然吻合**：`Npc(30)` 托管 `BrainRouter`、`BaseAction` 与 `NeedsPolicy`；`Work(40)` 仅向 `SettlementBrain` 注册工种；`Squad(50)`（M5）向 `BrainRouter` 的 `SQUAD` 分支挂接 ROE 与编队逻辑（M3 阶段 `SQUAD` 先以极简短路对接现有 Java `EmberFollowController`）。
+
 ---
 
 ## 6. 前置 `EmberUI` 框架契约与 UI 验证门禁规范
@@ -229,9 +245,9 @@ EmberRoutesV2/
     └── client/EmberRoutes/
         ├── Boot.lua                                    # 唯一显式启动顺序清单与引擎顶层事件挂接
         ├── Warehouse/                                  # 仓储 WORLD_SYNC 节拍与暂停态 O(1) 脏排空入口
-        ├── Npc/                                        # [M2–M3] 躯壳管理、零分配批移动端口、150 行内 tickAI 与原子动作
+        ├── Npc/                                        # [M2–M3] 躯壳管理、零分配批移动端口、BrainRouter / SettlementBrain / BaseAction
         ├── Work/                                       # [M4] 伐木 / 农耕 / 烹饪 / 工坊工种实现
-        ├── Squad/                                      # [M5 按需] 随从编队、守卫防务与战术指令
+        ├── Squad/                                      # [M5 按需] SquadBrain（随从编队 / 守卫 ROE / 战间随身自理）
         ├── UI/                                         # 基于 EmberUI 的界面面板（扩展页签直复用 EmberUI.SlotRegistry）
         └── Compat/                                     # 第三方工坊模组隔离适配槽（主干业务零引用）
 ```
