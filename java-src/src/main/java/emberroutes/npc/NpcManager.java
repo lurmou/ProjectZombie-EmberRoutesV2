@@ -13,6 +13,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import zombie.ZomboidFileSystem;
 import zombie.characters.AttachedItems.AttachedItem;
@@ -51,6 +52,27 @@ public final class NpcManager {
     private static final int RETIRE_FORCE_DIE_TICKS = 180;
     private static final int RETIRE_HARD_CLEANUP_TICKS = 360;
     private static final int OFFSCREEN_POLL_INTERVAL = 15;
+
+    private static final String[] TEST_BAGS = {
+        "Base.Bag_NormalHikingBag", "Base.Bag_BigHikingBag", "Base.Bag_ALICEpack", "Base.Bag_ALICEpack_Army",
+        "Base.Bag_DuffelBag", "Base.Bag_DuffelBagTINT", "Base.Bag_Schoolbag", "Base.Bag_Satchel",
+        "Base.Bag_SurvivorBag", "Base.Bag_MedicalBag"
+    };
+    private static final String[] TEST_JACKETS = {
+        "Base.Jacket_Varsity", "Base.Jacket_Fireman", "Base.Jacket_Police", "Base.Jacket_Black",
+        "Base.Jacket_Padded", "Base.Jacket_Ranger", "Base.Jacket_ArmyCamoGreen", "Base.HoodieDOWN_WhiteTINT",
+        "Base.Vest_BulletCivilian", "Base.Jacket_CoatArmy"
+    };
+    private static final String[] TEST_WEAPONS = {
+        "Base.Crowbar", "Base.Axe", "Base.WoodAxe", "Base.BaseballBat", "Base.PipeWrench",
+        "Base.HandAxe", "Base.Shovel", "Base.Machete", "Base.HuntingKnife", "Base.Nightstick"
+    };
+    private static final String[] TEST_SUPPLIES = {
+        "Base.Apple", "Base.Bandage", "Base.TinnedBeans", "Base.WaterBottle", "Base.Pills"
+    };
+    private static final String[] TEST_TOOLS = {
+        "Base.Hammer", "Base.Screwdriver", "Base.Saw", "Base.Wrench", "Base.HandTorch"
+    };
 
     private static final class NpcRecord {
         final String npcId;
@@ -93,6 +115,9 @@ public final class NpcManager {
     private static int tickCounter = 0;
     private static int offscreenCount = 0;
     private static boolean loadedForCurrentSave = false;
+    private static long lastRankSolveMs = 0L;
+    private static int lastRankFollowerCount = 0;
+    private static int lastRankPlayerIndex = -1;
 
     private NpcManager() {}
 
@@ -119,6 +144,9 @@ public final class NpcManager {
         tickCounter = 0;
         offscreenCount = 0;
         loadedForCurrentSave = false;
+        lastRankSolveMs = 0L;
+        lastRankFollowerCount = 0;
+        lastRankPlayerIndex = -1;
     }
 
     private static void recountOffscreenLocked() {
@@ -569,62 +597,136 @@ public final class NpcManager {
     }
 
     private static int resolveEffectiveFollowRankLocked(IsoNPC self, int playerIndex) {
-        if (self == null) return 0;
-        String selfId = self.getNpcId();
-        int selfSlot = self.getFollow().getRequestedSlot();
-        int rank = 0;
-        for (NpcRecord rec : records.values()) {
-            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc.isDead()) continue;
-            IsoNPC other = rec.liveNpc;
-            if (other == self) continue;
-            EmberFollowController fc = other.getFollow();
-            if (!fc.isEnabled() || fc.getLeaderPlayerIndex() != playerIndex) continue;
-            int otherSlot = fc.getRequestedSlot();
-            if (compareFollowerOrder(otherSlot, rec.npcId, selfSlot, selfId) < 0) {
-                rank++;
-            }
+        if (self == null) {
+            return 0;
         }
-        return rank;
+        refreshFollowRanksLocked(playerIndex, System.currentTimeMillis());
+        int assigned = self.getFollow().getAssignedRank();
+        return assigned >= 0 ? assigned : 0;
     }
 
-    private static int compareFollowerOrder(int slotA, String idA, int slotB, String idB) {
-        boolean hasA = slotA >= 0;
-        boolean hasB = slotB >= 0;
-        if (hasA != hasB) {
-            return hasA ? -1 : 1;
+    private static void refreshFollowRanksLocked(int playerIndex, long now) {
+        List<IsoNPC> dynamicFollowers = new ArrayList<>();
+        for (NpcRecord rec : records.values()) {
+            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc.isDead()) {
+                continue;
+            }
+            IsoNPC npc = rec.liveNpc;
+            EmberFollowController fc = npc.getFollow();
+            if (!fc.isEnabled() || fc.getLeaderPlayerIndex() != playerIndex || fc.getRequestedSlot() >= 0) {
+                continue;
+            }
+            dynamicFollowers.add(npc);
         }
-        if (hasA && slotA != slotB) {
-            return Integer.compare(slotA, slotB);
+
+        int count = dynamicFollowers.size();
+        if (count == 0) {
+            lastRankFollowerCount = 0;
+            lastRankPlayerIndex = playerIndex;
+            lastRankSolveMs = now;
+            return;
         }
-        String sa = idA != null ? idA : "";
-        String sb = idB != null ? idB : "";
-        return sa.compareTo(sb);
+
+        boolean allAssigned = true;
+        for (int i = 0; i < count; i++) {
+            if (dynamicFollowers.get(i).getFollow().getAssignedRank() < 0) {
+                allAssigned = false;
+                break;
+            }
+        }
+        if (allAssigned
+                && count == lastRankFollowerCount
+                && playerIndex == lastRankPlayerIndex
+                && now - lastRankSolveMs < 100L) {
+            return;
+        }
+
+        IsoPlayer leader = (IsoPlayer.players != null && playerIndex >= 0 && playerIndex < IsoPlayer.players.length)
+                ? IsoPlayer.players[playerIndex]
+                : null;
+        if (leader == null || leader.isDead()) {
+            return;
+        }
+
+        float[] fx = new float[count];
+        float[] fy = new float[count];
+        float[] fz = new float[count];
+        boolean[] onStairs = new boolean[count];
+        int[] prevRank = new int[count];
+        for (int i = 0; i < count; i++) {
+            IsoNPC npc = dynamicFollowers.get(i);
+            fx[i] = npc.getX();
+            fy[i] = npc.getY();
+            fz[i] = npc.getZ();
+            IsoGridSquare sq = npc.getCurrentSquare();
+            onStairs[i] = sq != null && sq.HasStairs();
+            prevRank[i] = npc.getFollow().getAssignedRank();
+        }
+
+        EmberFollowController firstFc = dynamicFollowers.get(0).getFollow();
+        float headingX = firstFc.getLastDirX();
+        float headingY = firstFc.getLastDirY();
+        if (headingX * headingX + headingY * headingY < 1.0E-4F) {
+            headingX = leader.getForwardDirectionX();
+            headingY = leader.getForwardDirectionY();
+        }
+
+        int[] solved = EmberFormationMatcher.assignRanks(
+                count, fx, fy, fz, onStairs, prevRank,
+                leader.getX(), leader.getY(), leader.getZ(),
+                headingX, headingY);
+        for (int i = 0; i < count; i++) {
+            dynamicFollowers.get(i).getFollow().setAssignedRank(solved[i]);
+        }
+        lastRankFollowerCount = count;
+        lastRankPlayerIndex = playerIndex;
+        lastRankSolveMs = now;
     }
 
     static synchronized boolean isHigherRankFollowerOnStairsAhead(IsoNPC self, int playerIndex, int myRank) {
-        if (self == null || myRank <= 0) return false;
+        return describeHigherRankFollowerOnStairsAhead(self, playerIndex, myRank) != null;
+    }
+
+    static synchronized String describeHigherRankFollowerOnStairsAhead(IsoNPC self, int playerIndex, int myRank) {
+        if (self == null) {
+            return null;
+        }
+        IsoGridSquare selfSq = self.getCurrentSquare();
+        if (selfSq != null && selfSq.HasStairs()) {
+            return null;
+        }
         int selfZ = EmberTargetProjector.levelOf(self.getZ());
         for (NpcRecord rec : records.values()) {
-            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc.isDead()) continue;
+            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc.isDead()) {
+                continue;
+            }
             IsoNPC other = rec.liveNpc;
-            if (other == self) continue;
+            if (other == self) {
+                continue;
+            }
             EmberFollowController fc = other.getFollow();
-            if (!fc.isEnabled() || fc.getLeaderPlayerIndex() != playerIndex) continue;
-            int otherRank = fc.getRequestedSlot() >= 0
-                    ? fc.getRequestedSlot()
-                    : resolveEffectiveFollowRankLocked(other, playerIndex);
-            if (otherRank >= myRank) continue;
-            int otherZ = EmberTargetProjector.levelOf(other.getZ());
-            if (Math.abs(otherZ - selfZ) > 1) continue;
+            if (!fc.isEnabled() || fc.getLeaderPlayerIndex() != playerIndex) {
+                continue;
+            }
             IsoGridSquare sq = other.getCurrentSquare();
-            if (sq == null || !sq.HasStairs()) continue;
+            if (sq == null || !sq.HasStairs()) {
+                continue;
+            }
+            int otherZ = EmberTargetProjector.levelOf(other.getZ());
+            if (otherZ != selfZ) {
+                continue;
+            }
             float dx = other.getX() - self.getX();
             float dy = other.getY() - self.getY();
-            if (dx * dx + dy * dy <= 6.76F) {
-                return true;
+            if (dx * dx + dy * dy <= 1.3225F) {
+                int otherRank = fc.getRequestedSlot() >= 0
+                        ? fc.getRequestedSlot()
+                        : Math.max(0, fc.getAssignedRank());
+                return String.format(Locale.US, "%s(r%d)@(%.2f,%.2f,%.2f)",
+                        other.getNpcId(), otherRank, other.getX(), other.getY(), other.getZ());
             }
         }
-        return false;
+        return null;
     }
 
     public static synchronized boolean setRunning(String npcId, boolean running) {
@@ -763,6 +865,16 @@ public final class NpcManager {
         return null;
     }
 
+    private static int resolveTestPresetIndex(String npcId) {
+        if (npcId != null && npcId.startsWith("npc_")) {
+            try {
+                int num = Integer.parseInt(npcId.substring(4));
+                return Math.floorMod(num - 1, TEST_BAGS.length);
+            } catch (NumberFormatException ignored) {}
+        }
+        return Math.floorMod(npcId != null ? npcId.hashCode() : 0, TEST_BAGS.length);
+    }
+
     public static synchronized String giveTestKit(String npcId) {
         NpcRecord rec = records.get(npcId);
         if (rec == null || !rec.phasedIn || rec.liveNpc == null || rec.liveNpc.isDead()) {
@@ -772,15 +884,20 @@ public final class NpcManager {
         ItemContainer inv = npc.getInventory();
         if (inv == null) return "NO_INVENTORY";
 
-        InventoryItem bagItem = createFirstAvailable("Base.Bag_NormalHikingBag", "Base.Bag_DuffelBag", "Base.Bag_Schoolbag");
+        int idx = resolveTestPresetIndex(npcId);
+        InventoryItem bagItem = createFirstAvailable(
+                TEST_BAGS[idx], "Base.Bag_NormalHikingBag", "Base.Bag_DuffelBag", "Base.Bag_Schoolbag");
         if (bagItem instanceof InventoryContainer bag) {
             inv.AddItem(bag);
             ItemContainer bagInv = bag.getInventory();
             if (bagInv != null) {
-                InventoryItem apple = createFirstAvailable("Base.Apple");
-                if (apple != null) bagInv.AddItem(apple);
-                InventoryItem hammer = createFirstAvailable("Base.Hammer");
-                if (hammer != null) bagInv.AddItem(hammer);
+                InventoryItem supply = createFirstAvailable(TEST_SUPPLIES[idx % TEST_SUPPLIES.length], "Base.Apple");
+                if (supply != null) bagInv.AddItem(supply);
+                InventoryItem nestedTool = createFirstAvailable(TEST_TOOLS[idx % TEST_TOOLS.length], "Base.Hammer");
+                if (nestedTool != null) {
+                    bagInv.AddItem(nestedTool);
+                    nestedTool.getModData().rawset("ER_TestStamp", npcId + ":nested");
+                }
             }
             ItemBodyLocation bagLoc = bag.canBeEquipped();
             if (bagLoc != null && (npc.getBodyLocationGroup() == null || npc.getBodyLocationGroup().getLocation(bagLoc) != null)) {
@@ -788,7 +905,7 @@ public final class NpcManager {
             }
         }
 
-        InventoryItem jacket = createFirstAvailable("Base.Jacket_Varsity", "Base.Tshirt_DefaultDECAL");
+        InventoryItem jacket = createFirstAvailable(TEST_JACKETS[idx], "Base.Jacket_Varsity", "Base.Tshirt_DefaultDECAL");
         if (jacket != null) {
             inv.AddItem(jacket);
             ItemBodyLocation jLoc = jacket.getBodyLocation();
@@ -797,10 +914,10 @@ public final class NpcManager {
             }
         }
 
-        InventoryItem weapon = createFirstAvailable("Base.Crowbar", "Base.Hammer");
+        InventoryItem weapon = createFirstAvailable(TEST_WEAPONS[idx], "Base.Crowbar", "Base.Hammer");
         if (weapon != null) {
             inv.AddItem(weapon);
-            weapon.getModData().rawset("ER_TestStamp", npcId);
+            weapon.getModData().rawset("ER_TestStamp", npcId + ":primary");
             npc.setPrimaryHandItem(weapon);
         }
 
@@ -822,14 +939,33 @@ public final class NpcManager {
         return inspectInventorySummaryLocked(rec.liveNpc);
     }
 
+    private static void appendItemWithStamp(StringBuilder sb, InventoryItem it) {
+        sb.append(it.getFullType()).append('#').append(it.id);
+        if (it.hasModData()) {
+            Object stamp = it.getModData().rawget("ER_TestStamp");
+            if (stamp != null) {
+                sb.append("[stamp=").append(stamp).append(']');
+            }
+        }
+    }
+
     private static String inspectInventorySummaryLocked(IsoNPC npc) {
         StringBuilder sb = new StringBuilder();
         sb.append(npc.getNpcId())
                 .append(" numPlayers=").append(IsoPlayer.numPlayers)
-                .append(" local=").append(npc.isLocalPlayer());
+                .append(" local=").append(npc.isLocalPlayer())
+                .append(String.format(Locale.US, " pos=(%.1f,%.1f,%d)",
+                        npc.getX(), npc.getY(), EmberTargetProjector.levelOf(npc.getZ())));
+        if (npc.hasModData()) {
+            Object npcStamp = npc.getModData().rawget("ER_NpcId");
+            if (npcStamp != null) {
+                sb.append(" npcStamp=").append(npcStamp);
+            }
+        }
         InventoryItem prim = npc.getPrimaryHandItem();
         if (prim != null) {
-            sb.append(" primary=").append(prim.getFullType()).append("#").append(prim.id);
+            sb.append(" primary=");
+            appendItemWithStamp(sb, prim);
         }
         ItemContainer inv = npc.getInventory();
         if (inv != null) {
@@ -838,14 +974,14 @@ public final class NpcManager {
             for (int i = 0; i < items.size(); i++) {
                 InventoryItem it = items.get(i);
                 if (i > 0) sb.append(", ");
-                sb.append(it.getFullType()).append("#").append(it.id);
+                appendItemWithStamp(sb, it);
                 if (it instanceof InventoryContainer bag && bag.getInventory() != null) {
                     sb.append("{");
                     List<InventoryItem> nested = bag.getInventory().getItems();
                     for (int j = 0; j < nested.size(); j++) {
                         InventoryItem sub = nested.get(j);
                         if (j > 0) sb.append(",");
-                        sb.append(sub.getFullType()).append("#").append(sub.id);
+                        appendItemWithStamp(sb, sub);
                     }
                     sb.append("}");
                 }

@@ -12,6 +12,7 @@ import zombie.core.skinnedmodel.advancedanimation.LiveAnimNode;
 import zombie.core.skinnedmodel.animation.AnimationTrack;
 import zombie.iso.IsoCamera;
 import zombie.iso.IsoCell;
+import zombie.iso.IsoMovingObject;
 import zombie.iso.Vector2;
 import zombie.iso.sprite.IsoReticle;
 import zombie.iso.sprite.IsoReticleMode;
@@ -325,6 +326,15 @@ public final class IsoNPC extends IsoPlayer {
     }
 
     @Override
+    public boolean isPushedByForSeparate(IsoMovingObject other) {
+        if (other instanceof IsoNPC otherNpc
+                && (EmberStairDiag.isNearStairs(this) || EmberStairDiag.isNearStairs(otherNpc))) {
+            return false;
+        }
+        return super.isPushedByForSeparate(other);
+    }
+
+    @Override
     public void OnDeath() {
         this.emberTrackSpeedScale = 1.0F;
         applyEmberTrackSpeedScale();
@@ -343,7 +353,7 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public void preupdate() {
-        if (attached && (!isDead() || !isOnDeathDone())) {
+        if (attached && getCurrentSquare() != null && (!isDead() || !isOnDeathDone())) {
             super.preupdate();
         }
     }
@@ -402,7 +412,7 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public void postupdate() {
-        if (attached && (!isDead() || !isOnDeathDone())) {
+        if (attached && getCurrentSquare() != null && (!isDead() || !isOnDeathDone())) {
             super.postupdate();
         }
     }

@@ -65,6 +65,7 @@ public final class EmberContextSteering {
         int centerTileX = (int) Math.floor(sx);
         int centerTileY = (int) Math.floor(sy);
 
+        boolean selfNearStairs = (self instanceof IsoNPC selfNpc) && EmberStairDiag.isNearStairs(selfNpc);
         boolean hasNearbyAgent = false;
         for (int i = 0; i < SLOTS; i++) {
             danger[i] = 0.0F;
@@ -78,6 +79,9 @@ public final class EmberContextSteering {
                 for (int idx = 0, sz = objs.size(); idx < sz; idx++) {
                     IsoMovingObject mo = objs.get(idx);
                     if (mo == self || !(mo instanceof IsoGameCharacter ch) || ch instanceof IsoZombie || ch.isDead()) {
+                        continue;
+                    }
+                    if (mo instanceof IsoNPC otherNpc && (selfNearStairs || EmberStairDiag.isNearStairs(otherNpc))) {
                         continue;
                     }
                     float rx = ch.getX() - sx;

@@ -28,6 +28,40 @@ public final class EmberFollowGaitControl {
     static final long UPSHIFT_SPRINT_CONFIRM_MS = 300L;
     static final long DOWNSHIFT_RUN_CONFIRM_MS = 260L;
 
+    static final float CATCHUP_DIRECT_ENTER = 8.0F;
+    static final float CATCHUP_DIRECT_EXIT = 6.0F;
+
+    static float slotBack(int rank) {
+        if (rank <= 0) {
+            return 1.60F;
+        }
+        return 2.00F + ((rank - 1) / 2) * 1.15F;
+    }
+
+    static float slotSide(int rank) {
+        if (rank <= 0) {
+            return 0.0F;
+        }
+        return (rank & 1) == 1 ? -0.95F : 0.95F;
+    }
+
+    static float columnBack(int rank) {
+        int r = Math.max(0, rank);
+        return 1.60F + r * 1.15F;
+    }
+
+    static float effectiveDistToLeader(int rank, float distToLeader) {
+        if (!Float.isFinite(distToLeader)) {
+            return 0.0F;
+        }
+        float rankOffset = Math.max(0.0F, slotBack(rank) - slotBack(0));
+        return Math.max(0.0F, distToLeader - rankOffset);
+    }
+
+    static float catchUpEnterDist(int rank) {
+        return Math.max(CATCHUP_DIRECT_ENTER, columnBack(rank) + 4.0F);
+    }
+
     private static final float MAX_VALID_STEP_DIST = 2.50F;
 
     private float leaderSpeedEma;

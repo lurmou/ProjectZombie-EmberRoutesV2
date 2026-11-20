@@ -272,4 +272,161 @@ class EmberFollowMathTest {
         assertTrue(ctrl.getSpeedDrive() >= 1.50F, "Upshift into RUN must lift speedDrive >= 1.50, got " + ctrl.getSpeedDrive());
         assertTrue(ctrl.getWalkSpeedCap(true) >= 0.50F, "Upshift into RUN must set WalkSpeedCap >= 0.50");
     }
+
+    @Test
+    void multiNpcRearRankVelocityMatchDoesNotFalseRun() {
+        assertEquals(2.50F, EmberFollowGaitControl.effectiveDistToLeader(0, 2.50F), 1e-4F);
+        assertEquals(8.0F, EmberFollowGaitControl.catchUpEnterDist(0), 1e-4F);
+
+        int rank = 9;
+        assertEquals(6.60F, EmberFollowGaitControl.slotBack(rank), 1e-4F);
+        assertEquals(11.95F, EmberFollowGaitControl.columnBack(rank), 1e-4F);
+        assertTrue(EmberFollowGaitControl.catchUpEnterDist(rank) >= 15.95F);
+        assertEquals(1.60F, EmberFollowGaitControl.effectiveDistToLeader(rank, EmberFollowGaitControl.slotBack(rank)), 1e-4F);
+
+        EmberFollowGaitControl ctrl = new EmberFollowGaitControl();
+        float dt = 1.0F / 60.0F;
+        float leaderPos = EmberFollowGaitControl.slotBack(rank);
+        float npcPos = 0.0F;
+        long nowMs = 1_000L;
+
+        for (int i = 0; i < 210; i++) {
+            float leaderSpeed = (i < 30) ? 1.95F : 1.10F;
+            float cap = ctrl.getWalkSpeedCap(true);
+            float scale = ctrl.getTrackSpeedScale(true);
+            float npcBase = (cap < 0.0F) ? 2.00F : (1.45F + 0.55F * cap);
+            float npcSpeed = npcBase * scale;
+
+            float leaderStep = leaderSpeed * dt;
+            float npcStep = npcSpeed * dt;
+            leaderPos += leaderStep;
+            npcPos += npcStep;
+
+            ctrl.sampleSpeeds(leaderStep, npcStep, dt);
+            nowMs = 1_000L + Math.round((i + 1) * (1000.0 / 60.0));
+            float distToLeader = leaderPos - npcPos;
+            float effectiveDist = EmberFollowGaitControl.effectiveDistToLeader(rank, distToLeader);
+            float signedErr = (leaderPos - EmberFollowGaitControl.slotBack(rank)) - npcPos;
+            float vCmd = ctrl.computeCommandSpeed(signedErr);
+            EmberFollowGaitControl.Gear gear = ctrl.updateGear(false, effectiveDist, vCmd, nowMs);
+            assertEquals(EmberFollowGaitControl.Gear.WALK, gear, "Rear rank 9 in slot must not falsely upshift to RUN");
+            ctrl.updateSpeedDrive(effectiveDist <= 5.0F, true, vCmd, dt);
+        }
+
+        float finalScale = ctrl.getTrackSpeedScale(true);
+        assertTrue(finalScale >= 0.65F && finalScale <= 0.85F, "Rear rank track scale should settle near 0.76, got " + finalScale);
+    }
+
+    @Test
+    void totalWar2dHungarianFormationMatcherPreventsCrossingAndPrioritizesUpstairs() {
+        final int n = 10;
+        float leaderX = 100.0F;
+        float leaderY = 100.0F;
+        float[] fx = new float[n];
+        float[] fy = new float[n];
+        float[] fz = new float[n];
+        boolean[] onStairs = new boolean[n];
+
+        // 初始面向南 (0, 1) 的 10 人完美 V 阵
+        for (int i = 0; i < n; i++) {
+            float back = EmberFollowGaitControl.slotBack(i);
+            float side = EmberFollowGaitControl.slotSide(i);
+            fx[i] = leaderX - 0.0F * back - 1.0F * side;
+            fy[i] = leaderY - 1.0F * back + 0.0F * side;
+        }
+
+        // 1A. 180° 掉头朝北 (0, -1)：原最末尾应接管最前排，且全局 2D 分配线段无交叉
+        int[] ranksNorth = EmberFormationMatcher.assignRanks(
+                n, fx, fy, fz, onStairs, null, leaderX, leaderY, 0.0F, 0.0F, -1.0F);
+        assertValidPermutation(ranksNorth, n);
+        assertTrue(ranksNorth[9] <= 2 && ranksNorth[8] <= 2 && ranksNorth[7] <= 2,
+                "Rear-most followers when facing South should take front-most ranks (0..2) after 180° turn");
+        assertNoSegmentCrossings(n, fx, fy, leaderX, leaderY, 0.0F, -1.0F, ranksNorth);
+
+        // 1B. 90° 转弯朝东 (1, 0)：验证全局双射与零交叉
+        int[] ranksEast = EmberFormationMatcher.assignRanks(
+                n, fx, fy, fz, onStairs, null, leaderX, leaderY, 0.0F, 1.0F, 0.0F);
+        assertValidPermutation(ranksEast, n);
+        assertNoSegmentCrossings(n, fx, fy, leaderX, leaderY, 1.0F, 0.0F, ranksEast);
+
+        // 2. 3D 楼层/楼梯拓扑分级：二楼离梯 > 楼梯高程递减 > 一楼未登梯
+        float[] sX = { 60.0F, 61.0F, 59.0F, 60.5F, 68.5F, 68.5F, 68.5F, 68.5F, 67.5F, 69.5F };
+        float[] sY = { 51.0F, 51.5F, 52.0F, 52.5F, 54.8F, 55.5F, 56.5F, 57.5F, 58.0F, 58.0F };
+        float[] sZ = {  1.0F,  1.0F,  1.0F,  1.0F, 0.85F, 0.55F, 0.25F,  0.0F,  0.0F,  0.0F };
+        boolean[] sStairs = { false, false, false, false, true, true, true, false, false, false };
+        int[] stairRanks = EmberFormationMatcher.assignRanks(
+                n, sX, sY, sZ, sStairs, null, 60.0F, 50.0F, 1.0F, 0.0F, -1.0F);
+        assertValidPermutation(stairRanks, n);
+        for (int i = 0; i <= 3; i++) {
+            assertTrue(stairRanks[i] >= 0 && stairRanks[i] <= 3,
+                    "Floor-1 follower " + i + " should stay in front slots 0..3, got " + stairRanks[i]);
+        }
+        assertEquals(4, stairRanks[4], "Highest stair climber (z=0.85) should hold rank 4");
+        assertEquals(5, stairRanks[5], "Mid stair climber (z=0.55) should hold rank 5");
+        assertEquals(6, stairRanks[6], "Lowest stair climber (z=0.25) should hold rank 6");
+        for (int i = 7; i <= 9; i++) {
+            assertTrue(stairRanks[i] >= 7 && stairRanks[i] <= 9,
+                    "Floor-0 follower " + i + " should stay in rear slots 7..9, got " + stairRanks[i]);
+        }
+
+        // 3. 粘滞迟滞测试：中点微幅抖动 (< 0.20F) 不触发换位鬼畜
+        float[] jX = { 10.12F, 9.88F };
+        float[] jY = { 11.60F, 12.00F };
+        float[] jZ = { 0.0F, 0.0F };
+        boolean[] jStairs = { false, false };
+        int[] prev = { 0, 1 };
+        int[] held = EmberFormationMatcher.assignRanks(
+                2, jX, jY, jZ, jStairs, prev, 10.0F, 10.0F, 0.0F, 0.0F, -1.0F);
+        assertEquals(0, held[0], "Sticky hysteresis should keep follower 0 at rank 0 under small jitter");
+        assertEquals(1, held[1], "Sticky hysteresis should keep follower 1 at rank 1 under small jitter");
+    }
+
+    private static void assertValidPermutation(int[] ranks, int n) {
+        assertEquals(n, ranks.length, "Assigned rank array length must equal follower count");
+        boolean[] seen = new boolean[n];
+        for (int i = 0; i < n; i++) {
+            int r = ranks[i];
+            assertTrue(r >= 0 && r < n, "Rank out of bounds: " + r);
+            assertTrue(!seen[r], "Duplicate rank assigned: " + r);
+            seen[r] = true;
+        }
+    }
+
+    private static void assertNoSegmentCrossings(
+            int n, float[] fx, float[] fy,
+            float leaderX, float leaderY, float hx, float hy, int[] ranks) {
+        float[] sx = new float[n];
+        float[] sy = new float[n];
+        double len = Math.hypot(hx, hy);
+        float ux = (float) (hx / len);
+        float uy = (float) (hy / len);
+        for (int i = 0; i < n; i++) {
+            int r = ranks[i];
+            float back = EmberFollowGaitControl.slotBack(r);
+            float side = EmberFollowGaitControl.slotSide(r);
+            sx[i] = leaderX - ux * back - uy * side;
+            sy[i] = leaderY - uy * back + ux * side;
+        }
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                assertTrue(!segmentsStrictlyIntersect(fx[i], fy[i], sx[i], sy[i], fx[j], fy[j], sx[j], sy[j]),
+                        String.format("Trajectory crossing detected between follower %d (rank %d) and %d (rank %d)",
+                                i, ranks[i], j, ranks[j]));
+            }
+        }
+    }
+
+    private static boolean segmentsStrictlyIntersect(
+            double ax, double ay, double bx, double by,
+            double cx, double cy, double dx, double dy) {
+        double o1 = orient(ax, ay, bx, by, cx, cy);
+        double o2 = orient(ax, ay, bx, by, dx, dy);
+        double o3 = orient(cx, cy, dx, dy, ax, ay);
+        double o4 = orient(cx, cy, dx, dy, bx, by);
+        return (o1 * o2 < -1.0E-5) && (o3 * o4 < -1.0E-5);
+    }
+
+    private static double orient(double ax, double ay, double bx, double by, double cx, double cy) {
+        return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    }
 }

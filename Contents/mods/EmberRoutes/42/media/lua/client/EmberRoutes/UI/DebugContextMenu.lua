@@ -56,6 +56,24 @@ local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z)
         end
     end)
 
+    m2Sub:addOption(getText("ContextMenu_ER_M2_SpawnStress10"), actor, function()
+        for i = 1, 10 do
+            local dx = ((i - 1) % 5 - 2) * 1.4
+            local dy = (math.floor((i - 1) / 5) - 0.5) * 1.4
+            local female = (i % 2 == 0)
+            local sx = tx + dx
+            local sy = ty + dy
+            local id = NpcRuntime.spawn(sx, sy, tz, female)
+            if id then
+                local summary = NpcRuntime.giveTestKit(id)
+                print("[EmberRoutes][M2][SPAWN10] " .. tostring(i) .. "/10 " .. tostring(summary))
+            else
+                print("[EmberRoutes][M2][SPAWN10] FAILED " .. tostring(i) .. "/10 at "
+                    .. tostring(sx) .. "," .. tostring(sy) .. "," .. tostring(tz))
+            end
+        end
+    end)
+
     local ids = NpcRuntime.listIds()
     local targetId = ids and #ids > 0 and ids[#ids] or nil
     if targetId then
@@ -116,6 +134,21 @@ local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z)
                     .. " numPlayers=" .. tostring(latest.playerNumPlayers)
                     .. " isLocalPlayer=" .. tostring(latest.isLocalPlayer)
                     .. " debug=" .. tostring(latest.debugLine))
+            end
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_InspectAll"), actor, function()
+            local allIds = NpcRuntime.listIds()
+            print("[EmberRoutes][M2][INSPECT_ALL] count=" .. tostring(#allIds))
+            for i = 1, #allIds do
+                local id = allIds[i]
+                local info = NpcRuntime.getInfo(id)
+                local invLog = NpcRuntime.inspectInventoryIds(id)
+                print("[EmberRoutes][M2][INSPECT_ALL] " .. tostring(i) .. "/" .. tostring(#allIds)
+                    .. " " .. tostring(invLog)
+                    .. " | phased=" .. tostring(info and info.phasedIn)
+                    .. " | status=" .. tostring(info and info.moveStatus)
+                    .. " | follow=" .. tostring(NpcLocomotionPort.getFollowState(id)))
             end
         end)
 

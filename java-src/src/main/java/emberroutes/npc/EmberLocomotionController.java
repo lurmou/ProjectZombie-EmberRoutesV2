@@ -92,10 +92,32 @@ public final class EmberLocomotionController {
     private float stuckAnchorY;
     private int repathStreak;
 
+    private float diagPrevSteerX;
+    private float diagPrevSteerY;
+    private boolean diagHasPrevSteer;
+    private boolean diagPrevTurningAround;
+    private float diagStallSec;
+    private float diagStallX;
+    private float diagStallY;
+    private long diagLastStallMs;
+    private long diagLastYieldMs;
+    private long diagLastZMismatchMs;
+    private long diagLastReversalMs;
+
     private Status status = Status.IDLE;
     private String lastReason = "IDLE";
     private long moveSeq;
     private long settledSeq;
+
+    String formatCorridorNode() {
+        return corridor != null ? corridor.formatCurrentNode() : "NONE";
+    }
+
+    private void resetDiagObservers() {
+        diagHasPrevSteer = false;
+        diagPrevTurningAround = false;
+        diagStallSec = 0.0F;
+    }
 
     public synchronized long getMoveSeq() {
         return moveSeq;
@@ -206,6 +228,7 @@ public final class EmberLocomotionController {
         desiredGait = sneaking ? Gait.SNEAK : Gait.WALK;
         desiredWalkSpeedCap = -1.0F;
         desiredTrackSpeedScale = 1.0F;
+        resetDiagObservers();
         cancelAsyncRequest(npc);
         if (npc != null) {
             npc.setRunningMode(false);
@@ -543,9 +566,36 @@ public final class EmberLocomotionController {
             return;
         }
 
+        boolean nearStairs = EmberStairDiag.ENABLED && EmberStairDiag.isNearStairs(npc);
+        if (nearStairs) {
+            IsoGridSquare diagSq = npc.getCurrentSquare();
+            if (diagSq != null && EmberTargetProjector.levelOf(npc.getZ()) != diagSq.getZ()) {
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - diagLastZMismatchMs >= 400L) {
+                    diagLastZMismatchMs = nowMs;
+                    EmberStairDiag.log("Z_MISMATCH", String.format(java.util.Locale.US,
+                            "%s %s follow=%s node=%s",
+                            npc.getNpcId(), EmberStairDiag.fmtPosAndSq(npc),
+                            npc.getFollow().getState().name(), formatCorridorNode()));
+                }
+            }
+        }
+
         EmberContextSteering.SteerOutput avoid =
                 contextSteering.evaluate(npc, rawDirX, rawDirY, steerLeader, steerLeaderMoving);
         if (avoid.yielding()) {
+            if (nearStairs) {
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - diagLastYieldMs >= 600L) {
+                    diagLastYieldMs = nowMs;
+                    EmberStairDiag.log("AVOID_YIELD", String.format(java.util.Locale.US,
+                            "%s %s carrot=(%.2f,%.2f) node=%s follow=%s near=%s",
+                            npc.getNpcId(), EmberStairDiag.fmtPosAndSq(npc),
+                            sample.carrotX(), sample.carrotY(),
+                            formatCorridorNode(), npc.getFollow().getState().name(),
+                            EmberStairDiag.fmtNearNpcs(npc, 1.35F)));
+                }
+            }
             turn180Latched = false;
             smoothedThrottle = 0.0F;
             inRunGear = false;
@@ -578,6 +628,30 @@ public final class EmberLocomotionController {
             steerY = (float) Math.sin(rad);
         } else {
             turn180Latched = false;
+        }
+
+        if (nearStairs) {
+            boolean reversed = diagHasPrevSteer && (diagPrevSteerX * steerX + diagPrevSteerY * steerY) < -0.35F;
+            boolean enteredTurn180 = !diagPrevTurningAround && turningAround;
+            if (reversed || enteredTurn180) {
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - diagLastReversalMs >= 250L) {
+                    diagLastReversalMs = nowMs;
+                    EmberStairDiag.log("REVERSAL", String.format(java.util.Locale.US,
+                            "%s %s prev=(%.2f,%.2f)->steer=(%.2f,%.2f) raw=(%.2f,%.2f) carrot=(%.2f,%.2f) turn180=%s node=%s avoidCap=%.2f follow=%s near=%s",
+                            npc.getNpcId(), EmberStairDiag.fmtPosAndSq(npc),
+                            diagPrevSteerX, diagPrevSteerY, steerX, steerY, rawDirX, rawDirY,
+                            sample.carrotX(), sample.carrotY(), turningAround,
+                            formatCorridorNode(), avoid.speedCap(),
+                            npc.getFollow().getState().name(), EmberStairDiag.fmtNearNpcs(npc, 1.35F)));
+                }
+            }
+            diagPrevSteerX = steerX;
+            diagPrevSteerY = steerY;
+            diagHasPrevSteer = true;
+            diagPrevTurningAround = turningAround;
+        } else {
+            resetDiagObservers();
         }
 
         int curZ = EmberTargetProjector.levelOf(npc.getZ());
@@ -702,6 +776,32 @@ public final class EmberLocomotionController {
             npc.clearManualMovementClamp();
         }
 
+        if (nearStairs) {
+            if (diagStallSec <= 0.0F) {
+                diagStallX = npc.getX();
+                diagStallY = npc.getY();
+            }
+            diagStallSec += dt;
+            if (diagStallSec >= 0.60F) {
+                float movedDiag = (float) Math.hypot(npc.getX() - diagStallX, npc.getY() - diagStallY);
+                if (movedDiag < 0.08F) {
+                    long nowMs = System.currentTimeMillis();
+                    if (nowMs - diagLastStallMs >= 700L) {
+                        diagLastStallMs = nowMs;
+                        EmberStairDiag.log("STALL", String.format(java.util.Locale.US,
+                                "%s %s moved=%.3f tag=%s avoidCap=%.2f node=%s carrot=(%.2f,%.2f) follow=%s near=%s",
+                                npc.getNpcId(), EmberStairDiag.fmtPosAndSq(npc),
+                                movedDiag, liveReasonTag, avoid.speedCap(), formatCorridorNode(),
+                                sample.carrotX(), sample.carrotY(), npc.getFollow().getState().name(),
+                                EmberStairDiag.fmtNearNpcs(npc, 1.35F)));
+                    }
+                }
+                diagStallSec = 0.0F;
+                diagStallX = npc.getX();
+                diagStallY = npc.getY();
+            }
+        }
+
         if (!onStairs && checkStuck(npc, dt)) {
             handleBlockedOrStuck(npc, "STUCK_REPATH");
         }
@@ -755,6 +855,7 @@ public final class EmberLocomotionController {
         inRunGear = false;
         turn180Latched = false;
         repathStreak = 0;
+        resetDiagObservers();
         contextSteering.reset();
         portalActuator.reset();
         cancelAsyncRequest(npc);
@@ -868,6 +969,14 @@ public final class EmberLocomotionController {
         if (raw != null) {
             EmberCorridor built = EmberCorridor.fromRawCoords(npc, raw, pendingEscapeStart, reqGoalX, reqGoalY, reqGoalZ);
             if (built != null) {
+                if (EmberStairDiag.ENABLED && EmberStairDiag.isNearStairs(npc)) {
+                    String oldNode = this.corridor != null ? this.corridor.formatCurrentNode() : "NONE";
+                    boolean escAdj = pendingEscapeStart != null && pendingEscapeStart.adjusted();
+                    EmberStairDiag.log("CORRIDOR_SWAP", String.format(java.util.Locale.US,
+                            "%s %s esc=%s follow=%s old=%s new=[%s]",
+                            npc.getNpcId(), EmberStairDiag.fmtPosAndSq(npc), escAdj,
+                            npc.getFollow().getState().name(), oldNode, built.formatHeadSummary()));
+                }
                 this.corridor = built;
                 this.repathStreak = 0;
                 this.failedGoalUntilMs = 0L;
@@ -912,6 +1021,7 @@ public final class EmberLocomotionController {
         corridor = null;
         smoothedThrottle = 0.0F;
         inRunGear = false;
+        resetDiagObservers();
         liveReasonTag = "ARRIVED";
         applyIdleHold(npc, true);
         synchronized (this) {
@@ -933,6 +1043,7 @@ public final class EmberLocomotionController {
         corridor = null;
         smoothedThrottle = 0.0F;
         inRunGear = false;
+        resetDiagObservers();
         liveReasonTag = "FAILED:" + reason;
         applyIdleHold(npc, false);
         synchronized (this) {
