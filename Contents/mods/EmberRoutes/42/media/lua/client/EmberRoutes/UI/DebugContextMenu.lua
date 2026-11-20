@@ -82,6 +82,19 @@ local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z)
             NpcLocomotionPort.stop(targetId)
         end)
 
+        m2Sub:addOption(getText("ContextMenu_ER_M2_FollowAll"), actor, function()
+            local pIdx = actor and actor.getPlayerNum and actor:getPlayerNum() or 0
+            for i = 1, #ids do
+                NpcLocomotionPort.follow(ids[i], { playerIndex = pIdx })
+            end
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M2_StopFollowAll"), actor, function()
+            for i = 1, #ids do
+                NpcLocomotionPort.stopFollow(ids[i])
+            end
+        end)
+
         if info and info.phasedIn then
             m2Sub:addOption(getText("ContextMenu_ER_M2_PhaseOutFmt", targetId), actor, function()
                 local ok = NpcRuntime.phaseOut(targetId)

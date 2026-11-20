@@ -47,10 +47,35 @@ public final class EmberPortalActuator {
     private IsoWindow pendingWindow;
     private long windowStartMs;
 
+    private boolean allowClimbWindows = true;
+    private boolean allowClimbTallWalls = true;
+    private float autoCloseClearRadius = 0.0F;
+    private boolean hasLeaderGate;
+    private float leaderGateX;
+    private float leaderGateY;
+    private int leaderGateZ;
+
+    public void setPortalPolicy(boolean allowWindows, boolean allowTallWalls, float autoCloseClearRadius) {
+        this.allowClimbWindows = allowWindows;
+        this.allowClimbTallWalls = allowTallWalls;
+        this.autoCloseClearRadius = Math.max(0.0F, autoCloseClearRadius);
+    }
+
+    public void setLeaderPortalGate(boolean active, float lx, float ly, int lz) {
+        this.hasLeaderGate = active && Float.isFinite(lx) && Float.isFinite(ly);
+        this.leaderGateX = lx;
+        this.leaderGateY = ly;
+        this.leaderGateZ = lz;
+    }
+
     public void reset() {
         openedDoors.clear();
         pendingWindow = null;
         windowStartMs = 0L;
+        allowClimbWindows = true;
+        allowClimbTallWalls = true;
+        autoCloseClearRadius = 0.0F;
+        hasLeaderGate = false;
     }
 
     public static boolean isInNativeTraversal(IsoPlayer actor) {
@@ -150,6 +175,9 @@ public final class EmberPortalActuator {
 
         IsoWindow win = fromSq.getWindowTo(toSq);
         if (win != null) {
+            if (!allowClimbWindows || (hasLeaderGate && !isLeaderBeyondEdge(fromSq, toSq))) {
+                return ActStatus.BLOCKED;
+            }
             if (win.isBarricaded() || (win.isSmashed() && !win.isGlassRemoved())) {
                 return ActStatus.BLOCKED;
             }
@@ -167,6 +195,9 @@ public final class EmberPortalActuator {
         }
         IsoWindowFrame frame = fromSq.getWindowFrameTo(toSq);
         if (frame != null && frame.canClimbThrough(npc)) {
+            if (!allowClimbWindows || (hasLeaderGate && !isLeaderBeyondEdge(fromSq, toSq))) {
+                return ActStatus.BLOCKED;
+            }
             npc.climbThroughWindowFrame(frame);
             return ActStatus.TRAVERSING_NATIVE;
         }
@@ -178,6 +209,9 @@ public final class EmberPortalActuator {
                 || (dx != 0 && edgeSq.getProperties().has(IsoFlagType.TallHoppableW));
 
         if (hopLow || hopTall) {
+            if (hopTall && (!allowClimbTallWalls || (hasLeaderGate && !isLeaderBeyondEdge(fromSq, toSq)))) {
+                return ActStatus.BLOCKED;
+            }
             IsoDirections card = dy < 0 ? IsoDirections.N : (dy > 0 ? IsoDirections.S : (dx < 0 ? IsoDirections.W : IsoDirections.E));
             npc.faceDirection(card);
             if (npc.shouldBeTurning()) {
@@ -266,9 +300,50 @@ public final class EmberPortalActuator {
         }
     }
 
-    private static boolean isDoorwayOccupied(IsoPlayer self, OpenedDoorEntry e) {
-        return hasOtherCharacter(self, EmberTargetProjector.getSquare(e.ax, e.ay, e.z))
-                || hasOtherCharacter(self, EmberTargetProjector.getSquare(e.bx, e.by, e.z));
+    private boolean isLeaderBeyondEdge(IsoGridSquare fromSq, IsoGridSquare toSq) {
+        if (leaderGateZ != fromSq.getZ()) {
+            return true;
+        }
+        int dx = toSq.getX() - fromSq.getX();
+        int dy = toSq.getY() - fromSq.getY();
+        float midX = (fromSq.getX() + toSq.getX() + 1) * 0.5F;
+        float midY = (fromSq.getY() + toSq.getY() + 1) * 0.5F;
+        return (leaderGateX - midX) * dx + (leaderGateY - midY) * dy > 0.15F;
+    }
+
+    private boolean isDoorwayOccupied(IsoPlayer self, OpenedDoorEntry e) {
+        if (hasOtherCharacter(self, EmberTargetProjector.getSquare(e.ax, e.ay, e.z))
+                || hasOtherCharacter(self, EmberTargetProjector.getSquare(e.bx, e.by, e.z))) {
+            return true;
+        }
+        if (autoCloseClearRadius <= 0.0F) {
+            return false;
+        }
+        float mx = (e.ax + e.bx + 1) * 0.5F;
+        float my = (e.ay + e.by + 1) * 0.5F;
+        float rSq = autoCloseClearRadius * autoCloseClearRadius;
+        int radTiles = (int) Math.ceil(autoCloseClearRadius);
+        int cx = (int) Math.floor(mx);
+        int cy = (int) Math.floor(my);
+        for (int gy = cy - radTiles; gy <= cy + radTiles; gy++) {
+            for (int gx = cx - radTiles; gx <= cx + radTiles; gx++) {
+                IsoGridSquare sq = EmberTargetProjector.getSquare(gx, gy, e.z);
+                if (sq == null) continue;
+                List<IsoMovingObject> list = sq.getMovingObjects();
+                for (int i = 0, sz = list.size(); i < sz; i++) {
+                    IsoMovingObject mo = list.get(i);
+                    if (mo != self && mo instanceof IsoGameCharacter ch && !ch.isDead()
+                            && !(ch instanceof zombie.characters.IsoZombie)) {
+                        float dx = ch.getX() - mx;
+                        float dy = ch.getY() - my;
+                        if (dx * dx + dy * dy <= rSq) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean hasOtherCharacter(IsoPlayer self, IsoGridSquare sq) {

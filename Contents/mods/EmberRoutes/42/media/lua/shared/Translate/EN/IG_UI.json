@@ -35,5 +35,14 @@
     "IGUI_ER_ThemeCol_StorageText": "Storage Summary Text",
     "IGUI_ER_ThemeCol_PatchText": "Engine Stats Text",
     "IGUI_ER_ThemeCol_EraseActive": "Erase Mode Active Fill",
-    "IGUI_ER_ThemeCol_SummaryText": "Area Summary Text"
+    "IGUI_ER_ThemeCol_SummaryText": "Area Summary Text",
+    "IGUI_ER_NpcInv_TitleFmt": "Inventory · %1",
+    "IGUI_ER_NpcInv_BtnMedical": "Medical",
+    "IGUI_ER_NpcInv_InRange": "In Range",
+    "IGUI_ER_NpcInv_TooFar": "Too Far",
+    "IGUI_ER_NpcInv_WeightFmt": "%1 · %2 / %3 kg",
+    "IGUI_ER_NpcInv_MainBag": "Main Inventory",
+    "IGUI_ER_NpcInv_TooFarMsg": "%1 is too far (within 2 tiles, same floor)",
+    "IGUI_ER_ThemeMod_NpcInventory": "NPC Inventory",
+    "IGUI_ER_NpcMed_TitleFmt": "Health · %1"
 }

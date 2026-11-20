@@ -6,6 +6,9 @@ require "EmberRoutes/Warehouse/WarehouseWatcher"
 require "EmberRoutes/Npc/NpcLocomotionPort"
 require "EmberRoutes/Npc/NpcRuntime"
 require "EmberRoutes/Compat/HaloTextGuard"
+require "EmberRoutes/UI/NpcMedicalPanel"
+require "EmberRoutes/UI/NpcInventoryPanel"
+require "EmberRoutes/UI/NpcContextMenu"
 require "EmberRoutes/UI/DebugContextMenu"
 
 -- 唯一权威核心模块启动顺序表（零魔法数字，肉眼即见确定性顺序；
@@ -15,6 +18,9 @@ Kernel.setBootOrder({
     "warehouse",
     "npc-runtime",
     "npc-locomotion",
+    "npc-medical",
+    "npc-inventory",
+    "npc-context-menu",
     "debug-context-menu",
 })
 

@@ -192,19 +192,28 @@ public final class VerifyModule1 {
             AtomicInteger warehouseResetCount = new AtomicInteger();
             AtomicInteger npcResetCount = new AtomicInteger();
             AtomicInteger loadNpcCount = new AtomicInteger();
+            AtomicInteger syncZoneEditorCalls = new AtomicInteger();
+            boolean[] zoneEditorActive = new boolean[]{ false };
             AtomicInteger mockMoveSeq = new AtomicInteger(0);
             java.util.List<KahluaTable> mockMoveEventQueue = new java.util.ArrayList<>();
             java.util.Map<String, KahluaTable> mockMoveStates = new java.util.HashMap<>();
+            java.util.Map<String, KahluaTable> mockNpcObjs = new java.util.HashMap<>();
+            java.util.Map<String, String> mockNpcNames = new java.util.HashMap<>();
+            java.util.Map<String, Boolean> mockNpcAttached = new java.util.HashMap<>();
+            java.util.Set<String> mockFollowing = new java.util.HashSet<>();
             KahluaTable javaBridge = platform.newTable();
             javaBridge.rawset("reset", (JavaFunction) (cf, n) -> {
                 resetCount.incrementAndGet();
+                zoneEditorActive[0] = false;
                 mockMoveStates.clear();
                 mockMoveEventQueue.clear();
+                mockFollowing.clear();
                 EmberRoutesBridge.reset();
                 return 0;
             });
             javaBridge.rawset("resetWarehouse", (JavaFunction) (cf, n) -> {
                 warehouseResetCount.incrementAndGet();
+                zoneEditorActive[0] = false;
                 EmberRoutesBridge.resetWarehouse();
                 return 0;
             });
@@ -212,6 +221,7 @@ public final class VerifyModule1 {
                 npcResetCount.incrementAndGet();
                 mockMoveStates.clear();
                 mockMoveEventQueue.clear();
+                mockFollowing.clear();
                 EmberRoutesBridge.resetNpcs();
                 return 0;
             });
@@ -254,6 +264,45 @@ public final class VerifyModule1 {
                 cf.push(Boolean.valueOf(EmberRoutesBridge.flushDirtyContainers()));
                 return 1;
             });
+            javaBridge.rawset("isZoneOverlayVisible", (JavaFunction) (cf, n) -> {
+                cf.push(Boolean.valueOf(EmberRoutesBridge.isZoneOverlayVisible()));
+                return 1;
+            });
+            javaBridge.rawset("setZoneOverlayVisible", (JavaFunction) (cf, n) -> {
+                EmberRoutesBridge.setZoneOverlayVisible(Boolean.TRUE.equals(cf.get(0)));
+                return 0;
+            });
+            javaBridge.rawset("syncZoneEditorState", (JavaFunction) (cf, n) -> {
+                syncZoneEditorCalls.incrementAndGet();
+                zoneEditorActive[0] = true;
+                EmberRoutesBridge.syncZoneEditorState(
+                    (String) cf.get(0),
+                    ((Number) cf.get(1)).intValue(),
+                    (KahluaTable) cf.get(2),
+                    Boolean.TRUE.equals(cf.get(3)),
+                    ((Number) cf.get(4)).intValue(),
+                    ((Number) cf.get(5)).intValue(),
+                    ((Number) cf.get(6)).intValue(),
+                    ((Number) cf.get(7)).intValue(),
+                    Boolean.TRUE.equals(cf.get(8)),
+                    ((Number) cf.get(9)).intValue(),
+                    ((Number) cf.get(10)).intValue()
+                );
+                return 0;
+            });
+            javaBridge.rawset("clearZoneEditorState", (JavaFunction) (cf, n) -> {
+                zoneEditorActive[0] = false;
+                EmberRoutesBridge.clearZoneEditorState();
+                return 0;
+            });
+            javaBridge.rawset("getSyncZoneEditorCalls", (JavaFunction) (cf, n) -> {
+                cf.push(Double.valueOf(syncZoneEditorCalls.get()));
+                return 1;
+            });
+            javaBridge.rawset("isZoneEditorActive", (JavaFunction) (cf, n) -> {
+                cf.push(Boolean.valueOf(zoneEditorActive[0]));
+                return 1;
+            });
             javaBridge.rawset("loadNpcsFromSave", (JavaFunction) (cf, n) -> {
                 loadNpcCount.incrementAndGet();
                 cf.push(Double.valueOf(0.0));
@@ -276,6 +325,7 @@ public final class VerifyModule1 {
             });
             javaBridge.rawset("stopNpcMove", (JavaFunction) (cf, n) -> {
                 String npcId = (String) cf.get(0);
+                mockFollowing.remove(npcId);
                 KahluaTable st = mockMoveStates.get(npcId);
                 if (st != null) {
                     st.rawset("status", "INTERRUPTED");
@@ -285,6 +335,44 @@ public final class VerifyModule1 {
                 }
                 cf.push(Boolean.TRUE);
                 return 1;
+            });
+            javaBridge.rawset("startNpcFollow", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                if (npcId == null) { cf.push(Boolean.FALSE); return 1; }
+                KahluaTable st = mockMoveStates.get(npcId);
+                if (st != null && Boolean.TRUE.equals(st.rawget("moving"))) {
+                    st.rawset("status", "INTERRUPTED");
+                    st.rawset("reason", "FOLLOW_START");
+                    st.rawset("settledSeq", st.rawget("seq"));
+                    st.rawset("moving", Boolean.FALSE);
+                }
+                mockFollowing.add(npcId);
+                cf.push(Boolean.TRUE);
+                return 1;
+            });
+            javaBridge.rawset("stopNpcFollow", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                mockFollowing.remove(npcId);
+                cf.push(Boolean.TRUE);
+                return 1;
+            });
+            javaBridge.rawset("isNpcFollowing", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                cf.push(Boolean.valueOf(mockFollowing.contains(npcId)));
+                return 1;
+            });
+            javaBridge.rawset("getNpcFollowState", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                cf.push(mockFollowing.contains(npcId) ? "FOLLOWING" : "INACTIVE");
+                return 1;
+            });
+            javaBridge.rawset("isEndClampEnabled", (JavaFunction) (cf, n) -> {
+                cf.push(Boolean.valueOf(EmberRoutesBridge.isEndClampEnabled()));
+                return 1;
+            });
+            javaBridge.rawset("setEndClampEnabled", (JavaFunction) (cf, n) -> {
+                EmberRoutesBridge.setEndClampEnabled(Boolean.TRUE.equals(cf.get(0)));
+                return 0;
             });
             javaBridge.rawset("setMockNpcSettled", (JavaFunction) (cf, n) -> {
                 String npcId = (String) cf.get(0);
@@ -333,6 +421,66 @@ public final class VerifyModule1 {
                 cf.push(st);
                 return 1;
             });
+            javaBridge.rawset("registerMockNpc", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                KahluaTable obj = (KahluaTable) cf.get(1);
+                String name = (String) cf.get(2);
+                boolean att = !Boolean.FALSE.equals(cf.get(3));
+                obj.rawset("_mockNpcId", npcId);
+                mockNpcObjs.put(npcId, obj);
+                mockNpcNames.put(npcId, name);
+                mockNpcAttached.put(npcId, Boolean.valueOf(att));
+                return 0;
+            });
+            javaBridge.rawset("getNpcId", (JavaFunction) (cf, n) -> {
+                Object obj = cf.get(0);
+                if (obj instanceof KahluaTable tbl) {
+                    cf.push(tbl.rawget("_mockNpcId"));
+                } else {
+                    cf.push(null);
+                }
+                return 1;
+            });
+            javaBridge.rawset("isNpcAttached", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                cf.push(mockNpcAttached.getOrDefault(npcId, Boolean.FALSE));
+                return 1;
+            });
+            javaBridge.rawset("getNpcDisplayName", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                cf.push(mockNpcNames.get(npcId));
+                return 1;
+            });
+            javaBridge.rawset("getNpcObject", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                cf.push(mockNpcObjs.get(npcId));
+                return 1;
+            });
+            javaBridge.rawset("listNpcIds", (JavaFunction) (cf, n) -> {
+                KahluaTable out = platform.newTable();
+                int idx = 1;
+                for (String id : mockNpcObjs.keySet()) {
+                    out.rawset(Double.valueOf(idx++), id);
+                }
+                cf.push(out);
+                return 1;
+            });
+            javaBridge.rawset("getNpcInfo", (JavaFunction) (cf, n) -> {
+                String npcId = (String) cf.get(0);
+                if (npcId == null || !mockNpcObjs.containsKey(npcId)) {
+                    cf.push(null);
+                    return 1;
+                }
+                KahluaTable info = platform.newTable();
+                info.rawset("npcId", npcId);
+                info.rawset("phasedIn", mockNpcAttached.getOrDefault(npcId, Boolean.FALSE));
+                info.rawset("moveStatus", "IDLE");
+                info.rawset("isLocalPlayer", Boolean.FALSE);
+                info.rawset("playerNumPlayers", Double.valueOf(1.0));
+                info.rawset("debugLine", "");
+                cf.push(info);
+                return 1;
+            });
             env.rawset("EmberRoutesJava", javaBridge);
             env.rawset("next", null);
 
@@ -368,7 +516,159 @@ public final class VerifyModule1 {
                     LoadGridsquare = makeEvent(),
                     ReuseGridsquare = makeEvent(),
                     OnFillWorldObjectContextMenu = makeEvent(),
+                    OnClothingUpdated = makeEvent(),
+                    OnMouseDown = makeEvent(),
+                    OnMouseMove = makeEvent(),
+                    OnMouseUp = makeEvent(),
                 }
+                getText = getText or function(k, arg1)
+                    if arg1 ~= nil then return tostring(k) .. ":" .. tostring(arg1) end
+                    return tostring(k)
+                end
+                getTextOrNull = function(k, arg1)
+                    if k == "ContextMenu_Trade" then
+                        assert(arg1 ~= nil and arg1 ~= "", "ContextMenu_Trade must always pass NPC name arg")
+                        return "Trade with " .. tostring(arg1)
+                    end
+                    if k == "ContextMenu_Medical_Check" then
+                        return "Medical Check"
+                    end
+                    return nil
+                end
+                getCell = function() return { getGridSquare = function() return nil end } end
+                getTexture = function() return nil end
+
+                ISWorldObjectContextMenu = ISWorldObjectContextMenu or {}
+                ISContextMenu = ISContextMenu or {
+                    getNew = function(_, _parent)
+                        return {
+                            addOption = function(_, label, target, fn)
+                                return { label = label, target = target, fn = fn }
+                            end,
+                            addSubMenu = function() end,
+                        }
+                    end,
+                }
+                local mockMouseX, mockMouseY, mockLmbDown = 0, 0, false
+                local mockUiWindows = {}
+                getMouseX = function() return mockMouseX end
+                getMouseY = function() return mockMouseY end
+                isMouseButtonDown = function(btn) return btn == 0 and mockLmbDown end
+                getSpecificPlayer = function(idx)
+                    if idx == 0 then
+                        return { getZ = function() return 0 end }
+                    end
+                    return nil
+                end
+                screenToIsoX = function(_idx, sx, _sy, _z) return math.floor((sx or 0) / 10) end
+                screenToIsoY = function(_idx, _sx, sy, _z) return math.floor((sy or 0) / 10) end
+                UIManager = {
+                    getUI = function()
+                        return {
+                            size = function() return #mockUiWindows end,
+                            get = function(_, i) return mockUiWindows[i + 1] end,
+                        }
+                    end,
+                    getToolTip = function() return nil end,
+                    isModalVisible = function() return false end,
+                    getModal = function() return nil end,
+                }
+                local MockEmberUI = require "EmberUI"
+                MockEmberUI.Theme.button = function() end
+                MockEmberUI.Theme.danger = { r = 1, g = 0.2, b = 0.2, a = 1 }
+                MockEmberUI.Theme.textColor = { r = 1, g = 1, b = 1, a = 1 }
+                MockEmberUI.UI.TextInput = function(txt)
+                    return { _text = txt or "", getText = function(s) return s._text end, setText = function(s, v) s._text = v end }
+                end
+                MockEmberUI.UI.Button = function(title, target, fn)
+                    return { title = title, target = target, onclick = fn, enable = true, setEnable = function(s, v) s.enable = v end }
+                end
+                MockEmberUI.UI.Label = function(txt)
+                    return { _text = txt or "", setText = function(s, v) s._text = v end, setColor = function() end }
+                end
+                MockEmberUI.UI.Column = function() return {} end
+                MockEmberUI.UI.Row = function() return {} end
+                MockEmberUI.UI.Item = function(c) return c or {} end
+                MockEmberUI.UI.Spacer = function() return {} end
+                MockEmberUI.PageLifecycle.attachExternalScope = function(win, sc) win._extScope = sc end
+                MockEmberUI.WindowHost.prerender = function() end
+                MockEmberUI.WindowHost.update = function() end
+                function MockEmberUI.WindowHost:new(x, y, w, h)
+                    local win = {
+                        x = x or 0, y = y or 0, width = w or 400, height = h or 200,
+                        visible = true, disposed = false, moving = false,
+                    }
+                    function win:initialise() end
+                    function win:instantiate() end
+                    function win:addToUIManager()
+                        for i = 1, #mockUiWindows do if mockUiWindows[i] == self then return end end
+                        mockUiWindows[#mockUiWindows + 1] = self
+                    end
+                    function win:removeFromUIManager()
+                        for i = #mockUiWindows, 1, -1 do
+                            if mockUiWindows[i] == self then table.remove(mockUiWindows, i) end
+                        end
+                    end
+                    function win:setX(nx) self.x = nx end
+                    function win:setY(ny) self.y = ny end
+                    function win:getX() return self.x end
+                    function win:getY() return self.y end
+                    function win:getWidth() return self.width end
+                    function win:getHeight() return self.height end
+                    function win:isVisible() return self.visible == true end
+                    function win:getIsVisible() return self.visible == true end
+                    function win:setVisible(v) self.visible = v == true end
+                    function win:setContentSpec() end
+                    function win:isPointOver(px, py)
+                        return self.visible and px >= self.x and py >= self.y and px < self.x + self.width and py < self.y + self.height
+                    end
+                    function win:close()
+                        if self.disposed then return end
+                        self.disposed = true
+                        self.visible = false
+                        self:removeFromUIManager()
+                        if self._extScope and not self._extScope:isDisposed() then
+                            self._extScope:dispose()
+                        end
+                    end
+                    return win
+                end
+
+                local mockRestoreRemoteCalls, mockCheatCurCalls, mockCheatOtherCalls = 0, 0, 0
+                local origHpUpdate = function(self) self._origUpdateSeenOther = self.otherPlayer end
+                local origDidMove = function() return true end
+                local origOnCheat = function(bp, act, pl, other)
+                    if other == nil then mockCheatCurCalls = mockCheatCurCalls + 1
+                    else mockCheatOtherCalls = mockCheatOtherCalls + 1 end
+                end
+                ISPanelJoypad = { update = function() end }
+                ISHealthPanel = {
+                    cheat = false,
+                    IsCharactersInSameCar = function() return false end,
+                    update = origHpUpdate,
+                    DidPatientMove = origDidMove,
+                    onCheat = origOnCheat,
+                    onCheatCurrentPlayer = function() mockCheatCurCalls = mockCheatCurCalls + 1 end,
+                    onCheatOtherPlayer = function() mockCheatOtherCalls = mockCheatOtherCalls + 1 end,
+                }
+                local origInvPaneMouseUp = function() return "orig-pane-up" end
+                local origPageDrop = function() return false end
+                local origDirtyUI = function() end
+                local origHotbarMouseUp = function() return "orig-hotbar-up" end
+                local origAttachAnim = function() end
+                local origDetachAnim = function() end
+                local origEquipAnim = function() end
+                local origEquipPerform = function() return "orig-equip-perf" end
+                local origUnequipAnim = function() end
+                local origUnequipPerform = function() return "orig-unequip-perf" end
+                ISInventoryPane = { onMouseUp = origInvPaneMouseUp }
+                ISInventoryPage = { dropItemsInContainer = origPageDrop, dirtyUI = origDirtyUI }
+                ISHotbar = { onMouseUp = origHotbarMouseUp }
+                ISAttachItemHotbar = { animEvent = origAttachAnim }
+                ISDetachItemHotbar = { animEvent = origDetachAnim }
+                ISEquipWeaponAction = { animEvent = origEquipAnim, perform = origEquipPerform }
+                ISUnequipAction = { animEvent = origUnequipAnim, perform = origUnequipPerform }
+
                 local mockSimDt = 0.25
                 getGameTime = function()
                     return {
@@ -495,7 +795,110 @@ public final class VerifyModule1 {
                 assert(EmberRoutesJava.getResetCount() == 0 and EmberRoutesJava.getNpcResetCount() == 0,
                     "Warehouse mount must NOT call global reset() or resetNpcs()")
                 assert(EmberRoutesJava.getLoadNpcCount() == 1, "NPC load must run exactly once on OnGameStart")
-                assert(#Events.OnFillWorldObjectContextMenu._handlers == 1, "DebugContextMenu must attach 1 menu handler")
+                assert(#Events.OnFillWorldObjectContextMenu._handlers == 2, "DebugContextMenu & NpcContextMenu must attach 2 menu handlers")
+
+                -- M2 NpcMedicalPanel & NpcInventoryPanel contract tests (Chebyshev/cross-floor/cheat fix + LIFO unwrap)
+                local mockDoctor = {
+                    _x = 10.0, _y = 20.0, _z = 0,
+                    getX = function(s) return s._x end,
+                    getY = function(s) return s._y end,
+                    getZ = function(s) return s._z end,
+                    isDead = function() return false end,
+                }
+                local mockPatient = {
+                    _x = 10.3, _y = 20.2, _z = 0,
+                    getX = function(s) return s._x end,
+                    getY = function(s) return s._y end,
+                    getZ = function(s) return s._z end,
+                    isDead = function() return false end,
+                    getCurrentSquare = function() return {} end,
+                    getBodyDamageRemote = function()
+                        return { RestoreToFullHealth = function() mockRestoreRemoteCalls = mockRestoreRemoteCalls + 1 end }
+                    end,
+                }
+                EmberRoutesJava.registerMockNpc("npc_med_1", mockPatient, "Alice", true)
+
+                assert(ISHealthPanel.DidPatientMove(mockDoctor, mockPatient, 10.0, 20.0) == false,
+                    "Small movement within 2 tiles must NOT cancel NPC medical action")
+                mockPatient._x = 11.8; mockPatient._y = 21.8 -- Chebyshev <= 2, Euclidean distSq = 6.48 > 4
+                assert(ISHealthPanel.DidPatientMove(mockDoctor, mockPatient, 10.0, 20.0) == true,
+                    "Euclidean distance > 2 tiles must count as moved")
+                mockPatient._x = 10.2; mockPatient._y = 20.2; mockPatient._z = 1 -- Different floor!
+                assert(ISHealthPanel.DidPatientMove(mockDoctor, mockPatient, 10.0, 20.0) == true,
+                    "Different floor must count as moved")
+
+                local hpInst = {
+                    character = mockPatient,
+                    otherPlayer = mockDoctor,
+                    isNpcMedicalPanel = true,
+                    erNpcId = "npc_med_1",
+                    parent = { getIsVisible = function() return true end, removeFromUIManager = function() end },
+                    getPatient = function(s) return s.character end,
+                    getDoctor = function(s) return s.otherPlayer end,
+                    listbox = { items = { "wound1" }, clear = function(s) s.items = {} end },
+                }
+                ISHealthPanel.update(hpInst)
+                assert(hpInst.blockingMessage ~= nil and mockRestoreRemoteCalls == 0 and #hpInst.listbox.items == 1,
+                    "Cross-floor out-of-range must show blocking overlay without wiping BodyDamageRemote or listbox")
+                mockPatient._z = 0
+                ISHealthPanel.update(hpInst)
+                assert(hpInst.blockingMessage == nil and hpInst.otherPlayer == mockDoctor and hpInst._origUpdateSeenOther == nil,
+                    "In-range ISHealthPanel.update must run local body branch and restore otherPlayer")
+
+                ISHealthPanel.onCheat({}, "bleeding", mockPatient, mockDoctor)
+                assert(mockCheatCurCalls == 1 and mockCheatOtherCalls == 0,
+                    "SP debug cheat on IsoNPC must route to onCheatCurrentPlayer")
+
+                assert(ISInventoryPane.onMouseUp ~= origInvPaneMouseUp and ISInventoryPage.dropItemsInContainer ~= origPageDrop
+                    and ISInventoryPage.dirtyUI ~= origDirtyUI and ISHotbar.onMouseUp ~= origHotbarMouseUp
+                    and ISEquipWeaponAction.perform ~= origEquipPerform and ISUnequipAction.perform ~= origUnequipPerform,
+                    "NpcInventoryPanel must wrap inventory & hotbar hooks on OnGameStart")
+
+                -- M2 NpcContextMenu + Walking Follow MVP toggle + ContextMenu_Trade missing-arg regression check
+                local removedOpts, addedOpts = {}, {}
+                local menuMock = {
+                    addOption = function(_, label, target, fn)
+                        local opt = { label = label, target = target, fn = fn }
+                        addedOpts[#addedOpts + 1] = opt
+                        return opt
+                    end,
+                    addSubMenu = function() end,
+                    removeOptionByName = function(_, name)
+                        removedOpts[name] = true
+                    end,
+                }
+                local origSpecific = getSpecificPlayer
+                getSpecificPlayer = function() return mockDoctor end
+                Events.OnFillWorldObjectContextMenu.fire(0, menuMock, { mockPatient }, false)
+                assert(removedOpts["Trade with Alice"] == true and removedOpts["Medical Check"] == true,
+                    "NpcContextMenu must remove vanilla ContextMenu_Trade(name) and ContextMenu_Medical_Check")
+                local followOpt
+                for i = 1, #addedOpts do
+                    if addedOpts[i].label == "ContextMenu_ER_Npc_FollowFmt:Alice" then
+                        followOpt = addedOpts[i]
+                        break
+                    end
+                end
+                assert(followOpt ~= nil, "NpcContextMenu must inject Follow Me option for live NPC")
+                followOpt.fn(followOpt.target)
+                assert(NpcLoco.isFollowing("npc_med_1") == true and NpcLoco.getFollowState("npc_med_1") == "FOLLOWING",
+                    "Clicking Follow option must activate follow controller")
+
+                addedOpts = {}
+                Events.OnFillWorldObjectContextMenu.fire(0, menuMock, { mockPatient }, false)
+                local stopFollowOpt
+                for i = 1, #addedOpts do
+                    if addedOpts[i].label == "ContextMenu_ER_Npc_StopFollowFmt:Alice" then
+                        stopFollowOpt = addedOpts[i]
+                        break
+                    end
+                end
+                assert(stopFollowOpt ~= nil, "NpcContextMenu must switch to Hold Position when already following")
+                stopFollowOpt.fn(stopFollowOpt.target)
+                assert(NpcLoco.isFollowing("npc_med_1") == false and NpcLoco.getFollowState("npc_med_1") == "INACTIVE",
+                    "Clicking Hold Position must stop follow controller")
+                assert(EmberRoutesJava.isEndClampEnabled() == false, "End motion clamp must default to OFF")
+                getSpecificPlayer = origSpecific
 
                 -- Idempotent OnGameStart + warehouse rescan isolation check
                 Events.OnGameStart.fire()
@@ -598,6 +1001,72 @@ public final class VerifyModule1 {
                 wrapHost.calc = function(x) return origCalc(x) * 3 end
                 assert(wrapHost.calc(2) == 39, "wrapped + secondary mod must compute (2+1+10)*3")
                 assert(wrapHost.plain(4) == 13, "plain wrapped must compute 4*2+5")
+
+                -- Regression tests for ZoneEditorPanel input isolation + ZoneOverlay toggle after Save
+                local ZoneEditor = require "EmberRoutes/UI/ZoneEditorPanel"
+                local ZoneOverlay = require "EmberRoutes/UI/ZoneOverlay"
+                assert(ZoneOverlay.isVisible() == true, "ZoneOverlay starts visible")
+                assert(ZoneOverlay.toggleVisible() == false and ZoneOverlay.isVisible() == false, "ZoneOverlay toggles off")
+                assert(ZoneOverlay.toggleVisible() == true and ZoneOverlay.isVisible() == true, "ZoneOverlay toggles back on")
+
+                local ed = ZoneEditor.open(nil, nil)
+                assert(ed ~= nil and ed.win ~= nil, "ZoneEditorPanel must open cleanly")
+                assert(ed.win.onMouseDownOutside == nil and ed.win.onMouseMoveOutside == nil and ed.win.onMouseUpOutside == nil,
+                    "ZoneEditorPanel must not hook WindowHost onMouse*Outside (prevents bForceOutside ghost commits)")
+                assert(#Events.OnMouseDown._handlers == 1 and #Events.OnMouseMove._handlers == 1 and #Events.OnMouseUp._handlers == 1,
+                    "ZoneEditorPanel must bind world mouse handlers cleanly via Kernel scope")
+                assert(EmberRoutesJava.isZoneEditorActive() == true, "ZoneEditor active state pushed on open")
+
+                mockMouseX, mockMouseY = 200, 300
+                Events.OnMouseMove.fire(200, 300)
+                assert(ed.cursorValid == true and ed.cursorX == 20 and ed.cursorY == 30, "World hover picks iso tile")
+
+                -- Moving onto Save button / window clears hover tile on win:update()
+                mockMouseX, mockMouseY = 120, 250
+                ed.win:update()
+                assert(ed.cursorValid == false, "Entering visible window must immediately clear ground hover tile")
+                Events.OnMouseDown.fire(120, 250)
+                assert(ed.dragging == false and #ed.areas == 0, "MouseDown inside visible window must never start drag")
+
+                -- Drag in world (50,60)..(52,61) -> 3x2 = 6 tiles
+                mockMouseX, mockMouseY, mockLmbDown = 500, 600, true
+                Events.OnMouseDown.fire(500, 600)
+                assert(ed.dragging == true, "World MouseDown starts drag")
+                mockMouseX, mockMouseY = 520, 610
+                Events.OnMouseMove.fire(520, 610)
+                mockLmbDown = false
+                Events.OnMouseUp.fire(520, 610)
+                assert(ed.dragging == false and Geo.totalTiles(ed.areas) == 6, "World MouseUp commits 6 tiles")
+
+                -- Start drag in world (60,70)->(61,71) = 4 tiles, then release LMB over Save button -> commits last world rect without adding button tile (12,25)
+                mockMouseX, mockMouseY, mockLmbDown = 600, 700, true
+                Events.OnMouseDown.fire(600, 700)
+                mockMouseX, mockMouseY = 610, 710
+                Events.OnMouseMove.fire(610, 710)
+                mockMouseX, mockMouseY, mockLmbDown = 120, 250, false
+                ed.win:update()
+                assert(ed.dragging == false and Geo.totalTiles(ed.areas) == 10, "Releasing LMB over UI finishes drag via update fallback (6+4=10 tiles)")
+                assert(not Geo.insideAreas(ed.areas, 12, 25), "Tile underneath Save button must never be added")
+
+                -- Save settlement and verify closed editor never resurrects activeEditor or breaks ZoneOverlay toggle
+                ed:onSave()
+                assert(ed.disposed == true and ZoneEditor.getActive() == nil, "onSave must dispose editor cleanly")
+                assert(#Events.OnMouseDown._handlers == 0 and #Events.OnMouseMove._handlers == 0 and #Events.OnMouseUp._handlers == 0,
+                    "Disposing editor must unbind all world mouse handlers")
+                assert(EmberRoutesJava.isZoneEditorActive() == false, "Saving/closing editor must clear TerritoryRenderer.activeEditor")
+                local savedList = Store.list()
+                assert(#savedList == 1 and Geo.totalTiles(savedList[1].areas) == 10 and not Geo.insideAreas(savedList[1].areas, 12, 25),
+                    "Saved settlement must contain exact 10 tiles without tile under Save button")
+                local callsBefore = EmberRoutesJava.getSyncZoneEditorCalls()
+                ed:pushEditorRenderState()
+                assert(EmberRoutesJava.getSyncZoneEditorCalls() == callsBefore and EmberRoutesJava.isZoneEditorActive() == false,
+                    "Post-close pushEditorRenderState must be blocked and never resurrect activeEditor")
+                assert(ZoneOverlay.toggleVisible() == false and ZoneOverlay.isVisible() == false,
+                    "Right-click overlay hide must work immediately after closing ZoneEditorPanel")
+                assert(ZoneOverlay.toggleVisible() == true and ZoneOverlay.isVisible() == true,
+                    "Right-click overlay show must restore cleanly")
+                assert(Store.deleteSettlement(savedList[1].id) == true, "cleanup regression settlement")
+
                 local savedBefore = EmberRoutesJava.getResetCount()
                 Events.OnMainMenuEnter.fire()
                 assert(not Kernel.isWorldReady() and not Kernel.isModDataReady(), "OnMainMenuEnter must tear down Kernel")
@@ -608,6 +1077,13 @@ public final class VerifyModule1 {
                 assert(EmberRoutesJava.getResetCount() > savedBefore, "teardown must reset Java bridge")
                 HaloTextHelper.addText(npcChar, "restored-after-teardown")
                 assert(#haloCalls == 3, "HaloTextGuard must cleanly unwrap on teardown")
+                assert(ISHealthPanel.update == origHpUpdate and ISHealthPanel.DidPatientMove == origDidMove
+                    and ISHealthPanel.onCheat == origOnCheat,
+                    "NpcMedicalPanel must cleanly unwrap ISHealthPanel hooks on teardown")
+                assert(ISInventoryPane.onMouseUp == origInvPaneMouseUp and ISInventoryPage.dropItemsInContainer == origPageDrop
+                    and ISInventoryPage.dirtyUI == origDirtyUI and ISHotbar.onMouseUp == origHotbarMouseUp
+                    and ISEquipWeaponAction.perform == origEquipPerform and ISUnequipAction.perform == origUnequipPerform,
+                    "NpcInventoryPanel must cleanly unwrap all inventory/hotbar hooks on teardown")
                 """;
 
             LuaClosure testFn = LuaCompiler.loadstring(testLua, "VerifyModule1Test.lua", env);

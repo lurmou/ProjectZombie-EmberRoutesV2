@@ -3,6 +3,7 @@ package emberroutes.npc;
 import zombie.GameTime;
 import zombie.ai.AIBrainPlayerControlVars;
 import zombie.ai.astar.Mover;
+import zombie.characters.IsoPlayer;
 import zombie.characters.component.AIComponent;
 import zombie.iso.IsoGridSquare;
 import zombie.pathfind.IPathfinder;
@@ -29,15 +30,31 @@ public final class EmberLocomotionController {
         INTERRUPTED
     }
 
+    public enum Gait {
+        SNEAK,
+        WALK,
+        RUN,
+        SPRINT
+    }
+
     private static final float STUCK_CHECK_WINDOW_SEC = 0.55F;
     private static final float STUCK_MIN_DISP = 0.14F;
     private static final int MAX_REPATH_RETRIES = 3;
+    private static final int MAX_PATH_SUBMITS_PER_FRAME = 2;
+    private static final long FAILED_GOAL_COOLDOWN_MS = 800L;
+
+    private static volatile int framePathSubmitsRemaining = MAX_PATH_SUBMITS_PER_FRAME;
+    private static volatile long frameBudgetResetMs;
 
     private final Object asyncLock = new Object();
     private long requestGen;
     private IsoNPC pendingNpc;
     private float[] readyRawXyz;
     private boolean asyncFailed;
+    private boolean asyncInFlight;
+    private float asyncGoalX;
+    private float asyncGoalY;
+    private int asyncGoalZ;
 
     private final EmberContextSteering contextSteering = new EmberContextSteering();
     private final EmberPortalActuator portalActuator = new EmberPortalActuator();
@@ -48,6 +65,18 @@ public final class EmberLocomotionController {
     private float goalX;
     private float goalY;
     private int goalZ;
+    private Gait desiredGait = Gait.WALK;
+    private float desiredWalkSpeedCap = -1.0F;
+    private float desiredTrackSpeedScale = 1.0F;
+    private boolean cruiseMode;
+    private boolean cruiseHoldOpen;
+    private boolean pendingDeferredRetarget;
+    private IsoPlayer steerLeader;
+    private boolean steerLeaderMoving;
+    private int failedGoalTileX = Integer.MIN_VALUE;
+    private int failedGoalTileY = Integer.MIN_VALUE;
+    private int failedGoalZ = Integer.MIN_VALUE;
+    private long failedGoalUntilMs;
     private EmberTargetProjector.ProjectedPoint pendingEscapeStart;
     private EmberCorridor corridor;
 
@@ -84,8 +113,116 @@ public final class EmberLocomotionController {
         return lastReason;
     }
 
+    public static void beginFramePathBudget() {
+        framePathSubmitsRemaining = MAX_PATH_SUBMITS_PER_FRAME;
+        frameBudgetResetMs = System.currentTimeMillis();
+    }
+
+    private static synchronized boolean tryConsumeFramePathBudget() {
+        long now = System.currentTimeMillis();
+        if (now - frameBudgetResetMs >= 15L) {
+            framePathSubmitsRemaining = MAX_PATH_SUBMITS_PER_FRAME;
+            frameBudgetResetMs = now;
+        }
+        if (framePathSubmitsRemaining > 0) {
+            framePathSubmitsRemaining--;
+            return true;
+        }
+        return false;
+    }
+
     public boolean isMoving() {
         return active && !arrivedLatched;
+    }
+
+    public void setPortalPolicy(boolean allowWindows, boolean allowTallWalls, float autoCloseClearRadius) {
+        portalActuator.setPortalPolicy(allowWindows, allowTallWalls, autoCloseClearRadius);
+    }
+
+    public void setLeaderPortalGate(boolean active, float lx, float ly, int lz) {
+        portalActuator.setLeaderPortalGate(active, lx, ly, lz);
+    }
+
+    public void setFollowSteerHint(IsoPlayer leader, boolean leaderMoving) {
+        this.steerLeader = leader;
+        this.steerLeaderMoving = leaderMoving;
+    }
+
+    public void setLiveGait(IsoNPC npc, Gait gait, float walkSpeedCap) {
+        setLiveVelocityControl(npc, gait, walkSpeedCap, 1.0F, cruiseHoldOpen);
+    }
+
+    public void setLiveVelocityControl(
+            IsoNPC npc, Gait gait, float walkSpeedCap, float trackSpeedScale, boolean cruiseOpen) {
+        this.desiredGait = gait != null ? gait : Gait.WALK;
+        this.desiredWalkSpeedCap = (Float.isFinite(walkSpeedCap) && walkSpeedCap >= 0.0F)
+                ? Math.min(1.0F, walkSpeedCap) : -1.0F;
+        this.desiredTrackSpeedScale = (Float.isFinite(trackSpeedScale) && trackSpeedScale > 0.0F)
+                ? clamp(trackSpeedScale, 0.45F, 1.15F) : 1.0F;
+        this.cruiseHoldOpen = cruiseOpen;
+        boolean fast = this.desiredGait == Gait.RUN || this.desiredGait == Gait.SPRINT;
+        if (npc != null) {
+            npc.setRunningMode(fast);
+        }
+        if (!fast) {
+            inRunGear = false;
+            smoothedThrottle = Math.min(smoothedThrottle, 0.50F);
+        }
+    }
+
+    public boolean updateCruiseTargetInPlace(IsoNPC npc, float tx, float ty, int tz) {
+        if (npc == null || !active || !cruiseMode || corridor == null || !corridor.isAtFinalGoal()) {
+            return false;
+        }
+        int curZ = EmberTargetProjector.levelOf(npc.getZ());
+        if (curZ != tz || PolygonalMap2.instance == null) {
+            return false;
+        }
+        if (PolygonalMap2.instance.lineClearCollide(npc.getX(), npc.getY(), tx, ty, curZ, npc, false, true)) {
+            return false;
+        }
+        corridor.updateFinalGoal(npc.getX(), npc.getY(), tx, ty, tz);
+        this.goalX = tx;
+        this.goalY = ty;
+        this.goalZ = tz;
+        this.pendingDeferredRetarget = false;
+        return true;
+    }
+
+    public void holdFollowIdle(IsoNPC npc, boolean sneaking) {
+        active = false;
+        arrivedLatched = false;
+        cruiseMode = false;
+        cruiseHoldOpen = false;
+        pendingDeferredRetarget = false;
+        steerLeader = null;
+        steerLeaderMoving = false;
+        corridor = null;
+        pendingEscapeStart = null;
+        smoothedThrottle = 0.0F;
+        inRunGear = false;
+        turn180Latched = false;
+        repathStreak = 0;
+        desiredGait = sneaking ? Gait.SNEAK : Gait.WALK;
+        desiredWalkSpeedCap = -1.0F;
+        desiredTrackSpeedScale = 1.0F;
+        cancelAsyncRequest(npc);
+        if (npc != null) {
+            npc.setRunningMode(false);
+            npc.setSneaking(sneaking);
+            npc.setSprinting(false);
+            npc.setEmberDesiredRunning(false);
+            npc.setEmberDesiredSprinting(false);
+            npc.setEmberWalkSpeedCap(-1.0F);
+            npc.setEmberTrackSpeedScale(1.0F);
+            applyIdleHold(npc, false);
+            npc.setEmberControlActive(false);
+        }
+        synchronized (this) {
+            status = Status.IDLE;
+            lastReason = "FOLLOW_HOLD";
+        }
+        liveReasonTag = "HOLD";
     }
 
     public long moveTo(IsoNPC npc, double rawX, double rawY, double rawZ, boolean running) {
@@ -99,6 +236,17 @@ public final class EmberLocomotionController {
         }
 
         npc.setRunningMode(running);
+        this.desiredGait = running ? Gait.RUN : Gait.WALK;
+        this.desiredWalkSpeedCap = -1.0F;
+        this.desiredTrackSpeedScale = 1.0F;
+        this.cruiseMode = false;
+        this.cruiseHoldOpen = false;
+        this.pendingDeferredRetarget = false;
+        this.steerLeader = null;
+        this.steerLeaderMoving = false;
+        portalActuator.setPortalPolicy(true, true, 0.0F);
+        portalActuator.setLeaderPortalGate(false, 0.0F, 0.0F, 0);
+
         EmberTargetProjector.ProjectedPoint goalProj =
                 EmberTargetProjector.projectGoal(npc, (float) rawX, (float) rawY, (float) rawZ);
         if (goalProj == null) {
@@ -114,6 +262,7 @@ public final class EmberLocomotionController {
         this.goalX = goalProj.x();
         this.goalY = goalProj.y();
         this.goalZ = goalProj.z();
+        this.corridor = null;
         this.active = true;
         this.arrivedLatched = false;
         this.repathStreak = 0;
@@ -144,8 +293,110 @@ public final class EmberLocomotionController {
 
         submitAsyncPathRequest(
                 npc,
-                startProj != null ? startProj : new EmberTargetProjector.ProjectedPoint(npc.getX(), npc.getY(), curZ, false));
+                startProj != null ? startProj : new EmberTargetProjector.ProjectedPoint(npc.getX(), npc.getY(), curZ, false),
+                goalX, goalY, goalZ);
         return seq;
+    }
+
+    /**
+     * 双缓冲动态改标（专用于连续跟随）：
+     * 发起新异步路径请求时不清空现有 corridor，等后台 C++ PathfindNative 回包再原子热切，避免改标顿步；
+     * 不递增 moveSeq（不触发静默点对点回调误报）。
+     */
+    public boolean retarget(
+            IsoNPC npc,
+            float rawX, float rawY, float rawZ,
+            Gait gait, float walkSpeedCap, boolean cruise) {
+        return retarget(npc, rawX, rawY, rawZ, gait, walkSpeedCap, 1.0F, cruise, cruise);
+    }
+
+    public boolean retarget(
+            IsoNPC npc,
+            float rawX, float rawY, float rawZ,
+            Gait gait, float walkSpeedCap, float trackSpeedScale, boolean cruise, boolean cruiseOpen) {
+        if (npc == null || npc.isDead()) {
+            return false;
+        }
+
+        EmberTargetProjector.ProjectedPoint goalProj =
+                EmberTargetProjector.projectGoal(npc, rawX, rawY, rawZ);
+        if (goalProj == null) {
+            return false;
+        }
+
+        float tx = goalProj.x();
+        float ty = goalProj.y();
+        int tz = goalProj.z();
+        int curZ = EmberTargetProjector.levelOf(npc.getZ());
+        float distToGoal = (float) Math.hypot(tx - npc.getX(), ty - npc.getY());
+        if (!cruise && curZ == tz && distToGoal <= EmberParams.ARRIVE_RADIUS) {
+            setLiveVelocityControl(npc, gait, walkSpeedCap, trackSpeedScale, false);
+            this.cruiseMode = false;
+            npc.setEmberControlActive(true);
+            npc.setNativeSmoothPathUnlock(true);
+            cancelVanillaPathBehavior(npc);
+            this.goalX = tx;
+            this.goalY = ty;
+            this.goalZ = tz;
+            cancelAsyncRequest(npc);
+            this.corridor = null;
+            this.pendingDeferredRetarget = false;
+            latchArrived(npc);
+            return true;
+        }
+
+        EmberTargetProjector.ProjectedPoint startProj = EmberTargetProjector.projectStartIfTrapped(npc);
+        boolean directClear = curZ == tz
+                && (startProj == null || !startProj.adjusted())
+                && PolygonalMap2.instance != null
+                && !PolygonalMap2.instance.lineClearCollide(npc.getX(), npc.getY(), tx, ty, curZ, npc, false, true);
+        boolean sameAsyncInFlight = !directClear && asyncInFlight && asyncGoalZ == tz
+                && Math.hypot(tx - asyncGoalX, ty - asyncGoalY) <= 0.80;
+
+        if (!directClear && !sameAsyncInFlight) {
+            int gTileX = (int) Math.floor(tx);
+            int gTileY = (int) Math.floor(ty);
+            if (System.currentTimeMillis() < failedGoalUntilMs
+                    && gTileX == failedGoalTileX && gTileY == failedGoalTileY && tz == failedGoalZ) {
+                return false;
+            }
+        }
+
+        setLiveVelocityControl(npc, gait, walkSpeedCap, trackSpeedScale, cruise && cruiseOpen);
+        this.cruiseMode = cruise;
+        npc.setEmberControlActive(true);
+        npc.setNativeSmoothPathUnlock(true);
+        cancelVanillaPathBehavior(npc);
+        this.goalX = tx;
+        this.goalY = ty;
+        this.goalZ = tz;
+        this.active = true;
+        this.arrivedLatched = false;
+        this.repathStreak = 0;
+        synchronized (this) {
+            this.status = Status.MOVING;
+            this.lastReason = cruise ? "FOLLOW" : "RETARGET";
+        }
+
+        if (directClear) {
+            cancelAsyncRequest(npc);
+            this.corridor = EmberCorridor.buildDirect(npc.getX(), npc.getY(), curZ, null, tx, ty, tz);
+            this.pendingDeferredRetarget = false;
+            return true;
+        }
+        if (sameAsyncInFlight) {
+            return true;
+        }
+
+        EmberTargetProjector.ProjectedPoint effectiveStart =
+                startProj != null ? startProj : new EmberTargetProjector.ProjectedPoint(npc.getX(), npc.getY(), curZ, false);
+        if (tryConsumeFramePathBudget()) {
+            this.pendingDeferredRetarget = false;
+            submitAsyncPathRequest(npc, effectiveStart, tx, ty, tz);
+        } else {
+            this.pendingDeferredRetarget = true;
+        }
+        return true;
     }
 
     public void beforeUpdate(IsoNPC npc) {
@@ -153,7 +404,29 @@ public final class EmberLocomotionController {
         npc.setEmberControlActive(true);
         npc.setNativeSmoothPathUnlock(true);
 
+        if (npc.getVehicle() != null || !npc.getCharacterActions().isEmpty()) {
+            npc.clearManualMovementClamp();
+            npc.setEmberDesiredRunning(false);
+            npc.setEmberDesiredSprinting(false);
+            npc.setEmberWalkSpeedCap(-1.0F);
+            npc.setEmberTrackSpeedScale(1.0F);
+            npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
+            applyZeroMoveInput(npc);
+            resetStuckMonitor(npc);
+            return;
+        }
+
         pollAsyncPathResult(npc);
+
+        if (pendingDeferredRetarget && active && !asyncInFlight && tryConsumeFramePathBudget()) {
+            pendingDeferredRetarget = false;
+            EmberTargetProjector.ProjectedPoint sp = EmberTargetProjector.projectStartIfTrapped(npc);
+            if (sp == null) {
+                sp = new EmberTargetProjector.ProjectedPoint(
+                        npc.getX(), npc.getY(), EmberTargetProjector.levelOf(npc.getZ()), false);
+            }
+            submitAsyncPathRequest(npc, sp, goalX, goalY, goalZ);
+        }
 
         if (arrivedLatched) {
             int curZ = EmberTargetProjector.levelOf(npc.getZ());
@@ -170,7 +443,7 @@ public final class EmberLocomotionController {
                 status = Status.MOVING;
                 lastReason = "REACQUIRE_GOAL";
             }
-            submitAsyncPathRequest(npc, EmberTargetProjector.projectStartIfTrapped(npc));
+            submitAsyncPathRequest(npc, EmberTargetProjector.projectStartIfTrapped(npc), goalX, goalY, goalZ);
         }
 
         if (!active) {
@@ -186,32 +459,68 @@ public final class EmberLocomotionController {
             turn180Latched = false;
             npc.clearManualMovementClamp();
             npc.setEmberDesiredRunning(false);
+            npc.setEmberDesiredSprinting(false);
+            npc.setEmberWalkSpeedCap(-1.0F);
+            npc.setEmberTrackSpeedScale(1.0F);
             npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
             resetStuckMonitor(npc);
             portalActuator.update(npc, null, 0.0F, 0.0F);
             return;
         }
 
-        if (corridor.advanceAndCheckGoal(npc)) {
-            latchArrived(npc);
+        if (corridor.advanceAndCheckGoal(npc, cruiseMode && cruiseHoldOpen)) {
+            if (cruiseMode) {
+                active = false;
+                arrivedLatched = false;
+                cruiseHoldOpen = false;
+                corridor = null;
+                smoothedThrottle = 0.0F;
+                inRunGear = false;
+                liveReasonTag = "CRUISE_END";
+                applyIdleHold(npc, false);
+            } else {
+                latchArrived(npc);
+            }
             return;
         }
 
         float dt = deltaSeconds();
 
-        boolean wantRun = npc.isRunningMode() && !npc.isDraggingCorpse();
+        boolean wantSneak = desiredGait == Gait.SNEAK;
+        boolean fastForward = isTimeAccelerated();
+        boolean wantSprint = !wantSneak && !fastForward && desiredGait == Gait.SPRINT
+                && !npc.isDraggingCorpse() && npc.canSprint();
+        boolean wantRun = !wantSneak && !fastForward
+                && (desiredGait == Gait.RUN || (desiredGait == Gait.SPRINT && !wantSprint))
+                && !npc.isDraggingCorpse();
+        boolean allowFastGait = wantRun || wantSprint;
+
         float lMin = EmberParams.LOOKAHEAD_MIN;
         float lMax = Math.max(lMin, EmberParams.LOOKAHEAD_MAX);
         float lookDist = lMin + (lMax - lMin) * Math.max(0.0F, Math.min(1.0F, smoothedThrottle));
-        float estTurnRadius = wantRun ? 1.46F : 0.45F;
+        float estTurnRadius = allowFastGait ? 1.46F : 0.45F;
         EmberCorridor.CarrotSample sample = corridor.sampleCarrot(npc, lookDist, estTurnRadius);
 
         float rawDirX = sample.carrotX() - npc.getX();
         float rawDirY = sample.carrotY() - npc.getY();
         float rawLen = (float) Math.hypot(rawDirX, rawDirY);
         if (rawLen < 1.0E-4F) {
-            latchArrived(npc);
-            return;
+            if (cruiseMode && cruiseHoldOpen) {
+                float[] fwd = worldSkeletonForward(npc);
+                rawDirX = fwd[0];
+                rawDirY = fwd[1];
+                rawLen = 1.0F;
+            } else {
+                if (cruiseMode) {
+                    active = false;
+                    cruiseHoldOpen = false;
+                    corridor = null;
+                    applyIdleHold(npc, false);
+                } else {
+                    latchArrived(npc);
+                }
+                return;
+            }
         }
         rawDirX /= rawLen;
         rawDirY /= rawLen;
@@ -225,13 +534,17 @@ public final class EmberLocomotionController {
             turn180Latched = false;
             npc.clearManualMovementClamp();
             npc.setEmberDesiredRunning(false);
+            npc.setEmberDesiredSprinting(false);
+            npc.setEmberWalkSpeedCap(-1.0F);
+            npc.setEmberTrackSpeedScale(1.0F);
             npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
             applyZeroMoveInput(npc);
             resetStuckMonitor(npc);
             return;
         }
 
-        EmberContextSteering.SteerOutput avoid = contextSteering.evaluate(npc, rawDirX, rawDirY);
+        EmberContextSteering.SteerOutput avoid =
+                contextSteering.evaluate(npc, rawDirX, rawDirY, steerLeader, steerLeaderMoving);
         if (avoid.yielding()) {
             turn180Latched = false;
             smoothedThrottle = 0.0F;
@@ -239,6 +552,9 @@ public final class EmberLocomotionController {
             npc.faceLocationF(npc.getX() + rawDirX, npc.getY() + rawDirY);
             applyZeroMoveInput(npc);
             npc.setEmberDesiredRunning(false);
+            npc.setEmberDesiredSprinting(false);
+            npc.setEmberWalkSpeedCap(-1.0F);
+            npc.setEmberTrackSpeedScale(1.0F);
             npc.setEmberMotionState(false, 0.25F, EmberParams.TURN_GAIN);
             resetStuckMonitor(npc);
             return;
@@ -267,6 +583,11 @@ public final class EmberLocomotionController {
         int curZ = EmberTargetProjector.levelOf(npc.getZ());
         IsoGridSquare curSq = npc.getCurrentSquare();
         boolean onStairs = curSq != null && curSq.HasStairs();
+        if (onStairs && allowFastGait) {
+            wantSprint = false;
+            wantRun = false;
+            allowFastGait = false;
+        }
 
         boolean tightSpace = false;
         float alphaProx = 1.0F;
@@ -301,7 +622,7 @@ public final class EmberLocomotionController {
         if (turningAround) {
             reasonTag = "TURN_180";
         } else {
-            if (wantRun && absErrRad > Math.toRadians(110.0)) {
+            if (allowFastGait && absErrRad > Math.toRadians(110.0)) {
                 alphaCurv = 1.0F;
                 reasonTag = "TURN_180";
             } else if (tightSpace) {
@@ -320,17 +641,17 @@ public final class EmberLocomotionController {
         }
 
         float alphaBrake = 1.0F;
-        float brakeDist = EmberParams.BRAKE_DIST;
+        float brakeDist = cruiseMode ? 0.0F : EmberParams.BRAKE_DIST;
         boolean inBrakeZone = brakeDist > 0.05F && sample.distToGoal() < brakeDist;
         if (inBrakeZone) {
             alphaBrake = clamp((float) Math.sqrt(sample.distToGoal() / brakeDist), 0.22F, 1.0F);
             reasonTag = "BRAKE";
         }
 
-        float maxThrottle = wantRun ? 1.0F : 0.50F;
+        float maxThrottle = allowFastGait ? 1.0F : 0.50F;
         float targetThrottle = maxThrottle * Math.min(avoid.speedCap(), Math.min(alphaCurv, Math.min(alphaProx, alphaBrake)));
 
-        if (wantRun && smoothedThrottle < 0.58F && !inBrakeZone && avoid.speedCap() > 0.60F) {
+        if (allowFastGait && smoothedThrottle < 0.58F && !inBrakeZone && avoid.speedCap() > 0.60F) {
             smoothedThrottle = Math.max(smoothedThrottle, 0.58F);
         }
 
@@ -344,10 +665,10 @@ public final class EmberLocomotionController {
         smoothedThrottle = clamp(smoothedThrottle, 0.08F, maxThrottle);
 
         float animSpeedScalar;
-        if (!wantRun) {
+        if (!allowFastGait) {
             inRunGear = false;
             animSpeedScalar = clamp(smoothedThrottle / 0.50F, 0.10F, 1.0F);
-        } else if (sample.distToGoal() < Math.min(0.65F, brakeDist) && smoothedThrottle < 0.42F) {
+        } else if (!cruiseMode && sample.distToGoal() < Math.min(0.65F, brakeDist) && smoothedThrottle < 0.42F) {
             inRunGear = false;
             animSpeedScalar = clamp(smoothedThrottle / 0.50F, 0.10F, 1.0F);
         } else {
@@ -355,6 +676,9 @@ public final class EmberLocomotionController {
             float minRunScalar = (inBrakeZone || avoid.speedCap() < 0.60F) ? 0.08F : 0.50F;
             animSpeedScalar = clamp((smoothedThrottle - 0.15F) / 0.85F, minRunScalar, 1.0F);
         }
+
+        boolean inSprintGear = wantSprint && inRunGear && !tightSpace;
+        boolean inRunOnlyGear = inRunGear && !inSprintGear;
 
         float turnGain;
         if (!inRunGear) {
@@ -369,8 +693,14 @@ public final class EmberLocomotionController {
         this.liveAnimScalar = animSpeedScalar;
         this.liveTurnGain = turnGain;
 
-        driveNativeCharacter(npc, steerX, steerY, inRunGear, animSpeedScalar, turnGain);
-        npc.setManualMovementClamp(sample.clampX(), sample.clampY(), sample.clampZ(), sample.clampIsGoal());
+        driveNativeCharacter(
+                npc, steerX, steerY, wantSneak, inRunOnlyGear, inSprintGear,
+                animSpeedScalar, turnGain, desiredWalkSpeedCap, desiredTrackSpeedScale);
+        if (EmberParams.END_CLAMP_ENABLED) {
+            npc.setManualMovementClamp(sample.clampX(), sample.clampY(), sample.clampZ(), sample.clampIsGoal());
+        } else {
+            npc.clearManualMovementClamp();
+        }
 
         if (!onStairs && checkStuck(npc, dt)) {
             handleBlockedOrStuck(npc, "STUCK_REPATH");
@@ -381,6 +711,7 @@ public final class EmberLocomotionController {
         if (npc != null) {
             npc.setRunningMode(running);
         }
+        this.desiredGait = running ? Gait.RUN : Gait.WALK;
         if (!running) {
             inRunGear = false;
             smoothedThrottle = Math.min(smoothedThrottle, 0.50F);
@@ -410,6 +741,14 @@ public final class EmberLocomotionController {
     private void stopInternal(IsoNPC npc) {
         active = false;
         arrivedLatched = false;
+        cruiseMode = false;
+        cruiseHoldOpen = false;
+        pendingDeferredRetarget = false;
+        steerLeader = null;
+        steerLeaderMoving = false;
+        desiredGait = Gait.WALK;
+        desiredWalkSpeedCap = -1.0F;
+        desiredTrackSpeedScale = 1.0F;
         corridor = null;
         pendingEscapeStart = null;
         smoothedThrottle = 0.0F;
@@ -421,7 +760,12 @@ public final class EmberLocomotionController {
         cancelAsyncRequest(npc);
         if (npc != null) {
             npc.clearManualMovementClamp();
+            npc.setSneaking(false);
+            npc.setSprinting(false);
             npc.setEmberDesiredRunning(false);
+            npc.setEmberDesiredSprinting(false);
+            npc.setEmberWalkSpeedCap(-1.0F);
+            npc.setEmberTrackSpeedScale(1.0F);
             npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
             npc.setEmberControlActive(false);
             npc.setNativeSmoothPathUnlock(false);
@@ -430,7 +774,9 @@ public final class EmberLocomotionController {
         }
     }
 
-    private void submitAsyncPathRequest(IsoNPC npc, EmberTargetProjector.ProjectedPoint startPt) {
+    private void submitAsyncPathRequest(
+            IsoNPC npc, EmberTargetProjector.ProjectedPoint startPt,
+            float targetX, float targetY, int targetZ) {
         boolean useNative = PathfindNative.useNativeCode && PathfindNative.instance != null;
         if (!useNative && PolygonalMap2.instance == null) {
             failTrip(npc, Status.NO_PATH, "NO_PATHFINDER");
@@ -443,6 +789,10 @@ public final class EmberLocomotionController {
             pendingNpc = npc;
             readyRawXyz = null;
             asyncFailed = false;
+            asyncInFlight = true;
+            asyncGoalX = targetX;
+            asyncGoalY = targetY;
+            asyncGoalZ = targetZ;
         }
         this.pendingEscapeStart = startPt;
         float sx = startPt != null ? startPt.x() : npc.getX();
@@ -482,37 +832,57 @@ public final class EmberLocomotionController {
         };
 
         if (useNative) {
-            PathfindNative.instance.addRequest(cb, npc, sx, sy, sz, goalX, goalY, goalZ);
+            PathfindNative.instance.addRequest(cb, npc, sx, sy, sz, targetX, targetY, targetZ);
         } else {
-            PolygonalMap2.instance.addRequest(cb, npc, sx, sy, sz, goalX, goalY, goalZ);
+            PolygonalMap2.instance.addRequest(cb, npc, sx, sy, sz, targetX, targetY, targetZ);
         }
     }
 
     private void pollAsyncPathResult(IsoNPC npc) {
         float[] raw = null;
         boolean failed = false;
+        float reqGoalX = goalX;
+        float reqGoalY = goalY;
+        int reqGoalZ = goalZ;
         synchronized (asyncLock) {
             if (npc == pendingNpc) {
                 if (readyRawXyz != null) {
                     raw = readyRawXyz;
+                    reqGoalX = asyncGoalX;
+                    reqGoalY = asyncGoalY;
+                    reqGoalZ = asyncGoalZ;
                     readyRawXyz = null;
                     pendingNpc = null;
+                    asyncInFlight = false;
                 } else if (asyncFailed) {
                     failed = true;
+                    reqGoalX = asyncGoalX;
+                    reqGoalY = asyncGoalY;
+                    reqGoalZ = asyncGoalZ;
                     asyncFailed = false;
                     pendingNpc = null;
+                    asyncInFlight = false;
                 }
             }
         }
         if (raw != null) {
-            this.corridor = EmberCorridor.fromRawCoords(npc, raw, pendingEscapeStart, goalX, goalY, goalZ);
-            this.repathStreak = 0;
-            resetStuckMonitor(npc);
-            if (this.corridor == null) {
+            EmberCorridor built = EmberCorridor.fromRawCoords(npc, raw, pendingEscapeStart, reqGoalX, reqGoalY, reqGoalZ);
+            if (built != null) {
+                this.corridor = built;
+                this.repathStreak = 0;
+                this.failedGoalUntilMs = 0L;
+                resetStuckMonitor(npc);
+            } else if (!cruiseMode || this.corridor == null) {
                 failTrip(npc, Status.NO_PATH, "EMPTY_CORRIDOR");
             }
         } else if (failed) {
-            failTrip(npc, Status.NO_PATH, "NO_PATH");
+            this.failedGoalTileX = (int) Math.floor(reqGoalX);
+            this.failedGoalTileY = (int) Math.floor(reqGoalY);
+            this.failedGoalZ = reqGoalZ;
+            this.failedGoalUntilMs = System.currentTimeMillis() + FAILED_GOAL_COOLDOWN_MS;
+            if (!cruiseMode || this.corridor == null) {
+                failTrip(npc, Status.NO_PATH, "NO_PATH");
+            }
         }
     }
 
@@ -525,14 +895,20 @@ public final class EmberLocomotionController {
         }
         corridor = null;
         applyZeroMoveInput(npc);
+        npc.setEmberTrackSpeedScale(1.0F);
         npc.setEmberMotionState(false, 0.30F, EmberParams.TURN_GAIN);
-        submitAsyncPathRequest(npc, EmberTargetProjector.projectStartIfTrapped(npc));
+        submitAsyncPathRequest(npc, EmberTargetProjector.projectStartIfTrapped(npc), goalX, goalY, goalZ);
     }
 
     private void latchArrived(IsoNPC npc) {
         active = false;
         arrivedLatched = true;
         arrivedAtMs = System.currentTimeMillis();
+        cruiseHoldOpen = false;
+        steerLeader = null;
+        steerLeaderMoving = false;
+        desiredWalkSpeedCap = -1.0F;
+        desiredTrackSpeedScale = 1.0F;
         corridor = null;
         smoothedThrottle = 0.0F;
         inRunGear = false;
@@ -548,6 +924,12 @@ public final class EmberLocomotionController {
     private void failTrip(IsoNPC npc, Status failStatus, String reason) {
         active = false;
         arrivedLatched = false;
+        cruiseMode = false;
+        cruiseHoldOpen = false;
+        steerLeader = null;
+        steerLeaderMoving = false;
+        desiredWalkSpeedCap = -1.0F;
+        desiredTrackSpeedScale = 1.0F;
         corridor = null;
         smoothedThrottle = 0.0F;
         inRunGear = false;
@@ -576,9 +958,12 @@ public final class EmberLocomotionController {
     private void applyIdleHold(IsoNPC npc, boolean clampGoal) {
         turn180Latched = false;
         npc.setEmberDesiredRunning(false);
+        npc.setEmberDesiredSprinting(false);
+        npc.setEmberWalkSpeedCap(-1.0F);
+        npc.setEmberTrackSpeedScale(1.0F);
         applyZeroMoveInput(npc);
         npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
-        if (clampGoal) {
+        if (clampGoal && EmberParams.END_CLAMP_ENABLED) {
             npc.setManualMovementClamp(goalX, goalY, goalZ, true);
         } else {
             npc.clearManualMovementClamp();
@@ -588,7 +973,9 @@ public final class EmberLocomotionController {
     }
 
     private static void driveNativeCharacter(
-            IsoNPC npc, float dirX, float dirY, boolean runGear, float animScalar, float turnGain) {
+            IsoNPC npc, float dirX, float dirY,
+            boolean sneak, boolean runGear, boolean sprintGear,
+            float animScalar, float turnGain, float walkSpeedCap, float trackSpeedScale) {
         cancelVanillaPathBehavior(npc);
         if (!npc.isAiming() && !npc.isStrafing()) {
             npc.setDirectionAngle((float) Math.toDegrees(Math.atan2(dirY, dirX)));
@@ -596,10 +983,14 @@ public final class EmberLocomotionController {
         npc.playerMoveDir.set(dirX, dirY);
         npc.setJustMoved(true);
         npc.setMoving(true);
+        npc.setSneaking(sneak);
         npc.setEmberDesiredRunning(runGear);
+        npc.setEmberDesiredSprinting(sprintGear);
+        npc.setEmberWalkSpeedCap(walkSpeedCap);
+        npc.setEmberTrackSpeedScale(trackSpeedScale);
         npc.setEmberMotionState(true, animScalar, turnGain);
         npc.setRunning(runGear);
-        npc.setSprinting(false);
+        npc.setSprinting(sprintGear);
 
         AIComponent ai = npc.tryGetECSComponent(AIComponent.class);
         if (ai != null && ai.getHumanControlVars() != null) {
@@ -654,6 +1045,7 @@ public final class EmberLocomotionController {
             pendingNpc = null;
             readyRawXyz = null;
             asyncFailed = false;
+            asyncInFlight = false;
         }
         if (npc != null) {
             if (PathfindNative.useNativeCode && PathfindNative.instance != null) {
@@ -664,14 +1056,25 @@ public final class EmberLocomotionController {
         }
     }
 
+    private static boolean isTimeAccelerated() {
+        try {
+            return GameTime.instance != null && GameTime.instance.getMultiplier() > 1.25F;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private boolean checkStuck(IsoNPC npc, float dt) {
         stuckTimerSec += dt;
         if (stuckTimerSec < STUCK_CHECK_WINDOW_SEC) {
             return false;
         }
         float moved = (float) Math.hypot(npc.getX() - stuckAnchorX, npc.getY() - stuckAnchorY);
+        float minDisp = STUCK_MIN_DISP
+                * Math.max(0.45F, desiredTrackSpeedScale)
+                * ((desiredWalkSpeedCap >= 0.0F && desiredWalkSpeedCap < 0.25F) ? 0.75F : 1.0F);
         resetStuckMonitor(npc);
-        return moved < STUCK_MIN_DISP;
+        return moved < minDisp;
     }
 
     private void resetStuckMonitor(IsoNPC npc) {
@@ -697,7 +1100,7 @@ public final class EmberLocomotionController {
         return len > 1.0E-4F ? new float[]{fx / len, fy / len} : new float[]{1.0F, 0.0F};
     }
 
-    private static float deltaSeconds() {
+    static float deltaSeconds() {
         try {
             float dt = GameTime.instance.getMultipliedSecondsSinceLastUpdate();
             if (Float.isFinite(dt) && dt > 0.0F) {

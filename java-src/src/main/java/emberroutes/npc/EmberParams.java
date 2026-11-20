@@ -29,6 +29,9 @@ public final class EmberParams {
     /** 大航向误差低速先转身门禁角度（单位：度；起步或拐死弯偏角超过此阈值时先压低线速度快速转体，防撞墙）。 */
     public static volatile float ROTATE_HEADING_DEG = 80.0F;
 
+    /** 是否启用终点单帧根位移精确截断（默认关闭以保留原版自然收步惯性，仅精细对准工位锚点时可开启）。 */
+    public static volatile boolean END_CLAMP_ENABLED = false;
+
     private EmberParams() {}
 
     public static void resetDefaults() {
@@ -40,6 +43,7 @@ public final class EmberParams {
         LOOKAHEAD_MAX = 1.45F;
         ARRIVE_RADIUS = 0.32F;
         ROTATE_HEADING_DEG = 80.0F;
+        END_CLAMP_ENABLED = false;
     }
 
     public static Float get(String key) {
@@ -53,6 +57,7 @@ public final class EmberParams {
             case "EMBER_LOOK_MAX" -> LOOKAHEAD_MAX;
             case "EMBER_ARRIVE_R" -> ARRIVE_RADIUS;
             case "EMBER_ROTATE_DEG" -> ROTATE_HEADING_DEG;
+            case "EMBER_END_CLAMP" -> END_CLAMP_ENABLED ? 1.0F : 0.0F;
             default -> null;
         };
     }
@@ -72,6 +77,7 @@ public final class EmberParams {
             case "EMBER_LOOK_MAX" -> LOOKAHEAD_MAX = clamp(v, LOOKAHEAD_MIN, 2.50F);
             case "EMBER_ARRIVE_R" -> ARRIVE_RADIUS = clamp(v, 0.05F, 0.60F);
             case "EMBER_ROTATE_DEG" -> ROTATE_HEADING_DEG = clamp(v, 25.0F, 180.0F);
+            case "EMBER_END_CLAMP" -> END_CLAMP_ENABLED = v >= 0.5F;
             default -> {
                 return false;
             }

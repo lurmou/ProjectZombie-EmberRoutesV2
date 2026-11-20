@@ -114,6 +114,25 @@ public final class EmberCorridor {
         return new EmberCorridor(list, startX, startY, startZ);
     }
 
+    public boolean isAtFinalGoal() {
+        return !nodes.isEmpty() && index == nodes.size() - 1 && nodes.get(index).kind == NodeKind.GOAL;
+    }
+
+    public void updateFinalGoal(float startX, float startY, float goalX, float goalY, int goalZ) {
+        if (!isAtFinalGoal()) {
+            return;
+        }
+        float dx = goalX - startX;
+        float dy = goalY - startY;
+        float len = (float) Math.hypot(dx, dy);
+        float nx = len > 1.0E-4F ? dx / len : 1.0F;
+        float ny = len > 1.0E-4F ? dy / len : 0.0F;
+        nodes.set(index, new CorridorNode(goalX, goalY, goalZ, NodeKind.GOAL, nx, ny, 0, 0, 0, 0));
+        this.segStartX = startX;
+        this.segStartY = startY;
+        this.segStartZ = goalZ;
+    }
+
     /** 从后台线程安全拷贝出的纯浮点坐标数组 [x0, y0, z0, ...] 编译门户走廊。 */
     public static EmberCorridor fromRawCoords(
             IsoPlayer actor,
@@ -242,6 +261,11 @@ public final class EmberCorridor {
 
     /** 推进已跨越的走廊节点/半平面，并评估是否已满足终点到达（含点积越界保护）。 */
     public boolean advanceAndCheckGoal(IsoPlayer actor) {
+        return advanceAndCheckGoal(actor, false);
+    }
+
+    /** 推进走廊并在巡航开放模式下允许抑制终点强制刹停。 */
+    public boolean advanceAndCheckGoal(IsoPlayer actor, boolean suppressGoalComplete) {
         if (actor == null || isComplete()) return true;
         float x = actor.getX();
         float y = actor.getY();
@@ -260,6 +284,7 @@ public final class EmberCorridor {
         while (index < nodes.size()) {
             CorridorNode cur = nodes.get(index);
             if (cur.kind == NodeKind.GOAL) {
+                if (suppressGoalComplete) return false;
                 if (z != cur.z) return false;
                 float dx = cur.x - x;
                 float dy = cur.y - y;

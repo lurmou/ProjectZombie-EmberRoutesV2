@@ -105,6 +105,39 @@ function NpcLocomotionPort.getStatus(npcId)
     return EmberRoutesJava.getNpcMoveStatus(npcId)
 end
 
+function NpcLocomotionPort.follow(npcId, opts)
+    if not EmberRoutesJava or not EmberRoutesJava.startNpcFollow or not npcId then
+        return false
+    end
+    if activeMoves[npcId] then
+        settleMove(npcId, "INTERRUPTED", "FOLLOW_START")
+    end
+    local playerIndex = opts and opts.playerIndex or 0
+    local slot = opts and opts.slot or -1
+    return EmberRoutesJava.startNpcFollow(npcId, playerIndex, slot) == true
+end
+
+function NpcLocomotionPort.stopFollow(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.stopNpcFollow or not npcId then
+        return false
+    end
+    return EmberRoutesJava.stopNpcFollow(npcId) == true
+end
+
+function NpcLocomotionPort.isFollowing(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.isNpcFollowing or not npcId then
+        return false
+    end
+    return EmberRoutesJava.isNpcFollowing(npcId) == true
+end
+
+function NpcLocomotionPort.getFollowState(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.getNpcFollowState or not npcId then
+        return "INACTIVE"
+    end
+    return EmberRoutesJava.getNpcFollowState(npcId) or "INACTIVE"
+end
+
 function NpcLocomotionPort.onArrival(npcId, fn)
     assert(npcId and type(fn) == "function", "NpcLocomotionPort.onArrival expects (npcId, function)")
     local list = persistentListeners[npcId]

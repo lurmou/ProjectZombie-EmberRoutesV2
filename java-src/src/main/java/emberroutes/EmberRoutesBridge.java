@@ -1,5 +1,6 @@
 package emberroutes;
 
+import emberroutes.npc.IsoNPC;
 import emberroutes.npc.NpcManager;
 import emberroutes.warehouse.ContainerDirtyQueue;
 import emberroutes.warehouse.TerritoryContour;
@@ -234,6 +235,22 @@ public final class EmberRoutesBridge {
         return out;
     }
 
+    public static String getNpcId(Object obj) {
+        return NpcManager.getNpcId(obj);
+    }
+
+    public static boolean isNpcAttached(String npcId) {
+        return NpcManager.isNpcAttached(npcId);
+    }
+
+    public static String getNpcDisplayName(String npcId) {
+        return NpcManager.getNpcDisplayName(npcId);
+    }
+
+    public static IsoNPC getNpcObject(String npcId) {
+        return NpcManager.getLiveNpc(npcId);
+    }
+
     public static KahluaTable getNpcInfo(String npcId) {
         NpcManager.NpcInfoView info = NpcManager.getInfo(npcId);
         if (info == null) return null;
@@ -299,6 +316,30 @@ public final class EmberRoutesBridge {
 
     public static boolean stopNpcMove(String npcId) {
         return NpcManager.stopMove(npcId);
+    }
+
+    public static boolean startNpcFollow(String npcId, double playerIndex, double slot) {
+        return NpcManager.startFollow(npcId, (int) Math.round(playerIndex), (int) Math.round(slot));
+    }
+
+    public static boolean stopNpcFollow(String npcId) {
+        return NpcManager.stopFollow(npcId);
+    }
+
+    public static boolean isNpcFollowing(String npcId) {
+        return NpcManager.isFollowing(npcId);
+    }
+
+    public static String getNpcFollowState(String npcId) {
+        return NpcManager.getFollowState(npcId);
+    }
+
+    public static boolean isEndClampEnabled() {
+        return emberroutes.npc.EmberParams.END_CLAMP_ENABLED;
+    }
+
+    public static void setEndClampEnabled(boolean enabled) {
+        emberroutes.npc.EmberParams.END_CLAMP_ENABLED = enabled;
     }
 
     public static boolean setNpcRunning(String npcId, boolean running) {

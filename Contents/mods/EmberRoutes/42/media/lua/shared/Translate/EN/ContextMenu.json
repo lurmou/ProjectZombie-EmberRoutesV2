@@ -19,5 +19,12 @@
     "ContextMenu_ER_M2_InspectFmt": "Inspect NPC & Item IDs [%1]",
     "ContextMenu_ER_M2_SaveNow": "Save NPC Binary Snapshots Now",
     "ContextMenu_ER_M2_KillFmt": "Kill NPC (Corpse Conservation Test) [%1]",
-    "ContextMenu_ER_M2_DespawnAll": "Despawn All Test NPCs"
+    "ContextMenu_ER_M2_DespawnAll": "Despawn All Test NPCs",
+    "ContextMenu_ER_M2_FollowAll": "Follow Me (All NPCs)",
+    "ContextMenu_ER_M2_StopFollowAll": "Stop Following (All NPCs)",
+    "ContextMenu_ER_Npc_FollowFmt": "Follow Me | %1",
+    "ContextMenu_ER_Npc_StopFollowFmt": "Hold Position | %1",
+    "ContextMenu_ER_Npc_MedicalCheckFmt": "Medical Check | %1",
+    "ContextMenu_ER_Npc_OpenInventoryFmt": "Open Backpack | %1",
+    "ContextMenu_ER_NpcInv_TakeToPlayer": "Take to My Inventory"
 }

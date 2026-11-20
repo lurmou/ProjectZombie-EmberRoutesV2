@@ -128,6 +128,22 @@ function EmberRoutesJava.despawnAllNpcs() end
 ---@return table
 function EmberRoutesJava.listNpcIds() end
 
+---@param obj any
+---@return string
+function EmberRoutesJava.getNpcId(obj) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.isNpcAttached(npcId) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.getNpcDisplayName(npcId) end
+
+---@param npcId string
+---@return any
+function EmberRoutesJava.getNpcObject(npcId) end
+
 ---@param npcId string
 ---@return table
 function EmberRoutesJava.getNpcInfo(npcId) end
@@ -174,6 +190,30 @@ function EmberRoutesJava.moveNpcTo(npcId, x, y, z, running) end
 ---@param npcId string
 ---@return boolean
 function EmberRoutesJava.stopNpcMove(npcId) end
+
+---@param npcId string
+---@param playerIndex number
+---@param slot number
+---@return boolean
+function EmberRoutesJava.startNpcFollow(npcId, playerIndex, slot) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.stopNpcFollow(npcId) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.isNpcFollowing(npcId) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.getNpcFollowState(npcId) end
+
+---@return boolean
+function EmberRoutesJava.isEndClampEnabled() end
+
+---@param enabled boolean
+function EmberRoutesJava.setEndClampEnabled(enabled) end
 
 ---@param npcId string
 ---@param running boolean

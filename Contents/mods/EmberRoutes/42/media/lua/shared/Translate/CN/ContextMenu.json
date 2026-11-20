@@ -19,5 +19,12 @@
     "ContextMenu_ER_M2_InspectFmt": "检查 NPC 槽位与物品 ID [%1]",
     "ContextMenu_ER_M2_SaveNow": "立即序列化写入 NPC 二进制存档",
     "ContextMenu_ER_M2_KillFmt": "击杀 NPC (摸尸原件守恒测试) [%1]",
-    "ContextMenu_ER_M2_DespawnAll": "清理全部测试 NPC"
+    "ContextMenu_ER_M2_DespawnAll": "清理全部测试 NPC",
+    "ContextMenu_ER_M2_FollowAll": "全员跟随测试 (步行编队)",
+    "ContextMenu_ER_M2_StopFollowAll": "全员停止跟随",
+    "ContextMenu_ER_Npc_FollowFmt": "跟随我 | %1",
+    "ContextMenu_ER_Npc_StopFollowFmt": "原地待命 | %1",
+    "ContextMenu_ER_Npc_MedicalCheckFmt": "医疗检查 | %1",
+    "ContextMenu_ER_Npc_OpenInventoryFmt": "查看背包 | %1",
+    "ContextMenu_ER_NpcInv_TakeToPlayer": "拿取到我的背包"
 }

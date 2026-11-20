@@ -1,10 +1,15 @@
 package emberroutes.npc;
 
+import java.util.List;
 import zombie.Lua.LuaEventManager;
 import zombie.UpdateSchedulerSimulationLevel;
 import zombie.characters.IsoGameCharacter;
 import zombie.characters.IsoPlayer;
 import zombie.characters.SurvivorDesc;
+import zombie.core.skinnedmodel.advancedanimation.AdvancedAnimator;
+import zombie.core.skinnedmodel.advancedanimation.AnimLayer;
+import zombie.core.skinnedmodel.advancedanimation.LiveAnimNode;
+import zombie.core.skinnedmodel.animation.AnimationTrack;
 import zombie.iso.IsoCamera;
 import zombie.iso.IsoCell;
 import zombie.iso.Vector2;
@@ -22,6 +27,7 @@ import zombie.iso.sprite.IsoReticleMode;
 public final class IsoNPC extends IsoPlayer {
     private final String npcId;
     private final EmberLocomotionController locomotion = new EmberLocomotionController();
+    private final EmberFollowController follow = new EmberFollowController();
 
     private boolean attached;
     private boolean runningMode;
@@ -31,6 +37,11 @@ public final class IsoNPC extends IsoPlayer {
     private boolean emberControlActive;
     private boolean emberMoving;
     private boolean emberDesiredRunning;
+    private boolean emberDesiredSprinting;
+    private float emberWalkSpeedCap = -1.0F;
+    private float emberTrackSpeedScale = 1.0F;
+    private boolean trackSpeedScaleDirty;
+    private boolean inPreMovementRatesPhase;
     private float emberAnimSpeedScalar = 1.0F;
     private float emberTurnDelta = EmberParams.TURN_GAIN;
 
@@ -62,6 +73,10 @@ public final class IsoNPC extends IsoPlayer {
         return locomotion;
     }
 
+    public EmberFollowController getFollow() {
+        return follow;
+    }
+
     public void setAttached(boolean attached) {
         this.attached = attached;
     }
@@ -87,8 +102,12 @@ public final class IsoNPC extends IsoPlayer {
         if (!active) {
             this.emberMoving = false;
             this.emberDesiredRunning = false;
+            this.emberDesiredSprinting = false;
+            this.emberWalkSpeedCap = -1.0F;
+            this.emberTrackSpeedScale = 1.0F;
             this.emberAnimSpeedScalar = 1.0F;
             clearManualMovementClamp();
+            applyEmberTrackSpeedScale();
         }
     }
 
@@ -100,6 +119,68 @@ public final class IsoNPC extends IsoPlayer {
 
     public void setEmberDesiredRunning(boolean running) {
         this.emberDesiredRunning = running;
+    }
+
+    public void setEmberDesiredSprinting(boolean sprinting) {
+        this.emberDesiredSprinting = sprinting;
+    }
+
+    public void setEmberWalkSpeedCap(float cap) {
+        this.emberWalkSpeedCap = (Float.isFinite(cap) && cap >= 0.0F) ? Math.min(1.0F, cap) : -1.0F;
+    }
+
+    public void setEmberTrackSpeedScale(float scale) {
+        float clamped = (Float.isFinite(scale) && scale > 0.0F)
+                ? Math.max(0.45F, Math.min(1.15F, scale))
+                : 1.0F;
+        if (Math.abs(clamped - 1.0F) > 0.01F) {
+            this.emberTrackSpeedScale = clamped;
+            this.trackSpeedScaleDirty = true;
+        } else {
+            this.emberTrackSpeedScale = 1.0F;
+        }
+    }
+
+    private void applyEmberTrackSpeedScale() {
+        if (!trackSpeedScaleDirty && Math.abs(emberTrackSpeedScale - 1.0F) <= 0.01F) {
+            return;
+        }
+        AdvancedAnimator anim = getAdvancedAnimator();
+        AnimLayer root = (anim != null) ? anim.getRootLayer() : null;
+        if (root == null) {
+            return;
+        }
+        boolean allowScale = emberControlActive && emberMoving && !isDead()
+                && Math.abs(emberTrackSpeedScale - 1.0F) > 0.01F
+                && "movement".equalsIgnoreCase(root.getCurrentStateName());
+        List<LiveAnimNode> nodes = root.getLiveAnimNodes();
+        if (nodes != null) {
+            for (int i = 0, n = nodes.size(); i < n; i++) {
+                LiveAnimNode node = nodes.get(i);
+                if (node == null || node.getSourceNode() == null) {
+                    continue;
+                }
+                boolean isMovementNode = node.getSourceNode().parentState != null
+                        && "movement".equalsIgnoreCase(node.getSourceNode().parentState.name);
+                if (!isMovementNode) {
+                    continue;
+                }
+                float baseScale = node.getSpeedScale(this);
+                if (!Float.isFinite(baseScale) || baseScale <= 0.0F) {
+                    continue;
+                }
+                float targetDelta = (allowScale && node.isActive()) ? (baseScale * emberTrackSpeedScale) : baseScale;
+                for (int j = 0, tc = node.getMainAnimationTracksCount(); j < tc; j++) {
+                    AnimationTrack track = node.getMainAnimationTrackAt(j);
+                    if (track != null) {
+                        track.setSpeedDelta(targetDelta);
+                    }
+                }
+            }
+        }
+        if (Math.abs(emberTrackSpeedScale - 1.0F) <= 0.01F) {
+            trackSpeedScaleDirty = false;
+        }
     }
 
     public void setManualMovementClamp(float x, float y, int z, boolean isFinalGoal) {
@@ -120,6 +201,7 @@ public final class IsoNPC extends IsoPlayer {
     }
 
     public void applyManualMovementClamp(Vector2 deferred) {
+        if (!EmberParams.END_CLAMP_ENABLED) return;
         if (deferred == null || !manualMovementClampActive) return;
         if (EmberTargetProjector.levelOf(getZ()) != manualMovementClampZ) return;
 
@@ -180,23 +262,43 @@ public final class IsoNPC extends IsoPlayer {
     }
 
     @Override
+    public void updateMovementRates() {
+        inPreMovementRatesPhase = false;
+        super.updateMovementRates();
+    }
+
+    @Override
     protected void calculateWalkSpeed() {
         super.calculateWalkSpeed();
         if (emberControlActive && emberMoving) {
             float physCap = getVariableFloat("WalkSpeed", 1.0F);
-            float cvt = Math.max(0.05F, Math.min(1.0F, physCap * emberAnimSpeedScalar));
+            float effCap = (emberWalkSpeedCap >= 0.0F) ? Math.min(physCap, emberWalkSpeedCap) : physCap;
+            float minFloor = (emberWalkSpeedCap >= 0.0F && emberWalkSpeedCap < 0.05F) ? 0.0F : 0.05F;
+            float cvt = Math.max(minFloor, Math.min(1.0F, effCap * emberAnimSpeedScalar));
             setVariable("WalkSpeed", cvt);
         }
     }
 
     @Override
     public void setRunning(boolean bRunning) {
-        // 拦截 IsoPlayer.updateInternal2 中段对 running 的无条件清零
-        if (emberControlActive && emberMoving && emberDesiredRunning && !bRunning) {
+        // 拦截 IsoPlayer.updateInternal2 中段对 running 的无条件清零（冲刺态除外）
+        if (emberControlActive && emberMoving && emberDesiredRunning && !emberDesiredSprinting
+                && !isSprinting() && !bRunning) {
             super.setRunning(true);
             return;
         }
         super.setRunning(bRunning);
+    }
+
+    @Override
+    public void setSprinting(boolean bSprinting) {
+        // 仅在 updateInternal2 读取输入前的清零阶段保持目标冲刺，放行后续树木/负伤自动降挡
+        if (inPreMovementRatesPhase && emberControlActive && emberMoving && emberDesiredSprinting
+                && !bSprinting && canSprint() && !isSneaking()) {
+            super.setSprinting(true);
+            return;
+        }
+        super.setSprinting(bSprinting);
     }
 
     @Override
@@ -224,6 +326,9 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public void OnDeath() {
+        this.emberTrackSpeedScale = 1.0F;
+        applyEmberTrackSpeedScale();
+        follow.stop(this, "DEATH");
         locomotion.interrupt(this, "DEATH");
         StopAllActionQueue();
         if (isAsleep()) {
@@ -254,10 +359,14 @@ public final class IsoNPC extends IsoPlayer {
         IsoReticleMode reticleBefore = reticle != null ? reticle.getTargetReticleMode() : null;
         try {
             if (!isDead()) {
+                follow.beforeLocomotion(this);
                 locomotion.beforeUpdate(this);
             }
+            applyEmberTrackSpeedScale();
+            inPreMovementRatesPhase = true;
             super.update();
         } finally {
+            inPreMovementRatesPhase = false;
             IsoPlayer.setInstance(playerBefore);
             if (cameraBefore == null) {
                 IsoCamera.clearCameraCharacter();

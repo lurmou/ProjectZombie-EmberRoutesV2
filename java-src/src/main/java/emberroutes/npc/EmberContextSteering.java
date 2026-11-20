@@ -46,6 +46,12 @@ public final class EmberContextSteering {
     }
 
     public SteerOutput evaluate(IsoPlayer self, float desiredX, float desiredY) {
+        return evaluate(self, desiredX, desiredY, null, false);
+    }
+
+    public SteerOutput evaluate(
+            IsoPlayer self, float desiredX, float desiredY,
+            IsoGameCharacter followLeader, boolean leaderMoving) {
         float dLen = (float) Math.hypot(desiredX, desiredY);
         if (self == null || dLen < 1.0E-4F) {
             return new SteerOutput(0.0F, 0.0F, 0.0F, false);
@@ -81,8 +87,22 @@ public final class EmberContextSteering {
                     float fwd = rx * ux + ry * uy;
                     if (fwd < -0.15F) continue;
 
-                    hasNearbyAgent = true;
                     float dist = (float) Math.sqrt(distSq);
+                    if (dist > 0.80F) {
+                        if (followLeader != null && ch == followLeader && leaderMoving) {
+                            continue;
+                        }
+                        if (ch instanceof IsoNPC otherNpc && otherNpc.isJustMoved() && otherNpc.playerMoveDir != null) {
+                            float mvX = otherNpc.playerMoveDir.x;
+                            float mvY = otherNpc.playerMoveDir.y;
+                            float mvLen = (float) Math.hypot(mvX, mvY);
+                            if (mvLen > 1.0E-4F && ((mvX / mvLen) * ux + (mvY / mvLen) * uy) > 0.45F) {
+                                continue;
+                            }
+                        }
+                    }
+
+                    hasNearbyAgent = true;
                     float obX = rx / dist;
                     float obY = ry / dist;
                     float weight = Math.max(0.0F, (DETECT_RADIUS - dist) / (DETECT_RADIUS - 0.30F));

@@ -104,6 +104,7 @@ public final class NpcManager {
         for (NpcRecord rec : records.values()) {
             if (rec.liveNpc != null) {
                 try {
+                    rec.liveNpc.getFollow().stop(rec.liveNpc, false, "RESET");
                     rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "RESET");
                 } catch (Throwable ignored) {}
                 detachFromWorld(rec.liveNpc, owningCell);
@@ -112,6 +113,7 @@ public final class NpcManager {
         }
         records.clear();
         pendingMoveEvents.clear();
+        EmberLeaderTrail.resetAll();
         owningCell = null;
         nextIdSeq = 1;
         tickCounter = 0;
@@ -208,6 +210,7 @@ public final class NpcManager {
         NpcRecord rec = records.remove(npcId);
         if (rec == null) return false;
         if (rec.liveNpc != null) {
+            rec.liveNpc.getFollow().stop(rec.liveNpc, false, "DESPAWN");
             rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "DESPAWN");
             collectSettledMoveEventLocked(rec);
             detachFromWorld(rec.liveNpc, currentCell());
@@ -234,6 +237,7 @@ public final class NpcManager {
             return false;
         }
         IsoNPC npc = rec.liveNpc;
+        npc.getFollow().stop(npc, true, "OFFSCREEN");
         npc.getLocomotion().interrupt(npc, "OFFSCREEN");
         collectSettledMoveEventLocked(rec);
         try {
@@ -264,6 +268,7 @@ public final class NpcManager {
     }
 
     public static synchronized void tick() {
+        EmberLocomotionController.beginFramePathBudget();
         IsoCell cell = currentCell();
         if (cell == null) return;
         syncOwningCell(cell);
@@ -386,6 +391,7 @@ public final class NpcManager {
         if (npc == null) return;
         NpcRecord rec = records.get(npc.getNpcId());
         if (rec != null) {
+            npc.getFollow().stop(npc, false, "DEAD");
             npc.getLocomotion().interrupt(npc, "DEAD");
             collectSettledMoveEventLocked(rec);
             rec.deadRetired = true;
@@ -511,6 +517,7 @@ public final class NpcManager {
         if (rec == null || !rec.phasedIn || rec.liveNpc == null || rec.liveNpc.isDead()) {
             return -1L;
         }
+        rec.liveNpc.getFollow().stop(rec.liveNpc, false, "MOVE_TO");
         long seq = rec.liveNpc.getLocomotion().moveTo(rec.liveNpc, x, y, z, running);
         collectSettledMoveEventLocked(rec);
         return seq;
@@ -519,9 +526,105 @@ public final class NpcManager {
     public static synchronized boolean stopMove(String npcId) {
         NpcRecord rec = records.get(npcId);
         if (rec == null || rec.liveNpc == null) return false;
+        rec.liveNpc.getFollow().stop(rec.liveNpc, false, "STOP");
         rec.liveNpc.getLocomotion().stop(rec.liveNpc);
         collectSettledMoveEventLocked(rec);
         return true;
+    }
+
+    public static synchronized boolean startFollow(String npcId, int playerIndex, int slot) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null || !rec.phasedIn || rec.liveNpc == null || rec.liveNpc.isDead()) {
+            return false;
+        }
+        rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "FOLLOW_START");
+        collectSettledMoveEventLocked(rec);
+        rec.liveNpc.getFollow().start(playerIndex, slot);
+        return true;
+    }
+
+    public static synchronized boolean stopFollow(String npcId) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null || rec.liveNpc == null) return false;
+        rec.liveNpc.getFollow().stop(rec.liveNpc, true, "USER_STOP");
+        return true;
+    }
+
+    public static synchronized boolean isFollowing(String npcId) {
+        NpcRecord rec = records.get(npcId);
+        return rec != null && rec.phasedIn && rec.liveNpc != null && !rec.liveNpc.isDead()
+                && rec.liveNpc.getFollow().isEnabled();
+    }
+
+    public static synchronized String getFollowState(String npcId) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null || !rec.phasedIn || rec.liveNpc == null || rec.liveNpc.isDead()) {
+            return "INACTIVE";
+        }
+        return rec.liveNpc.getFollow().getState().name();
+    }
+
+    static synchronized int resolveEffectiveFollowRank(IsoNPC self, int playerIndex) {
+        return resolveEffectiveFollowRankLocked(self, playerIndex);
+    }
+
+    private static int resolveEffectiveFollowRankLocked(IsoNPC self, int playerIndex) {
+        if (self == null) return 0;
+        String selfId = self.getNpcId();
+        int selfSlot = self.getFollow().getRequestedSlot();
+        int rank = 0;
+        for (NpcRecord rec : records.values()) {
+            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc.isDead()) continue;
+            IsoNPC other = rec.liveNpc;
+            if (other == self) continue;
+            EmberFollowController fc = other.getFollow();
+            if (!fc.isEnabled() || fc.getLeaderPlayerIndex() != playerIndex) continue;
+            int otherSlot = fc.getRequestedSlot();
+            if (compareFollowerOrder(otherSlot, rec.npcId, selfSlot, selfId) < 0) {
+                rank++;
+            }
+        }
+        return rank;
+    }
+
+    private static int compareFollowerOrder(int slotA, String idA, int slotB, String idB) {
+        boolean hasA = slotA >= 0;
+        boolean hasB = slotB >= 0;
+        if (hasA != hasB) {
+            return hasA ? -1 : 1;
+        }
+        if (hasA && slotA != slotB) {
+            return Integer.compare(slotA, slotB);
+        }
+        String sa = idA != null ? idA : "";
+        String sb = idB != null ? idB : "";
+        return sa.compareTo(sb);
+    }
+
+    static synchronized boolean isHigherRankFollowerOnStairsAhead(IsoNPC self, int playerIndex, int myRank) {
+        if (self == null || myRank <= 0) return false;
+        int selfZ = EmberTargetProjector.levelOf(self.getZ());
+        for (NpcRecord rec : records.values()) {
+            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc.isDead()) continue;
+            IsoNPC other = rec.liveNpc;
+            if (other == self) continue;
+            EmberFollowController fc = other.getFollow();
+            if (!fc.isEnabled() || fc.getLeaderPlayerIndex() != playerIndex) continue;
+            int otherRank = fc.getRequestedSlot() >= 0
+                    ? fc.getRequestedSlot()
+                    : resolveEffectiveFollowRankLocked(other, playerIndex);
+            if (otherRank >= myRank) continue;
+            int otherZ = EmberTargetProjector.levelOf(other.getZ());
+            if (Math.abs(otherZ - selfZ) > 1) continue;
+            IsoGridSquare sq = other.getCurrentSquare();
+            if (sq == null || !sq.HasStairs()) continue;
+            float dx = other.getX() - self.getX();
+            float dy = other.getY() - self.getY();
+            if (dx * dx + dy * dy <= 6.76F) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static synchronized boolean setRunning(String npcId, boolean running) {
@@ -547,6 +650,67 @@ public final class NpcManager {
 
     public static synchronized List<String> listIds() {
         return new ArrayList<>(records.keySet());
+    }
+
+    public static synchronized String getNpcId(Object obj) {
+        if (!(obj instanceof IsoNPC npc)) {
+            return null;
+        }
+        String id = npc.getNpcId();
+        if (id == null || id.isEmpty()) {
+            return null;
+        }
+        NpcRecord rec = records.get(id);
+        return (rec != null && rec.liveNpc == npc && rec.phasedIn && !rec.deadRetired) ? id : null;
+    }
+
+    public static synchronized boolean isNpcAttached(String npcId) {
+        if (npcId == null || npcId.isEmpty()) {
+            return false;
+        }
+        NpcRecord rec = records.get(npcId);
+        return rec != null
+                && rec.phasedIn
+                && !rec.deadRetired
+                && rec.liveNpc != null
+                && rec.liveNpc.isAttached()
+                && !rec.liveNpc.isDead()
+                && rec.liveNpc.getCurrentSquare() != null;
+    }
+
+    public static synchronized String getNpcDisplayName(String npcId) {
+        if (npcId == null || npcId.isEmpty()) {
+            return null;
+        }
+        NpcRecord rec = records.get(npcId);
+        if (rec == null) {
+            return null;
+        }
+        if (rec.liveNpc != null && rec.liveNpc.getUsername() != null && !rec.liveNpc.getUsername().isEmpty()) {
+            return rec.liveNpc.getUsername();
+        }
+        if (rec.offscreenSnapshot != null
+                && rec.offscreenSnapshot.displayName != null
+                && !rec.offscreenSnapshot.displayName.isEmpty()) {
+            return rec.offscreenSnapshot.displayName;
+        }
+        return rec.npcId;
+    }
+
+    public static synchronized IsoNPC getLiveNpc(String npcId) {
+        if (npcId == null || npcId.isEmpty()) {
+            return null;
+        }
+        NpcRecord rec = records.get(npcId);
+        if (rec != null
+                && rec.phasedIn
+                && !rec.deadRetired
+                && rec.liveNpc != null
+                && rec.liveNpc.isAttached()
+                && !rec.liveNpc.isDead()) {
+            return rec.liveNpc;
+        }
+        return null;
     }
 
     public static synchronized NpcInfoView getInfo(String npcId) {
