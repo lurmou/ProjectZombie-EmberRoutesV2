@@ -1,0 +1,47 @@
+name: PR checks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  translations:
+    name: Translation parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check CN/EN translations
+        run: python3 tools/check_i18n.py
+
+  duplication:
+    name: Duplication report (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Compare against PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_commit=$(git merge-base HEAD "$BASE_SHA")
+          echo "Comparing against merge base $base_commit"
+          npm exec --yes --package=jscpd@5.3.2 -- jscpd \
+            Contents/mods/EmberRoutes/42/media/lua java-src/src/main/java \
+            --format lua,java --min-lines 6 --min-tokens 60 \
+            --baseline-from-ref "$base_commit" --fail-on-empty --no-tips --no-colors | tee duplication-report.txt
+          {
+            echo '## Duplication report (advisory)'
+            echo 'Matches marked [NEW] should be reviewed; similarity does not block the PR.'
+            echo '```'
+            cat duplication-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
