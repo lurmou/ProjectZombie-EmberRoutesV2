@@ -7,6 +7,7 @@ import emberroutes.warehouse.SmartSlot.LeaseStatus;
 import emberroutes.warehouse.SmartZoningPolicy.ContainerFilterRule;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -164,5 +165,92 @@ class SmartZoningAndSlotTest {
         assertTrue(SmartItemPicker.acquireItemSoftLock(7002, "s1", "npc_1", 10.0, 30.0, scope::defer));
         scope.close();
         assertFalse(SmartItemPicker.isItemSoftLockedByOther(7002, "npc_2", 11.0));
+    }
+
+    @Test
+    void fineGrainedCategoriesPrioritizeMedicalToolsAndMatchParentPresets() {
+        // 手术刀/镊子/缝合针/持针器按最常用用途优先归入 medical.bandages，绝不滑入武器或文具
+        assertFalse(SmartZoningPolicy.isFakeWeapon("Base.Scalpel"));
+        assertEquals("medical.bandages", WarehouseFastIndex.classifyItemFacts(
+                "Base.Scalpel", "Weapon", "FirstAidWeapon", Set.of("sharpenable", "hasmetal"),
+                false, false, false, false, false, false, false, false, false));
+        assertEquals("medical.bandages", WarehouseFastIndex.classifyItemFacts(
+                "Base.Tweezers", "Normal", "FirstAid", Set.of("removebullet", "removeglass", "tweezers"),
+                false, false, false, false, false, false, false, false, false));
+        assertEquals("medical.bandages", WarehouseFastIndex.classifyItemFacts(
+                "Base.SutureNeedle", "Normal", "FirstAid", Set.of("fitswallet"),
+                false, false, false, false, false, false, false, false, false));
+        assertEquals("medical.bandages", WarehouseFastIndex.classifyItemFacts(
+                "Base.SutureNeedleHolder", "Normal", "FirstAid", Set.of("removebullet", "removeglass"),
+                false, false, false, false, false, false, false, false, false));
+        assertEquals("medical.pills", WarehouseFastIndex.classifyItemFacts(
+                "Base.Pills", "Drainable", "FirstAid", Set.of("consumable"),
+                false, false, false, false, false, false, false, false, false));
+        assertEquals("medical.pills", WarehouseFastIndex.classifyItemFacts(
+                "Base.Antibiotics", "Food", "FirstAid", Set.of(),
+                true, false, false, false, false, false, false, false, false));
+
+        // 食物四分流：腐烂->scrap.compost，熟食->food.meals，生鲜->food.perishable，罐头->food.stable
+        assertEquals("scrap.compost", WarehouseFastIndex.classifyItemFacts(
+                "Base.Apple", "Food", "Food", Set.of(),
+                true, true, false, true, false, false, false, false, false));
+        assertEquals("food.meals", WarehouseFastIndex.classifyItemFacts(
+                "Base.StewPot", "Food", "Food", Set.of(),
+                true, false, true, true, false, false, false, false, false));
+        assertEquals("food.perishable", WarehouseFastIndex.classifyItemFacts(
+                "Base.Apple", "Food", "Food", Set.of(),
+                true, false, false, true, false, false, false, false, false));
+        assertEquals("food.stable", WarehouseFastIndex.classifyItemFacts(
+                "Base.TinnedBeans", "Food", "Food", Set.of(),
+                true, false, false, false, false, false, false, false, false));
+
+        // 文献、穿戴/背包、武器配件、电子材料与套组细分
+        assertEquals("literature.skills", WarehouseFastIndex.classifyItemFacts(
+                "Base.BookCarpentry1", "Literature", "SkillBook", Set.of("hardcover"),
+                false, false, false, false, true, false, false, false, false));
+        assertEquals("literature.entertainment", WarehouseFastIndex.classifyItemFacts(
+                "Base.ComicBook", "Literature", "Literature", Set.of("magazine"),
+                false, false, false, false, true, false, false, false, false));
+        assertEquals("apparel.bags", WarehouseFastIndex.classifyItemFacts(
+                "Base.Bag_DuffelBag", "Container", "Bag", Set.of("duffelbag"),
+                false, false, false, false, false, true, false, false, false));
+        assertEquals("apparel.armor", WarehouseFastIndex.classifyItemFacts(
+                "Base.Vest_BulletCivilian", "Clothing", "ProtectiveGear", Set.of("wearable"),
+                false, false, false, false, false, false, true, false, false));
+        assertEquals("apparel.clothing", WarehouseFastIndex.classifyItemFacts(
+                "Base.Tshirt_DefaultDECAL", "Clothing", "Clothing", Set.of("wearable"),
+                false, false, false, false, false, false, true, false, false));
+        assertEquals("weapons.parts", WarehouseFastIndex.classifyItemFacts(
+                "Base.RedDot", "WeaponPart", "WeaponPart", Set.of(),
+                false, false, false, false, false, false, false, false, false));
+        assertEquals("kits.tailoring", WarehouseFastIndex.classifyItemFacts(
+                "Base.Needle", "Normal", "Tool", Set.of("sewingneedle"),
+                false, false, false, false, false, false, false, false, false));
+        assertEquals("kits.mechanic", WarehouseFastIndex.classifyItemFacts(
+                "Base.LugWrench", "Weapon", "VehicleMaintenanceWeapon", Set.of("lugwrench"),
+                false, false, false, false, false, false, false, false, false));
+        assertEquals("materials.electronics", WarehouseFastIndex.classifyItemFacts(
+                "Base.Battery", "Drainable", "Electronics", Set.of(),
+                false, false, false, false, false, false, false, false, false));
+
+        // 冰箱规则：允许 food.perishable 与 food.meals，拒收 scrap.compost 与 food.stable
+        ContainerFilterRule fridge = SmartZoningPolicy.evaluateHardwareOrContext(
+                "fridge", "appliances_refrigeration_01", "kitchen", Map.of(), 0);
+        assertTrue(SmartZoningPolicy.matchesItemNode(fridge, "Base.Apple", "food.perishable"));
+        assertTrue(SmartZoningPolicy.matchesItemNode(fridge, "Base.StewPot", "food.meals"));
+        assertFalse(SmartZoningPolicy.matchesItemNode(fridge, "Base.Apple", "scrap.compost"));
+        assertFalse(SmartZoningPolicy.matchesItemNode(fridge, "Base.TinnedBeans", "food.stable"));
+
+        // 大类预设前向兼容所有细分小类
+        ContainerFilterRule medAll = SmartZoningPolicy.buildRuleFromPreset("medical", ContainerRole.STORAGE);
+        assertTrue(SmartZoningPolicy.matchesItemNode(medAll, "Base.Scalpel", "medical.bandages"));
+        assertTrue(SmartZoningPolicy.matchesItemNode(medAll, "Base.Antibiotics", "medical.pills"));
+
+        ContainerFilterRule kitAll = SmartZoningPolicy.buildRuleFromPreset("kits", ContainerRole.STORAGE);
+        assertTrue(SmartZoningPolicy.matchesItemNode(kitAll, "Base.Needle", "kits.tailoring"));
+        assertTrue(SmartZoningPolicy.matchesItemNode(kitAll, "Base.LugWrench", "kits.mechanic"));
+
+        ContainerFilterRule matAll = SmartZoningPolicy.buildRuleFromPreset("materials", ContainerRole.STORAGE);
+        assertTrue(SmartZoningPolicy.matchesItemNode(matAll, "Base.Battery", "materials.electronics"));
     }
 }

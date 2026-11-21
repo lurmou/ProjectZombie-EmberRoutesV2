@@ -17,11 +17,11 @@ import zombie.iso.IsoObject;
 import zombie.iso.areas.IsoRoom;
 
 /**
- * SmartZoning 容器四大物流角色与智能分类过滤策略（完整迁入 Java 单实现）：
+ * SmartZoning 容器三大物流角色与智能分类过滤策略（完整迁入 Java 单实现）：
  * <ul>
  *   <li>零空表污染读取：严格先判 {@link IsoObject#hasModData()}，未配置容器绝不分配空 {@code KahluaTable}；</li>
  *   <li>排除伪武器噪音（圆珠笔、铅笔、餐叉、餐勺等原版 {@code Category=Weapon} 杂物不会误将书桌识别成军械库）；</li>
- *   <li>支持 Lua 声明式预设同步（{@link #registerPreset(String, Collection, int)}）与硬件/房间语境一键自动分区。</li>
+ *   <li>支持 Lua 声明式预设同步（{@link #registerPreset(String, Collection, int)}）与纯手动触发的硬件/房间语境一键分区。</li>
  * </ul>
  */
 public final class SmartZoningPolicy {
@@ -41,7 +41,6 @@ public final class SmartZoningPolicy {
             "base.butterknife",
             "base.letteropener",
             "base.scissors",
-            "base.scalpel",
             "base.rollingpin"
     );
 
@@ -84,19 +83,37 @@ public final class SmartZoningPolicy {
 
     public static void seedDefaultPresets() {
         PRESETS.clear();
-        registerPreset("food", Set.of("food", "food.perishable", "food.stable"), 3);
+        registerPreset("food", Set.of("food"), 3);
+        registerPreset("food.meals", Set.of("food.meals"), 4);
         registerPreset("food.perishable", Set.of("food.perishable"), 4);
         registerPreset("food.stable", Set.of("food.stable"), 3);
         registerPreset("medical", Set.of("medical"), 4);
-        registerPreset("weapons", Set.of("weapons", "weapons.guns", "weapons.ammo", "weapons.other"), 4);
+        registerPreset("medical.bandages", Set.of("medical.bandages"), 4);
+        registerPreset("medical.pills", Set.of("medical.pills"), 4);
+        registerPreset("weapons", Set.of("weapons"), 4);
         registerPreset("weapons.guns", Set.of("weapons.guns"), 5);
         registerPreset("weapons.ammo", Set.of("weapons.ammo"), 4);
+        registerPreset("weapons.parts", Set.of("weapons.parts"), 3);
+        registerPreset("weapons.other", Set.of("weapons.other"), 3);
+        registerPreset("apparel", Set.of("apparel"), 3);
+        registerPreset("apparel.clothing", Set.of("apparel.clothing"), 3);
+        registerPreset("apparel.armor", Set.of("apparel.armor"), 4);
+        registerPreset("apparel.bags", Set.of("apparel.bags"), 3);
+        registerPreset("literature", Set.of("literature"), 3);
+        registerPreset("literature.skills", Set.of("literature.skills"), 4);
+        registerPreset("literature.entertainment", Set.of("literature.entertainment"), 2);
         registerPreset("tools", Set.of("tools"), 3);
         registerPreset("materials", Set.of("materials"), 3);
-        registerPreset("literature", Set.of("literature"), 3);
-        registerPreset("apparel", Set.of("apparel"), 3);
+        registerPreset("materials.electronics", Set.of("materials.electronics"), 3);
         registerPreset("fluids", Set.of("fluids"), 3);
-        registerPreset("containers", Set.of("containers"), 2);
+        registerPreset("kits", Set.of("kits"), 3);
+        registerPreset("kits.fishing", Set.of("kits.fishing"), 3);
+        registerPreset("kits.farming", Set.of("kits.farming"), 3);
+        registerPreset("kits.tailoring", Set.of("kits.tailoring"), 3);
+        registerPreset("kits.mechanic", Set.of("kits.mechanic"), 3);
+        registerPreset("scrap", Set.of("scrap"), 1);
+        registerPreset("scrap.waste", Set.of("scrap.waste"), 1);
+        registerPreset("scrap.compost", Set.of("scrap.compost"), 1);
         registerPreset("general", Set.of("literature", "tools", "materials", "other"), 1);
     }
 
@@ -262,8 +279,9 @@ public final class SmartZoningPolicy {
 
         // 1. 硬件固定设施优先
         if ("fridge".equals(cType) || "freezer".equals(cType) || spr.contains("fridge") || spr.contains("freezer")) {
-            rule.allowGroups.add("food");
             rule.allowGroups.add("food.perishable");
+            rule.allowGroups.add("food.meals");
+            rule.denyGroups.add("scrap.compost");
             rule.priority = 4;
             return rule;
         }
@@ -273,7 +291,8 @@ public final class SmartZoningPolicy {
             return rule;
         }
         if ("wardrobe".equals(cType) || "dresser".equals(cType) || spr.contains("wardrobe") || spr.contains("dresser")) {
-            rule.allowGroups.add("apparel");
+            rule.allowGroups.add("apparel.clothing");
+            rule.allowGroups.add("apparel.armor");
             rule.priority = 3;
             return rule;
         }
@@ -285,9 +304,9 @@ public final class SmartZoningPolicy {
         }
         if ("gunrack".equals(cType) || spr.contains("gun") || spr.contains("armory")
                 || (spr.contains("weapon") && !spr.contains("tool"))) {
-            rule.allowGroups.add("weapons");
             rule.allowGroups.add("weapons.guns");
             rule.allowGroups.add("weapons.ammo");
+            rule.allowGroups.add("weapons.parts");
             rule.priority = 5;
             return rule;
         }
@@ -297,9 +316,10 @@ public final class SmartZoningPolicy {
         double weaponScore = scoreOf(scores, "weapons");
         double toolScore = scoreOf(scores, "tools");
         double matScore = scoreOf(scores, "materials");
+        double kitScore = scoreOf(scores, "kits");
         double litScore = scoreOf(scores, "literature");
         double apparelScore = scoreOf(scores, "apparel");
-        double totalCore = foodScore + medScore + weaponScore + toolScore + matScore + litScore + apparelScore;
+        double totalCore = foodScore + medScore + weaponScore + toolScore + matScore + kitScore + litScore + apparelScore;
 
         boolean isKitchen = room.contains("kitchen") || spr.contains("kitchen")
                 || (cType.contains("counter") && room.contains("kitchen"));
@@ -312,9 +332,10 @@ public final class SmartZoningPolicy {
         boolean armoryDominant = weaponScore >= 2.0
                 || (weaponScore >= 1.0 && weaponScore >= (totalCore - weaponScore) && !isKitchen && !isWorkshop);
         if (armoryDominant) {
-            rule.allowGroups.add("weapons");
             rule.allowGroups.add("weapons.guns");
             rule.allowGroups.add("weapons.ammo");
+            rule.allowGroups.add("weapons.parts");
+            rule.allowGroups.add("weapons.other");
             rule.priority = 4;
             return rule;
         }
@@ -328,16 +349,19 @@ public final class SmartZoningPolicy {
         }
 
         if (isKitchen || foodScore >= 2.0 || (foodScore >= 1.0 && toolScore >= 1.0)) {
-            rule.allowGroups.add("food");
             rule.allowGroups.add("food.stable");
+            rule.allowGroups.add("food.meals");
             rule.allowGroups.add("tools");
             rule.priority = 3;
             return rule;
         }
 
-        if (isWorkshop || (toolScore + matScore) >= 2.0 || (toolScore >= 1.0 && isWorkshop)) {
+        if (isWorkshop || (toolScore + matScore + kitScore) >= 2.0 || (toolScore >= 1.0 && isWorkshop)) {
             rule.allowGroups.add("tools");
             rule.allowGroups.add("materials");
+            if (room.contains("garage") || kitScore >= 1.0) {
+                rule.allowGroups.add("kits.mechanic");
+            }
             rule.priority = 3;
             return rule;
         }
@@ -349,13 +373,14 @@ public final class SmartZoningPolicy {
         }
 
         if (apparelScore >= 2.0 || (apparelScore >= 1.0 && isBedroom)) {
-            rule.allowGroups.add("apparel");
+            rule.allowGroups.add("apparel.clothing");
+            rule.allowGroups.add("apparel.armor");
             rule.priority = 3;
             return rule;
         }
 
         if (isBedroom) {
-            rule.allowGroups.add("apparel");
+            rule.allowGroups.add("apparel.clothing");
             rule.allowGroups.add("literature");
             rule.priority = 2;
             return rule;
