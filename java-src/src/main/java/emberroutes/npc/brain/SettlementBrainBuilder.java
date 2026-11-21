@@ -543,6 +543,7 @@ public final class SettlementBrainBuilder {
 
         private boolean tempPropEquipped;
         private double cooldownUntilSimTime;
+        private final SeatedReadingGlanceController glanceController = new SeatedReadingGlanceController();
 
         SeatLeisureNode() {
             super("SEAT_REST", SlotKind.SEAT, 45.0, MIN_DWELL_SEC, false);
@@ -573,23 +574,30 @@ public final class SettlementBrainBuilder {
 
         @Override
         protected void onBeforeRelease(IsoNPC npc) {
+            glanceController.reset(npc);
             TempPropHelper.cleanupAllTempProps(npc);
         }
 
         @Override
         public void onEnter(BrainContext ctx, StateScope scope) {
             this.tempPropEquipped = false;
+            glanceController.reset(ctx.npc);
             super.onEnter(ctx, scope);
         }
 
         @Override
         public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
             super.onTick(ctx, scope, dtSim);
+            if (ctx.npc == null) {
+                return;
+            }
             if (!tempPropEquipped
-                    && ctx.npc != null
                     && ctx.npc.getPosture().getState() == NpcPostureController.PostureState.SEATED) {
                 TempPropHelper.equipTempBookProp(ctx.npc);
                 tempPropEquipped = true;
+            }
+            if (tempPropEquipped) {
+                glanceController.tick(ctx.npc, dtSim);
             }
         }
 
@@ -597,6 +605,7 @@ public final class SettlementBrainBuilder {
         public void onExit(BrainContext ctx) {
             this.cooldownUntilSimTime = ctx.simTime + COOLDOWN_AFTER_EXIT_SEC;
             this.tempPropEquipped = false;
+            glanceController.reset(ctx.npc);
             super.onExit(ctx);
         }
     }

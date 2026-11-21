@@ -1132,6 +1132,7 @@ public final class NpcPostureController {
         npc.blockTurning = false;
         npc.setHideWeaponModel(false);
         npc.setIgnoreAimingInput(false);
+        npc.clearSeatedReadingGlance();
         npc.setHeadLookAround(false);
         if (targetObj != null && targetObj.getObjectIndex() != -1) {
             targetObj.setSatChair(false);
@@ -1172,6 +1173,7 @@ public final class NpcPostureController {
         npc.blockTurning = false;
         npc.setHideWeaponModel(false);
         npc.setIgnoreAimingInput(false);
+        npc.clearSeatedReadingGlance();
         npc.setHeadLookAround(false);
 
         if (npc.isCurrentState(PlayerOnBedState.instance())

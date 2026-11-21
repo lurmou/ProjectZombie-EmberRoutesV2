@@ -2,6 +2,7 @@ package emberroutes.npc;
 
 import emberroutes.npc.brain.BrainContext;
 import emberroutes.npc.brain.BrainRouter;
+import emberroutes.npc.brain.SeatedReadingGlanceController;
 import emberroutes.npc.brain.TempPropHelper;
 import java.util.List;
 import zombie.Lua.LuaEventManager;
@@ -57,6 +58,12 @@ public final class IsoNPC extends IsoPlayer {
     private float manualMovementClampY;
     private int manualMovementClampZ;
     private boolean manualMovementClampIsFinalGoal;
+
+    private boolean seatedReadingGlanceActive;
+    private float seatedReadingGlanceHorizontal;
+    private float seatedReadingGlanceVertical;
+    private float seatedReadingGlanceEnvelope;
+    private boolean seatedReadingMaskDirty;
 
     public IsoNPC(String npcId, IsoCell cell, SurvivorDesc desc, int x, int y, int z) {
         super(cell, desc, 0, 0, 0);
@@ -275,11 +282,53 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public float getTurnDelta() {
+        if (seatedReadingGlanceActive || seatedReadingMaskDirty) {
+            SeatedReadingGlanceController.applyReadingHeadMaskRelease(
+                    this, seatedReadingGlanceActive ? seatedReadingGlanceEnvelope : 0.0F);
+            if (!seatedReadingGlanceActive) {
+                seatedReadingMaskDirty = false;
+            }
+        }
         if (emberControlActive && emberMoving && isRunning()
                 && Math.abs(emberTurnDelta - 0.80F) > 0.01F) {
             return emberTurnDelta;
         }
         return super.getTurnDelta();
+    }
+
+    public boolean isSeatedReadingGlanceActive() {
+        return seatedReadingGlanceActive;
+    }
+
+    public void setSeatedReadingGlance(float horizontal, float vertical, float envelope01) {
+        this.seatedReadingGlanceActive = true;
+        this.seatedReadingGlanceHorizontal = horizontal;
+        this.seatedReadingGlanceVertical = vertical;
+        this.seatedReadingGlanceEnvelope = envelope01;
+        this.seatedReadingMaskDirty = true;
+        super.setHeadLookAroundDirection(horizontal, vertical);
+    }
+
+    public void clearSeatedReadingGlance() {
+        boolean wasActive = this.seatedReadingGlanceActive;
+        this.seatedReadingGlanceActive = false;
+        this.seatedReadingGlanceHorizontal = 0.0F;
+        this.seatedReadingGlanceVertical = 0.0F;
+        this.seatedReadingGlanceEnvelope = 0.0F;
+        if (wasActive || this.seatedReadingMaskDirty) {
+            this.seatedReadingMaskDirty = true;
+            super.setHeadLookAroundDirection(0.0F, 0.0F);
+            SeatedReadingGlanceController.applyReadingHeadMaskRelease(this, 0.0F);
+        }
+    }
+
+    @Override
+    public void setHeadLookAroundDirection(float lookHorizontal, float lookVertical) {
+        if (seatedReadingGlanceActive) {
+            super.setHeadLookAroundDirection(seatedReadingGlanceHorizontal, seatedReadingGlanceVertical);
+            return;
+        }
+        super.setHeadLookAroundDirection(lookHorizontal, lookVertical);
     }
 
     @Override

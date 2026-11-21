@@ -41,6 +41,7 @@ public final class TempPropHelper {
         if (npc == null) {
             return;
         }
+        npc.clearSeatedReadingGlance();
         boolean modelDirty = npc.forceNullOverride
                 || npc.overridePrimaryHandModel != null
                 || npc.overrideSecondaryHandModel != null;
