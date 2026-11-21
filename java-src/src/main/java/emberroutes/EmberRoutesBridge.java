@@ -4,6 +4,7 @@ import emberroutes.npc.IsoNPC;
 import emberroutes.npc.NpcManager;
 import emberroutes.npc.NpcPostureController;
 import emberroutes.warehouse.ContainerDirtyQueue;
+import emberroutes.warehouse.SmartObjectRegistry;
 import emberroutes.warehouse.TerritoryContour;
 import emberroutes.warehouse.TerritoryRenderer;
 import emberroutes.warehouse.WarehouseFastIndex;
@@ -434,5 +435,27 @@ public final class EmberRoutesBridge {
 
     public static boolean isBedObject(IsoObject obj) {
         return NpcPostureController.isBedObject(obj);
+    }
+
+    // ==================== 6. M3-B 双大脑、EmberStateTree 与 SmartSlot 端口 ====================
+
+    public static void tickNpcBrains(double frameTick, double dtSim, double simTime) {
+        NpcManager.tickBrains(Math.round(frameTick), dtSim, simTime);
+    }
+
+    public static boolean setNpcBrainMode(String npcId, String modeName) {
+        return NpcManager.setBrainMode(npcId, modeName);
+    }
+
+    public static String getNpcBrainMode(String npcId) {
+        return NpcManager.getBrainMode(npcId);
+    }
+
+    public static String getNpcBrainStatePath(String npcId) {
+        return NpcManager.getBrainStatePath(npcId);
+    }
+
+    public static String getSmartSlotSummary(String settlementId) {
+        return SmartObjectRegistry.getSummary(settlementId);
     }
 }

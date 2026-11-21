@@ -252,6 +252,30 @@ local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z, bedObj, 
             local n = NpcRuntime.despawnAll()
             print("[EmberRoutes][M2] Despawned count=" .. tostring(n))
         end)
+
+        local brainTarget = pickedId or targetId
+        m2Sub:addOption(getText("ContextMenu_ER_M3_SetBrainSettlementFmt", brainTarget), actor, function()
+            local ok = NpcRuntime.setBrainMode(brainTarget, "SETTLEMENT")
+            print("[EmberRoutes][M3] SetBrainMode SETTLEMENT " .. tostring(brainTarget) .. " -> " .. tostring(ok))
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M3_SetBrainSquadFmt", brainTarget), actor, function()
+            local ok = NpcRuntime.setBrainMode(brainTarget, "SQUAD")
+            print("[EmberRoutes][M3] SetBrainMode SQUAD " .. tostring(brainTarget) .. " -> " .. tostring(ok))
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M3_InspectBrainsAndSlots"), actor, function()
+            local curSettlement = SettlementStore.findSettlementAt(gx, gy)
+            local sid = curSettlement and curSettlement.id or nil
+            print("[EmberRoutes][M3] SmartSlots=" .. tostring(NpcRuntime.getSmartSlotSummary(sid)))
+            for i = 1, #ids do
+                local id = ids[i]
+                print("[EmberRoutes][M3] NPC " .. tostring(id)
+                    .. " mode=" .. tostring(NpcRuntime.getBrainMode(id))
+                    .. " path=" .. tostring(NpcRuntime.getBrainStatePath(id))
+                    .. " posture=" .. tostring(NpcRuntime.getPostureState(id)))
+            end
+        end)
     end
 end
 

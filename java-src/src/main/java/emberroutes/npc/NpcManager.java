@@ -1,5 +1,10 @@
 package emberroutes.npc;
 
+import emberroutes.npc.brain.BrainContext;
+import emberroutes.npc.brain.BrainMode;
+import emberroutes.npc.brain.SettlementDangerField;
+import emberroutes.npc.brain.TempPropHelper;
+import emberroutes.warehouse.WarehouseFastIndex;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
@@ -15,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import zombie.GameTime;
 import zombie.ZomboidFileSystem;
 import zombie.characters.AttachedItems.AttachedItem;
 import zombie.characters.AttachedItems.AttachedItems;
@@ -37,6 +43,8 @@ import zombie.iso.IsoChunk;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 import zombie.iso.IsoWorld;
+import zombie.iso.sprite.IsoSprite;
+import zombie.iso.sprite.IsoSpriteGrid;
 import zombie.scripting.objects.ItemBodyLocation;
 
 /**
@@ -79,6 +87,7 @@ public final class NpcManager {
         final String npcId;
         IsoNPC liveNpc;
         NpcSnapshot offscreenSnapshot;
+        BrainMode brainMode = BrainMode.SETTLEMENT;
         boolean phasedIn;
         boolean deadRetired;
         int deathWatchdogTicks;
@@ -120,6 +129,7 @@ public final class NpcManager {
     private static long lastRankSolveMs = 0L;
     private static int lastRankFollowerCount = 0;
     private static int lastRankPlayerIndex = -1;
+    private static double brainSimTimeSec = 0.0;
 
     private NpcManager() {}
 
@@ -131,6 +141,8 @@ public final class NpcManager {
         for (NpcRecord rec : records.values()) {
             if (rec.liveNpc != null) {
                 try {
+                    rec.liveNpc.getBrain().shutdown(rec.liveNpc.getBrainContext());
+                    TempPropHelper.cleanupAllTempProps(rec.liveNpc);
                     rec.liveNpc.getPosture().forceImmediateReset(rec.liveNpc, "RESET", true);
                     rec.liveNpc.getFollow().stop(rec.liveNpc, false, "RESET");
                     rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "RESET");
@@ -142,6 +154,7 @@ public final class NpcManager {
         records.clear();
         pendingMoveEvents.clear();
         EmberLeaderTrail.resetAll();
+        SettlementDangerField.reset();
         owningCell = null;
         nextIdSeq = 1;
         tickCounter = 0;
@@ -150,6 +163,7 @@ public final class NpcManager {
         lastRankSolveMs = 0L;
         lastRankFollowerCount = 0;
         lastRankPlayerIndex = -1;
+        brainSimTimeSec = 0.0;
     }
 
     private static void recountOffscreenLocked() {
@@ -241,6 +255,8 @@ public final class NpcManager {
         NpcRecord rec = records.remove(npcId);
         if (rec == null) return false;
         if (rec.liveNpc != null) {
+            rec.liveNpc.getBrain().shutdown(rec.liveNpc.getBrainContext());
+            TempPropHelper.cleanupAllTempProps(rec.liveNpc);
             rec.liveNpc.getPosture().forceImmediateReset(rec.liveNpc, "DESPAWN", true);
             rec.liveNpc.getFollow().stop(rec.liveNpc, false, "DESPAWN");
             rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "DESPAWN");
@@ -269,6 +285,8 @@ public final class NpcManager {
             return false;
         }
         IsoNPC npc = rec.liveNpc;
+        npc.getBrain().shutdown(npc.getBrainContext());
+        TempPropHelper.cleanupAllTempProps(npc);
         npc.getPosture().forceImmediateReset(npc, "PHASE_OUT", true);
         npc.getFollow().stop(npc, true, "OFFSCREEN");
         npc.getLocomotion().interrupt(npc, "OFFSCREEN");
@@ -424,6 +442,8 @@ public final class NpcManager {
         if (npc == null) return;
         NpcRecord rec = records.get(npc.getNpcId());
         if (rec != null) {
+            npc.getBrain().shutdown(npc.getBrainContext());
+            TempPropHelper.cleanupAllTempProps(npc);
             npc.getPosture().forceImmediateReset(npc, "DEATH", true);
             npc.getFollow().stop(npc, false, "DEAD");
             npc.getLocomotion().interrupt(npc, "DEAD");
@@ -432,6 +452,80 @@ public final class NpcManager {
             rec.offscreenSnapshot = null;
             recountOffscreenLocked();
         }
+    }
+
+    /** AGENT_BRAIN 阶段单入口批调度：按真实游戏倍速缩放时间驱动在场 NPC 双大脑状态树。 */
+    public static synchronized void tickBrains(long frameTick, double dtSim, double luaSimTime) {
+        IsoCell cell = currentCell();
+        if (cell == null || records.isEmpty()) {
+            return;
+        }
+        GameTime gt = GameTime.getInstance();
+        double stepDt = (gt != null && gt.getTimeDelta() > 0.0F) ? gt.getTimeDelta() : Math.max(0.0, dtSim);
+        brainSimTimeSec += stepDt;
+
+        List<NpcRecord> snapshot = new ArrayList<>(records.values());
+        for (int i = 0, n = snapshot.size(); i < n; i++) {
+            NpcRecord rec = snapshot.get(i);
+            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc.isDead()) {
+                continue;
+            }
+            IsoNPC npc = rec.liveNpc;
+            if (npc.getCurrentSquare() == null) {
+                continue;
+            }
+            BrainContext ctx = npc.getBrainContext();
+            ctx.frameTick = frameTick;
+            ctx.dtSim = stepDt;
+            ctx.simTime = brainSimTimeSec;
+            ctx.settlementId = WarehouseFastIndex.findSettlementIdAt(
+                    (int) Math.floor(npc.getX()), (int) Math.floor(npc.getY()));
+            try {
+                npc.getBrain().tick(ctx);
+            } catch (Throwable t) {
+                DebugLog.log("[EmberRoutes] Brain tick failed for " + rec.npcId + ": " + t.getMessage());
+            }
+        }
+    }
+
+    public static synchronized boolean setBrainMode(String npcId, String modeName) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null || modeName == null) {
+            return false;
+        }
+        BrainMode parsed;
+        try {
+            parsed = BrainMode.valueOf(modeName.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+        rec.brainMode = parsed;
+        if (rec.phasedIn && rec.liveNpc != null && !rec.liveNpc.isDead()) {
+            rec.liveNpc.getBrain().setMode(parsed, rec.liveNpc.getBrainContext());
+        }
+        return true;
+    }
+
+    public static synchronized String getBrainMode(String npcId) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null) {
+            return "MISSING";
+        }
+        if (rec.phasedIn && rec.liveNpc != null) {
+            return rec.liveNpc.getBrain().getMode().name();
+        }
+        return rec.brainMode.name();
+    }
+
+    public static synchronized String getBrainStatePath(String npcId) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null) {
+            return "MISSING";
+        }
+        if (!rec.phasedIn || rec.liveNpc == null) {
+            return "OFFSCREEN";
+        }
+        return rec.liveNpc.getBrain().getActivePathString();
     }
 
     public static synchronized void onGameWindowSave() {
@@ -461,6 +555,7 @@ public final class NpcManager {
                     continue;
                 }
                 try {
+                    TempPropHelper.purgeTempPropItemsOnly(rec.liveNpc);
                     toWrite.add(NpcSnapshot.captureFrom(rec.liveNpc));
                 } catch (Throwable t) {
                     DebugLog.log("[EmberRoutes] Capture snapshot failed on save for " + rec.npcId + ": " + t.getMessage());
@@ -641,7 +736,22 @@ public final class NpcManager {
     }
 
     static synchronized boolean isFurnitureTileClaimedByOther(IsoNPC self, IsoObject tile) {
-        if (tile == null) {
+        return isObjectClaimedByOther(self, tile, false, false);
+    }
+
+    static synchronized boolean isBedHeadClaimedByOther(IsoNPC self, IsoObject headObj) {
+        return isObjectClaimedByOther(self, headObj, true, false);
+    }
+
+    /** 检查给定 {@code SmartSlot} 原点家具（含其同网格其它瓦片，以及正从该家具起身者）是否仍被另一 NPC 物理占用。 */
+    public static synchronized boolean isSmartSlotPhysicallyClaimedByOther(
+            IsoNPC self, IsoObject originObj, boolean isBed) {
+        return isObjectClaimedByOther(self, originObj, isBed, true);
+    }
+
+    private static boolean isObjectClaimedByOther(
+            IsoNPC self, IsoObject target, boolean includeBed, boolean matchSpriteGrid) {
+        if (target == null) {
             return false;
         }
         for (NpcRecord rec : records.values()) {
@@ -649,29 +759,46 @@ public final class NpcManager {
                 continue;
             }
             IsoNPC other = rec.liveNpc;
-            if (other.getPosture().getTargetObject() == tile || other.getSitOnFurnitureObject() == tile) {
+            if (matchesTargetFurniture(other.getPosture().getTargetObject(), target, matchSpriteGrid)
+                    || matchesTargetFurniture(other.getSitOnFurnitureObject(), target, matchSpriteGrid)
+                    || (includeBed && matchesTargetFurniture(other.getBed(), target, matchSpriteGrid))) {
                 return true;
             }
         }
         return false;
     }
 
-    static synchronized boolean isBedHeadClaimedByOther(IsoNPC self, IsoObject headObj) {
-        if (headObj == null) {
+    private static boolean matchesTargetFurniture(IsoObject held, IsoObject target, boolean matchSpriteGrid) {
+        if (held == null || target == null) {
             return false;
         }
-        for (NpcRecord rec : records.values()) {
-            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc == self || rec.liveNpc.isDead()) {
-                continue;
-            }
-            IsoNPC other = rec.liveNpc;
-            if (other.getPosture().getTargetObject() == headObj
-                    || other.getBed() == headObj
-                    || other.getSitOnFurnitureObject() == headObj) {
-                return true;
-            }
+        if (held == target) {
+            return true;
         }
-        return false;
+        if (!matchSpriteGrid || held.getSquare() == null || target.getSquare() == null) {
+            return false;
+        }
+        IsoGridSquare hSq = held.getSquare();
+        IsoGridSquare tSq = target.getSquare();
+        if (hSq.getZ() != tSq.getZ()) {
+            return false;
+        }
+        IsoSprite hs = held.getSprite();
+        IsoSprite ts = target.getSprite();
+        IsoSpriteGrid hg = hs != null ? hs.getSpriteGrid() : null;
+        IsoSpriteGrid tg = ts != null ? ts.getSpriteGrid() : null;
+        if (hg == null || tg == null || hg.getWidth() != tg.getWidth() || hg.getHeight() != tg.getHeight()) {
+            return false;
+        }
+        int hgx = hg.getSpriteGridPosX(hs);
+        int hgy = hg.getSpriteGridPosY(hs);
+        int tgx = tg.getSpriteGridPosX(ts);
+        int tgy = tg.getSpriteGridPosY(ts);
+        if (hgx < 0 || hgy < 0 || tgx < 0 || tgy < 0) {
+            return false;
+        }
+        return (hSq.getX() - hgx) == (tSq.getX() - tgx)
+                && (hSq.getY() - hgy) == (tSq.getY() - tgy);
     }
 
     public static synchronized boolean stopFollow(String npcId) {
@@ -1120,6 +1247,7 @@ public final class NpcManager {
                     (int) Math.floor(snap.x), (int) Math.floor(snap.y), EmberTargetProjector.levelOf(snap.z));
             snap.restoreTo(npc);
             attachToCell(npc, cell, sq, snap.x, snap.y, snap.z, snap.dirAngleDeg);
+            npc.getBrain().setMode(rec.brainMode, npc.getBrainContext());
             rec.liveNpc = npc;
             rec.phasedIn = true;
             rec.lastEmittedMoveSeq = 0L;
@@ -1186,6 +1314,8 @@ public final class NpcManager {
         if (owningCell != cell) {
             for (NpcRecord rec : records.values()) {
                 if (rec.liveNpc != null) {
+                    rec.liveNpc.getBrain().shutdown(rec.liveNpc.getBrainContext());
+                    TempPropHelper.cleanupAllTempProps(rec.liveNpc);
                     rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "CELL_CHANGED");
                     rec.liveNpc.setAttached(false);
                     rec.liveNpc = null;

@@ -1,5 +1,6 @@
 package emberroutes.npc;
 
+import emberroutes.warehouse.FurnitureClassifier;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -20,31 +21,6 @@ public final class EmberPostureMath {
     public static final float BED_LYING_UNDERSIDE_WORLD_Y = 0.44F;
     public static final float SEATING_BASE_OFFSET_WORLD_Y = 0.35F;
     public static final float MAX_BED_RENDER_LIFT_Z = 0.45F;
-
-    private static final String[] SEATING_ONLY_TILESET_PREFIXES = {
-        "furniture_seating_",
-        "location_restaurant_",
-        "location_shop_mall_",
-        "location_community_church_",
-        "location_entertainment_theatre_",
-        "location_services_beauty_",
-        "location_community_park_",
-        "location_community_police_",
-        "fixtures_bathroom_"
-    };
-
-    private static final String[] SEATING_ONLY_CUSTOM_NAME_TOKENS = {
-        "chair", "stool", "bench", "couch", "sofa", "seat",
-        "pew", "booth", "toilet", "armchair", "loveseat", "ottoman", "recliner"
-    };
-
-    private static final String[] BED_FRIENDLY_TILESET_PREFIXES = {
-        "furniture_bedding_", "camping_"
-    };
-
-    private static final String[] BED_FRIENDLY_CUSTOM_NAME_TOKENS = {
-        "bed", "cot", "bunk", "mattress", "tent", "sleeping"
-    };
 
     public enum BedFacing {
         N(0, -1),
@@ -145,38 +121,8 @@ public final class EmberPostureMath {
      */
     public static boolean isRealBedObject(
             String spriteOrTileset, String customName, BedFacing facing, int gridW, int gridH) {
-        String tile = spriteOrTileset != null ? spriteOrTileset.trim().toLowerCase(Locale.ROOT) : "";
-        String cname = customName != null ? customName.trim().toLowerCase(Locale.ROOT) : "";
-
-        for (String prefix : SEATING_ONLY_TILESET_PREFIXES) {
-            if (tile.startsWith(prefix)) {
-                return false;
-            }
-        }
-        for (String token : SEATING_ONLY_CUSTOM_NAME_TOKENS) {
-            if (cname.contains(token)) {
-                return false;
-            }
-        }
-
-        int safeW = Math.max(1, gridW);
-        int safeH = Math.max(1, gridH);
-        boolean multiTile = safeW > 1 || safeH > 1;
-        boolean alignedWithFacing = !multiTile || facing == null
-                || ((facing == BedFacing.N || facing == BedFacing.S) ? safeH >= 2 : safeW >= 2);
-
-        for (String prefix : BED_FRIENDLY_TILESET_PREFIXES) {
-            if (tile.startsWith(prefix)) {
-                return alignedWithFacing;
-            }
-        }
-        for (String token : BED_FRIENDLY_CUSTOM_NAME_TOKENS) {
-            if (cname.contains(token)) {
-                return alignedWithFacing;
-            }
-        }
-
-        return multiTile && alignedWithFacing;
+        return FurnitureClassifier.isRealBedObject(
+                spriteOrTileset, customName, facing != null ? facing.name() : null, gridW, gridH);
     }
 
     /** 标准三次平滑步进（[0, 1] 钳位），用于上下床动画期间的温和补位。 */

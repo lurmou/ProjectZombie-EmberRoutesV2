@@ -591,6 +591,7 @@ public final class WarehouseFastIndex {
         AWAKE_QUEUE.clear();
         currentTick = 0L;
         TerritoryRenderer.reset();
+        SmartObjectRegistry.reset();
     }
 
     public static int getAwakeTickerCount() {
@@ -641,6 +642,7 @@ public final class WarehouseFastIndex {
                 }
             }
             TerritoryRenderer.removeSettlement(settlementId);
+            SmartObjectRegistry.invalidateSettlement(settlementId);
         }
     }
 
@@ -730,6 +732,7 @@ public final class WarehouseFastIndex {
         s.rects.addAll(TerritoryContour.normalizeDisjoint(rawRects));
         s.recomputeBounds();
         TerritoryRenderer.syncSettlement(settlementId, s.rects);
+        SmartObjectRegistry.trimOutsideRects(s.settlementId, s.rects);
 
         boolean changed = s.revision == 0;
 
@@ -917,6 +920,7 @@ public final class WarehouseFastIndex {
      * 将被回收的据点容器切换为 {@code OFFLINE_CACHED} 保留最后已知快照并停掉对应节拍器。
      */
     public static void onChunkUnloaded(IsoChunk chunk) {
+        SmartObjectRegistry.onChunkUnloaded(chunk);
         processChunkSquares(chunk, false);
     }
 
@@ -979,6 +983,7 @@ public final class WarehouseFastIndex {
      * 区块卸载处理（僵毁专属修正：保留 {@code OFFLINE_CACHED} 最后已知快照而非清零，同时停掉该格轮询节拍器）。
      */
     static boolean markSquareUnloadedInternal(SettlementState s, int x, int y, int z) {
+        SmartObjectRegistry.unregisterSquare(s.settlementId, x, y, z);
         long sqKey = ContainerDirtyQueue.packCoord(x, y, z);
         sleepAndRemoveTracker(sqKey);
         Set<String> ids = s.squareIndex.get(sqKey);
@@ -1131,6 +1136,7 @@ public final class WarehouseFastIndex {
             s.squareIndex.put(sqKey, seenIds);
             registerOrWakeTracker(sqKey, s.settlementId, urgentWake);
         }
+        SmartObjectRegistry.onSquareScanned(s.settlementId, sq);
         return changed;
     }
 

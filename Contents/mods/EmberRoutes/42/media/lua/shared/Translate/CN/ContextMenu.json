@@ -31,5 +31,8 @@
     "ContextMenu_ER_NpcInv_TakeToPlayer": "拿取到我的背包",
     "ContextMenu_ER_M3_SitHereFmt": "令最近 NPC 坐这里 [%1]",
     "ContextMenu_ER_M3_SleepBedFmt": "令最近 NPC 睡这张床 [%1]",
-    "ContextMenu_ER_M3_StandUpAll": "令全部 NPC 起身"
+    "ContextMenu_ER_M3_StandUpAll": "令全部 NPC 起身",
+    "ContextMenu_ER_M3_SetBrainSettlementFmt": "大脑切换为据点自治 (SETTLEMENT) [%1]",
+    "ContextMenu_ER_M3_SetBrainSquadFmt": "大脑切换为征召随从 (SQUAD) [%1]",
+    "ContextMenu_ER_M3_InspectBrainsAndSlots": "打印全部 NPC 状态树与床/椅 SmartSlot"
 }

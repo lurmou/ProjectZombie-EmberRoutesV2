@@ -3,6 +3,7 @@ package emberroutes.npc;
 import emberroutes.npc.EmberPostureMath.BedApproach;
 import emberroutes.npc.EmberPostureMath.BedFacing;
 import emberroutes.npc.EmberPostureMath.BedSlot;
+import emberroutes.warehouse.SmartObjectRegistry;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -25,7 +26,6 @@ import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 import zombie.iso.IsoWorld;
 import zombie.iso.LosUtil;
-import zombie.iso.SpriteDetails.IsoFlagType;
 import zombie.iso.sprite.IsoSprite;
 import zombie.iso.sprite.IsoSpriteGrid;
 import zombie.seating.SeatingManager;
@@ -193,36 +193,11 @@ public final class NpcPostureController {
     }
 
     public static boolean isBedObject(IsoObject obj) {
-        if (obj == null || obj.getObjectIndex() == -1 || obj.getProperties() == null
-                || !obj.getProperties().has(IsoFlagType.bed)) {
-            return false;
-        }
-        String spriteOrTileset = null;
-        int gridW = 1;
-        int gridH = 1;
-        if (obj.getSprite() != null) {
-            spriteOrTileset = obj.getSprite().tilesetName != null
-                    ? obj.getSprite().tilesetName
-                    : obj.getSprite().getName();
-            IsoSpriteGrid grid = obj.getSprite().getSpriteGrid();
-            if (grid != null) {
-                gridW = Math.max(1, grid.getWidth());
-                gridH = Math.max(1, grid.getHeight());
-            }
-        } else {
-            spriteOrTileset = obj.getTextureName();
-        }
-        String customName = obj.getProperties().get("CustomName");
-        BedFacing facing = BedFacing.normalize(obj.getProperties().get("Facing"));
-        return EmberPostureMath.isRealBedObject(spriteOrTileset, customName, facing, gridW, gridH);
+        return SmartObjectRegistry.isBedObject(obj);
     }
 
     public static boolean isSittableFurniture(IsoObject obj) {
-        if (obj == null || obj.getObjectIndex() == -1 || obj.getSprite() == null) {
-            return false;
-        }
-        SeatingManager sm = SeatingManager.getInstance();
-        return sm != null && sm.getTilePositionCount(obj) > 0;
+        return SmartObjectRegistry.isSittableFurniture(obj);
     }
 
     public void queueMoveAfterStandUp(IsoNPC npc, double x, double y, double z, boolean running) {

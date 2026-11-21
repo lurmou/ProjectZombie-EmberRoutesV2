@@ -266,3 +266,25 @@ function EmberRoutesJava.isSittableFurniture(obj) end
 ---@return boolean
 function EmberRoutesJava.isBedObject(obj) end
 
+---@param frameTick number
+---@param dtSim number
+---@param simTime number
+function EmberRoutesJava.tickNpcBrains(frameTick, dtSim, simTime) end
+
+---@param npcId string
+---@param modeName string
+---@return boolean
+function EmberRoutesJava.setNpcBrainMode(npcId, modeName) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.getNpcBrainMode(npcId) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.getNpcBrainStatePath(npcId) end
+
+---@param settlementId string
+---@return string
+function EmberRoutesJava.getSmartSlotSummary(settlementId) end
+

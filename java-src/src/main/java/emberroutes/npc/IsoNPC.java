@@ -1,5 +1,8 @@
 package emberroutes.npc;
 
+import emberroutes.npc.brain.BrainContext;
+import emberroutes.npc.brain.BrainRouter;
+import emberroutes.npc.brain.TempPropHelper;
 import java.util.List;
 import zombie.Lua.LuaEventManager;
 import zombie.UpdateSchedulerSimulationLevel;
@@ -30,6 +33,8 @@ public final class IsoNPC extends IsoPlayer {
     private final EmberLocomotionController locomotion = new EmberLocomotionController();
     private final EmberFollowController follow = new EmberFollowController();
     private final NpcPostureController posture = new NpcPostureController();
+    private final BrainRouter brain = new BrainRouter();
+    private final BrainContext brainContext;
 
     private boolean attached;
     private boolean runningMode;
@@ -56,6 +61,8 @@ public final class IsoNPC extends IsoPlayer {
     public IsoNPC(String npcId, IsoCell cell, SurvivorDesc desc, int x, int y, int z) {
         super(cell, desc, 0, 0, 0);
         this.npcId = npcId;
+        this.brainContext = new BrainContext(npcId);
+        this.brainContext.npc = this;
         setNpc(true);
         setCollidable(true);
         setGhostMode(false);
@@ -81,6 +88,14 @@ public final class IsoNPC extends IsoPlayer {
 
     public NpcPostureController getPosture() {
         return posture;
+    }
+
+    public BrainRouter getBrain() {
+        return brain;
+    }
+
+    public BrainContext getBrainContext() {
+        return brainContext;
     }
 
     public void setAttached(boolean attached) {
@@ -348,6 +363,8 @@ public final class IsoNPC extends IsoPlayer {
     public void OnDeath() {
         this.emberTrackSpeedScale = 1.0F;
         applyEmberTrackSpeedScale();
+        brain.shutdown(brainContext);
+        TempPropHelper.cleanupAllTempProps(this);
         posture.forceImmediateReset(this, "DEATH", true);
         follow.stop(this, "DEATH");
         locomotion.interrupt(this, "DEATH");
