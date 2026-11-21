@@ -15,6 +15,7 @@ import emberroutes.npc.brain.SettlementTaskAuctioneer.TaskKind;
 import emberroutes.npc.brain.SettlementTaskAuctioneer.TaskSlice;
 import emberroutes.warehouse.RoomConnectivityIndex;
 import emberroutes.warehouse.SmartItemPicker;
+import emberroutes.warehouse.SmartItemPicker.EquippedBagSpec;
 import emberroutes.warehouse.SmartItemPicker.PickedItemRef;
 import emberroutes.warehouse.SmartObjectRegistry;
 import emberroutes.warehouse.SmartSlot;
@@ -22,6 +23,7 @@ import emberroutes.warehouse.WarehouseFastIndex;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +31,8 @@ import java.util.Set;
 import java.util.function.Consumer;
 import zombie.characters.IsoPlayer;
 import zombie.inventory.InventoryItem;
+import zombie.inventory.ItemContainer;
+import zombie.inventory.types.InventoryContainer;
 import zombie.iso.IsoGridSquare;
 
 /**
@@ -92,6 +96,7 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
         final int playerIndex;
         final List<DeliveryPickupGroup> pickupGroups;
         final List<InventoryItem> carriedItems = new ArrayList<>();
+        final Map<InventoryItem, ItemContainer> loadTargetsByItem = new IdentityHashMap<>();
         double totalWeight;
         final TourAnchor terminalAnchor;
 
@@ -457,9 +462,47 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
         if (srcSlot == null) {
             return null;
         }
-        float remainingCarry = Math.max(2.0F, npc.getMaxWeight() - npc.getInventoryWeight());
+        double currentEff = getNpcEffectiveWeight(npc);
+        double noDamageLimit = SmartItemPicker.computeNoDamageWeightLimit(npc.getMaxWeight());
+        float remainingCarry = (float) Math.max(2.0, noDamageLimit - currentEff);
         return BatchTourBuilder.buildHaulTour(
                 task.settlementId, srcSlot, remainingCarry, npc.getNpcId(), fromX, fromY, simTime, scopeRegistrar);
+    }
+
+    private static double getNpcEffectiveWeight(IsoNPC npc) {
+        if (npc == null) {
+            return 0.0;
+        }
+        return npc.getInventory() != null ? npc.getInventory().getCapacityWeight() : npc.getInventoryWeight();
+    }
+
+    private static List<EquippedBagSpec> collectEquippedBags(IsoNPC npc, List<ItemContainer> outBagContainers) {
+        if (npc == null || npc.getInventory() == null) {
+            return List.of();
+        }
+        List<InventoryItem> items = npc.getInventory().getItems();
+        if (items == null || items.isEmpty()) {
+            return List.of();
+        }
+        List<EquippedBagSpec> specs = null;
+        for (int i = 0, n = items.size(); i < n; i++) {
+            InventoryItem it = items.get(i);
+            if (it == null || !npc.isEquipped(it) || !(it instanceof InventoryContainer bag)) {
+                continue;
+            }
+            ItemContainer bagCont = bag.getInventory();
+            if (bagCont == null) {
+                continue;
+            }
+            if (specs == null) {
+                specs = new ArrayList<>(2);
+            }
+            int bagIdx = outBagContainers.size();
+            outBagContainers.add(bagCont);
+            specs.add(new EquippedBagSpec(
+                    bagIdx, bagCont.getFreeCapacity(npc), bag.getWeightReduction(), bag.getMaxItemSize()));
+        }
+        return specs != null ? specs : List.of();
     }
 
     private static DeliveryPlan buildDeliveryPlanForSlice(
@@ -470,7 +513,7 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
             double simTime,
             Consumer<Runnable> scopeRegistrar) {
         DeliveryOrder order = DeliveryOrderManager.getOrder(task.deliveryOrderId);
-        if (order == null) {
+        if (order == null || order.getRemainingCount() <= 0) {
             return null;
         }
         if (order.status == DeliveryOrderManager.OrderStatus.PENDING) {
@@ -483,26 +526,36 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
         }
         scopeRegistrar.accept(() -> DeliveryOrderManager.requeueIfInterrupted(order.orderId, npc.getNpcId()));
 
+        List<ItemContainer> bagContainers = new ArrayList<>(2);
+        List<EquippedBagSpec> bagSpecs = collectEquippedBags(npc, bagContainers);
+        double currentEff = getNpcEffectiveWeight(npc);
         List<PickedItemRef> picked = SmartItemPicker.pickItemsForOrder(
                 task.settlementId,
                 order.fullType,
-                order.requestedCount,
+                order.getRemainingCount(),
                 npc.getNpcId(),
                 fromX,
                 fromY,
                 EmberTargetProjector.levelOf(npc.getZ()),
                 simTime,
+                currentEff,
+                npc.getMaxWeight(),
+                bagSpecs,
                 scopeRegistrar);
         if (picked.isEmpty()) {
             return null;
         }
 
         Map<String, List<InventoryItem>> byContainer = new LinkedHashMap<>();
+        Map<InventoryItem, ItemContainer> loadTargets = new IdentityHashMap<>(picked.size());
         double totalWeight = 0.0;
         for (int i = 0, n = picked.size(); i < n; i++) {
             PickedItemRef ref = picked.get(i);
             byContainer.computeIfAbsent(ref.containerId(), k -> new ArrayList<>()).add(ref.item());
             totalWeight += Math.max(0.05, ref.item().getUnequippedWeight());
+            if (ref.targetBagIndex() >= 0 && ref.targetBagIndex() < bagContainers.size()) {
+                loadTargets.put(ref.item(), bagContainers.get(ref.targetBagIndex()));
+            }
         }
 
         List<DeliveryPickupGroup> groups = new ArrayList<>(byContainer.size());
@@ -531,7 +584,9 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
             DeliveryPickupGroup last = groups.get(groups.size() - 1);
             anchor = new TourAnchor(last.standX, last.standY, last.z, RoomConnectivityIndex.UNKNOWN_ROOM_ID);
         }
-        return new DeliveryPlan(order.orderId, task.settlementId, order.playerIndex, groups, totalWeight, anchor);
+        DeliveryPlan plan = new DeliveryPlan(order.orderId, task.settlementId, order.playerIndex, groups, totalWeight, anchor);
+        plan.loadTargetsByItem.putAll(loadTargets);
+        return plan;
     }
 
     private static void updateTerminalAnchor(NpcWorkState st, TourAnchor anchor) {
@@ -822,7 +877,7 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                 if (advanceMoveToContainer(
                         ctx, st, plan.settlementId, grp.containerId,
                         grp.standX, grp.standY, grp.z, grp.standDirIdx)) {
-                    startTransfer(ctx, st, TransferMode.LOAD_FROM_CONTAINER, grp.containerId, -1, grp.items, WorkPhase.LOADING);
+                    startTransfer(ctx, st, TransferMode.LOAD_FROM_CONTAINER, grp.containerId, -1, grp.items, plan.loadTargetsByItem, WorkPhase.LOADING);
                 }
             }
             case LOADING -> {
@@ -851,8 +906,13 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
             case MOVING_TO_PLAYER -> {
                 IsoPlayer player = resolvePlayer(plan.playerIndex);
                 double remWeight = computeCarriedWeight(plan.carriedItems);
+                boolean playerValid = player != null && !player.isDead() && player.getInventory() != null;
+                double px = playerValid ? player.getX() : 0.0;
+                double py = playerValid ? player.getY() : 0.0;
+                boolean playerHasRoom = playerValid
+                        && (remWeight <= 0.0 || player.getInventory().hasRoomFor(player, (float) remWeight));
                 if (DeliveryOrderManager.shouldFallbackToPickupOut(
-                        plan.settlementId, player, ctx.threatDetected, remWeight)) {
+                        plan.settlementId, px, py, playerValid, playerHasRoom, ctx.threatDetected)) {
                     SmartSlot pickupOut = DeliveryOrderManager.findBestPickupOutSlot(
                             plan.settlementId, remWeight, ctx.npc.getX(), ctx.npc.getY(),
                             EmberTargetProjector.levelOf(ctx.npc.getZ()), ctx.simTime);
@@ -893,9 +953,14 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                     return;
                 }
                 if (leftover.isEmpty()) {
-                    DeliveryOrderManager.markCompleted(plan.orderId);
+                    DeliveryOrderManager.recordDeliveredBatch(
+                            plan.orderId, ctx.npcId, plan.carriedItems.size(), false);
                     finishOrChainNext(ctx, st);
                 } else {
+                    int deliveredNow = Math.max(0, plan.carriedItems.size() - leftover.size());
+                    if (deliveredNow > 0) {
+                        DeliveryOrderManager.recordPartialProgress(plan.orderId, deliveredNow);
+                    }
                     plan.carriedItems.clear();
                     plan.carriedItems.addAll(leftover);
                     st.phase = WorkPhase.MOVING_TO_PLAYER;
@@ -914,13 +979,27 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                     if (st.activeTransfer.isRunning()) {
                         return;
                     }
+                    int deliveredNow = st.activeTransfer.getTransferredItems().size();
+                    List<InventoryItem> leftover = new ArrayList<>(st.activeTransfer.getLeftoverItems());
                     SmartObjectRegistry.markWithdrawnWindow(
                             plan.settlementId,
                             box.getContainerId(),
                             ctx.simTime + DeliveryOrderManager.PICKUP_OUT_PROTECTION_SEC);
-                    DeliveryOrderManager.markFallbackPickupOut(plan.orderId);
                     st.activeTransfer = null;
                     st.fallbackPickupOutSlot = null;
+                    if (deliveredNow > 0) {
+                        DeliveryOrderManager.recordDeliveredBatch(
+                                plan.orderId, ctx.npcId, deliveredNow, leftover.isEmpty());
+                    }
+                    if (!leftover.isEmpty()) {
+                        SmartObjectRegistry.markFullCooldown(
+                                plan.settlementId,
+                                box.getContainerId(),
+                                ctx.simTime + DeliveryOrderManager.PICKUP_OUT_PROTECTION_SEC);
+                        DeliveryPickupGroup first = plan.pickupGroups.get(0);
+                        enterReturnToSource(st, first.containerId, first.standX, first.standY, first.z, leftover);
+                        return;
+                    }
                     finishOrChainNext(ctx, st);
                     return;
                 }
@@ -980,8 +1059,21 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
             int playerIndex,
             List<InventoryItem> items,
             WorkPhase nextPhase) {
+        startTransfer(ctx, st, mode, containerId, playerIndex, items, null, nextPhase);
+    }
+
+    private static void startTransfer(
+            BrainContext ctx,
+            NpcWorkState st,
+            TransferMode mode,
+            String containerId,
+            int playerIndex,
+            List<InventoryItem> items,
+            Map<InventoryItem, ItemContainer> loadTargetsByItem,
+            WorkPhase nextPhase) {
         double dur = BatchTourBuilder.computeDampedTransferDuration(items.size());
-        st.activeTransfer = new BatchContainerTransferAction(mode, containerId, playerIndex, items, dur);
+        st.activeTransfer = new BatchContainerTransferAction(
+                mode, containerId, playerIndex, items, loadTargetsByItem, dur);
         st.activeTransfer.start(ctx);
         st.phase = nextPhase;
         st.moveIssued = false;
@@ -1111,7 +1203,7 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
         List<InventoryItem> out = new ArrayList<>(planned.size());
         for (int i = 0, n = planned.size(); i < n; i++) {
             InventoryItem it = planned.get(i);
-            if (it != null && npc.getInventory().contains(it)) {
+            if (it != null && BatchContainerTransferAction.resolveNpcOwnedContainer(npc, it) != null) {
                 out.add(it);
             }
         }

@@ -6,6 +6,9 @@ import emberroutes.npc.brain.SettlementTaskAuctioneer.TaskKind;
 import emberroutes.npc.brain.SettlementTaskAuctioneer.TaskSlice;
 import emberroutes.warehouse.RoomConnectivityIndex;
 import emberroutes.warehouse.RoomConnectivityIndex.RoomTransition;
+import emberroutes.warehouse.SmartItemPicker;
+import emberroutes.warehouse.SmartItemPicker.EquippedBagSpec;
+import emberroutes.warehouse.SmartItemPicker.PlannedLoadAssignment;
 import emberroutes.warehouse.SmartObjectRegistry;
 import java.util.ArrayList;
 import java.util.List;
@@ -20,11 +23,13 @@ class SettlementTaskAuctioneerTest {
     @BeforeEach
     void setUp() {
         SmartObjectRegistry.reset();
+        DeliveryOrderManager.reset();
     }
 
     @AfterEach
     void tearDown() {
         SmartObjectRegistry.reset();
+        DeliveryOrderManager.reset();
     }
 
     @Test
@@ -127,5 +132,66 @@ class SettlementTaskAuctioneerTest {
         assertEquals("near", ordered.get(0).id());
         assertEquals("mid", ordered.get(1).id());
         assertEquals("far", ordered.get(2).id());
+    }
+
+    @Test
+    void deliveryRespectsNoDamageOverloadBackpackReductionAndSplitsOrdersAcrossTrips() {
+        // 1. 不扣血超载上限：maxWeight=12 时允许超载至 < 1.5*12 = 18.0（即 17.95），绝不踩入 Lv3 扣血线
+        assertEquals(17.95, SmartItemPicker.computeNoDamageWeightLimit(12.0), 1e-6);
+        assertEquals(50.0, SmartItemPicker.computeNoDamageWeightLimit(40.0), 1e-6);
+
+        // 2. 主物品栏放得下整单（4.0 + 4*2.0 = 12.0 <= 17.95）-> 全部直接放主包（targetBagIndex == -1），绝不塞背包
+        double[] lightItems = {2.0, 2.0, 2.0, 2.0};
+        List<EquippedBagSpec> bags = List.of(new EquippedBagSpec(0, 20.0, 80, 0.0));
+        List<PlannedLoadAssignment> mainOnly = SmartItemPicker.planCarryAssignments(lightItems, 4, 4.0, 12.0, bags);
+        assertEquals(4, mainOnly.size());
+        for (PlannedLoadAssignment a : mainOnly) {
+            assertEquals(-1, a.targetBagIndex(), "Whole order fitting in main budget must stay in main inventory");
+        }
+
+        // 3. 大单超主包（10 根 x 3.0 = 30.0）且背有 80% 减重、容量 20 的背包：
+        // 6 根进 0 号背包（6*3.0=18.0 <= cap 20，有效负重仅 6*0.6=3.6 -> 6+3.6=9.6），
+        // 再加 2 根进主包（+6.0 -> 15.6 <= 17.95），单趟可扛 8 根，第 9 根 15.6+3.0=18.6 > 17.95 截断留下一趟
+        double[] tenPlanks = {3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0};
+        List<PlannedLoadAssignment> mixedLoad = SmartItemPicker.planCarryAssignments(tenPlanks, 10, 6.0, 12.0, bags);
+        assertEquals(8, mixedLoad.size());
+        int inBag = 0;
+        int inMain = 0;
+        for (PlannedLoadAssignment a : mixedLoad) {
+            if (a.targetBagIndex() == 0) inBag++;
+            else if (a.targetBagIndex() == -1) inMain++;
+        }
+        assertEquals(6, inBag);
+        assertEquals(2, inMain);
+
+        // 4. 超过单件 maxItemSize 的重物不会塞进小包（走主包 -1），且单件超重保底放行 1 件防死锁
+        List<EquippedBagSpec> smallMaxItemBag = List.of(new EquippedBagSpec(0, 20.0, 80, 2.0));
+        List<PlannedLoadAssignment> oversized = SmartItemPicker.planCarryAssignments(
+                new double[]{25.0, 25.0}, 2, 0.0, 12.0, smallMaxItemBag);
+        assertEquals(1, oversized.size());
+        assertEquals(-1, oversized.get(0).targetBagIndex());
+
+        // 5. 10 件大单分 2 趟送完 + 离线纯数据 shouldFallbackToPickupOut
+        SmartObjectRegistry.registerContainerSlot(
+                "s1", "10:10:0#crate:crate:0#0", 10, 10, 0, 1L, 0b11111111, null, 0, 50.0, 0.0, 1.0);
+        String orderId = DeliveryOrderManager.submitOrder("s1", 0, "Base.Plank", 10, 5.0);
+        assertNotNull(orderId);
+        SmartObjectRegistry.consumeAuctionDirty("s1");
+
+        assertTrue(DeliveryOrderManager.markAssigned(orderId, "npc_1"));
+        DeliveryOrderManager.recordDeliveredBatch(orderId, "npc_1", 8, false);
+
+        DeliveryOrderManager.DeliveryOrder ord = DeliveryOrderManager.getOrder(orderId);
+        assertNotNull(ord);
+        assertEquals(DeliveryOrderManager.OrderStatus.PENDING, ord.status);
+        assertNull(ord.assignedNpcId);
+        assertEquals(8, ord.deliveredCount);
+        assertEquals(2, ord.getRemainingCount());
+        assertTrue(SmartObjectRegistry.isAuctionDirty("s1"));
+
+        assertTrue(DeliveryOrderManager.markAssigned(orderId, "npc_2"));
+        DeliveryOrderManager.recordDeliveredBatch(orderId, "npc_2", 2, false);
+        assertEquals(DeliveryOrderManager.OrderStatus.COMPLETED, ord.status);
+        assertEquals(0, ord.getRemainingCount());
     }
 }

@@ -11,14 +11,16 @@ package emberroutes.npc.brain;
 public final class BrainRouter {
     private BrainMode mode = BrainMode.SETTLEMENT;
     private StateTreeRunner activeRunner;
-    private WorkDutyProvider workProvider = LogisticsWorkDutyProvider.INSTANCE;
+    private WorkDutyProvider workProvider;
 
     public BrainRouter() {
+        this.workProvider = LogisticsWorkDutyProvider.INSTANCE;
         this.activeRunner = SettlementBrainBuilder.createRunner(this.workProvider);
     }
 
     /** 构造自定义双树路由器（供脱机 JUnit 严密测试模式切换与逆序清理使用）。 */
     public BrainRouter(StateTreeRunner settlementRunner, StateTreeRunner squadRunner) {
+        this.workProvider = WorkDutyProvider.NOOP;
         this.settlementOverride = settlementRunner;
         this.squadOverride = squadRunner;
         this.activeRunner = settlementRunner;

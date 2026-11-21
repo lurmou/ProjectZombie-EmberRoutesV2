@@ -5,10 +5,13 @@ import emberroutes.warehouse.ContainerDirtyQueue;
 import emberroutes.warehouse.WarehouseFastIndex;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import zombie.characters.IsoPlayer;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
+import zombie.inventory.types.InventoryContainer;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 
@@ -31,6 +34,7 @@ public final class BatchContainerTransferAction extends BaseAction {
     private final String worldContainerId;
     private final int targetPlayerIndex;
     private final List<InventoryItem> plannedItems;
+    private final Map<InventoryItem, ItemContainer> loadTargetsByItem;
     private final List<InventoryItem> transferredItems = new ArrayList<>();
     private final List<InventoryItem> leftoverItems = new ArrayList<>();
     private boolean containerMissing;
@@ -41,11 +45,26 @@ public final class BatchContainerTransferAction extends BaseAction {
             int targetPlayerIndex,
             List<InventoryItem> items,
             double durationSimSec) {
+        this(mode, worldContainerId, targetPlayerIndex, items, null, durationSimSec);
+    }
+
+    public BatchContainerTransferAction(
+            TransferMode mode,
+            String worldContainerId,
+            int targetPlayerIndex,
+            List<InventoryItem> items,
+            Map<InventoryItem, ItemContainer> loadTargetsByItem,
+            double durationSimSec) {
         super(durationSimSec, "Loot");
         this.mode = mode;
         this.worldContainerId = worldContainerId;
         this.targetPlayerIndex = targetPlayerIndex;
         this.plannedItems = items != null ? new ArrayList<>(items) : Collections.emptyList();
+        if (loadTargetsByItem != null && !loadTargetsByItem.isEmpty()) {
+            this.loadTargetsByItem = new IdentityHashMap<>(loadTargetsByItem);
+        } else {
+            this.loadTargetsByItem = null;
+        }
     }
 
     public List<InventoryItem> getTransferredItems() {
@@ -128,20 +147,37 @@ public final class BatchContainerTransferAction extends BaseAction {
 
     private boolean executeTransfer(
             IsoNPC actor,
-            ItemContainer src,
-            ItemContainer dest,
+            ItemContainer defaultSrc,
+            ItemContainer defaultDest,
             IsoGridSquare worldSq,
             zombie.characters.IsoGameCharacter destOwner) {
+        ItemContainer actorMainInv = actor.getInventory();
+        boolean npcIsSource = mode != TransferMode.LOAD_FROM_CONTAINER;
         boolean anyMoved = false;
+
         for (int i = 0, n = plannedItems.size(); i < n; i++) {
             InventoryItem item = plannedItems.get(i);
             if (item == null) {
                 continue;
             }
-            if (!src.contains(item)) {
+            ItemContainer actualSrc = npcIsSource ? resolveNpcOwnedContainer(actor, item) : defaultSrc;
+            if (actualSrc == null || !actualSrc.contains(item)) {
                 continue;
             }
-            if (!dest.hasRoomFor(destOwner, item) || !dest.isItemAllowed(item)) {
+
+            ItemContainer targetDest = defaultDest;
+            if (!npcIsSource && loadTargetsByItem != null) {
+                ItemContainer preferred = loadTargetsByItem.get(item);
+                if (preferred != null
+                        && preferred != defaultDest
+                        && isNpcOwnedContainer(actor, preferred)
+                        && preferred.hasRoomFor(destOwner, item)
+                        && preferred.isItemAllowed(item)) {
+                    targetDest = preferred;
+                }
+            }
+
+            if (!targetDest.hasRoomFor(destOwner, item) || !targetDest.isItemAllowed(item)) {
                 leftoverItems.add(item);
                 continue;
             }
@@ -151,12 +187,16 @@ public final class BatchContainerTransferAction extends BaseAction {
             if (actor.getSecondaryHandItem() == item) {
                 actor.setSecondaryHandItem(null);
             }
-            src.DoRemoveItem(item);
-            src.setDirty(true);
-            src.setDrawDirty(true);
-            dest.AddItem(item);
-            dest.setDirty(true);
-            dest.setDrawDirty(true);
+            actualSrc.DoRemoveItem(item);
+            actualSrc.setDirty(true);
+            actualSrc.setDrawDirty(true);
+            targetDest.AddItem(item);
+            targetDest.setDirty(true);
+            targetDest.setDrawDirty(true);
+            if (actorMainInv != null && (actualSrc != actorMainInv || targetDest != actorMainInv)) {
+                actorMainInv.setDirty(true);
+                actorMainInv.setDrawDirty(true);
+            }
             transferredItems.add(item);
             anyMoved = true;
         }
@@ -164,6 +204,50 @@ public final class BatchContainerTransferAction extends BaseAction {
             ContainerDirtyQueue.markSquare(worldSq);
         }
         return anyMoved || leftoverItems.isEmpty();
+    }
+
+    /** 检索 NPC 主物品栏或已装备/随身子背包容器，定位该物品真实所在的容器。 */
+    static ItemContainer resolveNpcOwnedContainer(IsoNPC actor, InventoryItem item) {
+        if (actor == null || item == null || actor.getInventory() == null) {
+            return null;
+        }
+        ItemContainer main = actor.getInventory();
+        if (main.contains(item)) {
+            return main;
+        }
+        List<InventoryItem> mainItems = main.getItems();
+        if (mainItems != null) {
+            for (int i = 0, n = mainItems.size(); i < n; i++) {
+                InventoryItem entry = mainItems.get(i);
+                if (entry instanceof InventoryContainer bag
+                        && bag.getInventory() != null
+                        && bag.getInventory().contains(item)) {
+                    return bag.getInventory();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isNpcOwnedContainer(IsoNPC actor, ItemContainer candidate) {
+        if (actor == null || candidate == null || actor.getInventory() == null) {
+            return false;
+        }
+        if (candidate == actor.getInventory()) {
+            return true;
+        }
+        List<InventoryItem> mainItems = actor.getInventory().getItems();
+        if (mainItems != null) {
+            for (int i = 0, n = mainItems.size(); i < n; i++) {
+                InventoryItem entry = mainItems.get(i);
+                if (entry instanceof InventoryContainer bag
+                        && actor.isEquipped(bag)
+                        && bag.getInventory() == candidate) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static IsoPlayer resolveTargetPlayer(int playerIndex) {

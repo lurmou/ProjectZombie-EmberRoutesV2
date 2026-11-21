@@ -9,7 +9,6 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import zombie.characters.IsoPlayer;
 
 /**
  * 机械动力式提货配送申请单管理器（纯内存瞬态订单队列，支撑 M3-③ AE2 提货终端与测试入口）：
@@ -38,6 +37,7 @@ public final class DeliveryOrderManager {
         public final String fullType;
         public final int requestedCount;
         public final double createdSimTime;
+        public int deliveredCount = 0;
         public OrderStatus status = OrderStatus.PENDING;
         public String assignedNpcId;
 
@@ -54,6 +54,10 @@ public final class DeliveryOrderManager {
             this.fullType = fullType;
             this.requestedCount = Math.max(1, requestedCount);
             this.createdSimTime = createdSimTime;
+        }
+
+        public int getRemainingCount() {
+            return Math.max(0, requestedCount - deliveredCount);
         }
     }
 
@@ -152,21 +156,55 @@ public final class DeliveryOrderManager {
         }
     }
 
-    /** 检查提货配送是否必须动态降级转存 {@code PICKUP_OUT} 提货箱。 */
+    /** 累加单趟部分交接件数（防后续降级转存重复计件）。 */
+    public static synchronized void recordPartialProgress(String orderId, int deliveredDelta) {
+        applyDeliveredDelta(getOrder(orderId), deliveredDelta);
+    }
+
+    /**
+     * 结算一趟配送（交接给玩家或降级存 {@code PICKUP_OUT}）：
+     * 若尚未送齐整单需求，自动置回 {@code PENDING} 并标记 {@code auctionDirty} 驱动后续趟次。
+     */
+    public static synchronized void recordDeliveredBatch(
+            String orderId, String npcId, int deliveredBatchCount, boolean fallbackPickupOut) {
+        DeliveryOrder o = getOrder(orderId);
+        if (o == null || o.status == OrderStatus.CANCELLED) {
+            return;
+        }
+        applyDeliveredDelta(o, deliveredBatchCount);
+        if (o.getRemainingCount() > 0) {
+            if (npcId == null || npcId.equals(o.assignedNpcId) || o.assignedNpcId == null) {
+                o.status = OrderStatus.PENDING;
+                o.assignedNpcId = null;
+                SmartObjectRegistry.markAuctionDirty(o.settlementId);
+            }
+            return;
+        }
+        o.assignedNpcId = null;
+        o.status = fallbackPickupOut ? OrderStatus.FALLBACK_PICKUP_OUT : OrderStatus.COMPLETED;
+    }
+
+    private static void applyDeliveredDelta(DeliveryOrder order, int delta) {
+        if (order == null || order.status == OrderStatus.CANCELLED || delta <= 0) {
+            return;
+        }
+        order.deliveredCount = Math.min(order.requestedCount, order.deliveredCount + delta);
+    }
+
+    /** 检查提货配送是否必须动态降级转存 {@code PICKUP_OUT} 提货箱（纯数据无引擎角色依赖，支持离线 JUnit）。 */
     public static boolean shouldFallbackToPickupOut(
-            String settlementId, IsoPlayer player, boolean threatDetected, double remainingWeight) {
-        if (threatDetected || player == null || player.isDead() || player.getInventory() == null) {
+            String settlementId,
+            double playerX,
+            double playerY,
+            boolean playerValid,
+            boolean playerHasRoom,
+            boolean threatDetected) {
+        if (threatDetected || !playerValid || !playerHasRoom) {
             return true;
         }
         double distFromTerritory = WarehouseFastIndex.distanceToSettlement2D(
-                settlementId, player.getX(), player.getY());
-        if (distFromTerritory > PLAYER_OUTSIDE_BUFFER_TILES) {
-            return true;
-        }
-        if (remainingWeight > 0.0 && !player.getInventory().hasRoomFor(player, (float) remainingWeight)) {
-            return true;
-        }
-        return false;
+                settlementId, playerX, playerY);
+        return distFromTerritory > PLAYER_OUTSIDE_BUFFER_TILES;
     }
 
     /** 寻找据点内最近且容量充足的 {@code PICKUP_OUT} 提货交接箱。 */
