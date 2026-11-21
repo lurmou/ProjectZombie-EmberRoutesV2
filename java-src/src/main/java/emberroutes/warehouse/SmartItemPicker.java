@@ -209,6 +209,7 @@ public final class SmartItemPicker {
             WarehouseFastIndex.LoadedSource src = sources.get(si);
             SmartSlot slot = SmartObjectRegistry.getContainerSlot(settlementId, src.containerId());
             if (slot != null && (slot.getContainerRole() == ContainerRole.PICKUP_OUT
+                    || slot.getContainerRole() == ContainerRole.WORKSTATION_IO
                     || slot.isWithdrawnAt(simTime)
                     || !slot.isActive())) {
                 continue;

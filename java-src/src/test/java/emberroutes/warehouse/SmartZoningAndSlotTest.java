@@ -53,6 +53,12 @@ class SmartZoningAndSlotTest {
         assertFalse(SmartZoningPolicy.matchesItemNode(bufferRule, "Base.Apple", "food.perishable"));
         ContainerFilterRule pickupRule = SmartZoningPolicy.buildRuleFromPreset("food", ContainerRole.PICKUP_OUT);
         assertFalse(SmartZoningPolicy.matchesItemNode(pickupRule, "Base.Apple", "food.perishable"));
+
+        // 智能自动分区仅赋予 STORAGE，WORKSTATION_IO 只能由玩家显式指定
+        ContainerFilterRule workshopCounter = SmartZoningPolicy.evaluateHardwareOrContext(
+                "crate", "carpentry_01_00", "workshop", Map.of("materials", 4.0), 4);
+        assertEquals(ContainerRole.STORAGE, workshopCounter.role);
+        assertNotEquals(ContainerRole.WORKSTATION_IO, workshopCounter.role);
     }
 
     @Test

@@ -16,11 +16,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import zombie.entity.ComponentType;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoChunk;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 import zombie.iso.SpriteDetails.IsoFlagType;
+import zombie.iso.objects.IsoBarbecue;
+import zombie.iso.objects.IsoFireplace;
+import zombie.iso.objects.IsoStove;
 import zombie.iso.sprite.IsoSprite;
 import zombie.iso.sprite.IsoSpriteGrid;
 import zombie.seating.SeatingManager;
@@ -195,7 +199,34 @@ public final class SmartObjectRegistry {
     }
 
     /**
-     * 寄生于 {@link WarehouseFastIndex} 的单格扫描入口：单次遍历 {@code sq.getObjects()} 同步床/椅 {@link SmartSlot}，
+     * 检查世界对象是否为专用产线工作台或烹饪热源：
+     * <ul>
+     *   <li>B42 实体工坊组件：{@code CraftBench / CraftLogic / FurnaceLogic / DryingLogic / DryingCraftLogic / MashingLogic}；</li>
+     *   <li>传统热源：{@code IsoStove / IsoFireplace / IsoBarbecue}；</li>
+     *   <li>刻意排除普通平台桌面（{@code isGenericCraftingSurface()}），避免把满屋橱柜与普通木箱误判为工位。</li>
+     * </ul>
+     */
+    public static boolean isWorkstationObject(IsoObject obj) {
+        if (obj == null || obj.getObjectIndex() == -1) {
+            return false;
+        }
+        if (obj instanceof IsoStove || obj instanceof IsoFireplace || obj instanceof IsoBarbecue) {
+            return true;
+        }
+        if (!obj.hasComponents()) {
+            return false;
+        }
+        return obj.hasComponentAny(
+                ComponentType.CraftBench,
+                ComponentType.CraftLogic,
+                ComponentType.FurnaceLogic,
+                ComponentType.DryingLogic,
+                ComponentType.DryingCraftLogic,
+                ComponentType.MashingLogic);
+    }
+
+    /**
+     * 寄生于 {@link WarehouseFastIndex} 的单格扫描入口：单次遍历 {@code sq.getObjects()} 同步床/椅/专用工位 {@link SmartSlot}，
      * 并在原格家具被拆毁时即时移除对应位掩码。
      */
     public static synchronized void onSquareScanned(String settlementId, IsoGridSquare sq) {
@@ -248,7 +279,7 @@ public final class SmartObjectRegistry {
 
         RoomConnectivityIndex.scanSquareDoors(settlementId, sq);
 
-        // 剔除该格原先存在但本次重扫已消失的床/椅家具位掩码（CONTAINER 与 WORKSTATION 由各自扫描/移除入口维护）
+        // 剔除该格原先存在但本次重扫已消失的床/椅/专用工位家具位掩码（CONTAINER 由扫描/移除入口维护）
         SettlementSlots ss = SETTLEMENTS.get(settlementId);
         if (ss == null) {
             return;
@@ -257,7 +288,9 @@ public final class SmartObjectRegistry {
         if (existing != null && !existing.isEmpty()) {
             for (int i = existing.size() - 1; i >= 0; i--) {
                 TileRef ref = existing.get(i);
-                if (ref.kind() != SlotKind.BED && ref.kind() != SlotKind.SEAT) {
+                if (ref.kind() != SlotKind.BED
+                        && ref.kind() != SlotKind.SEAT
+                        && ref.kind() != SlotKind.WORKSTATION) {
                     continue;
                 }
                 if (seenSlotIds == null || !seenSlotIds.contains(ref.slotId())) {
@@ -407,6 +440,9 @@ public final class SmartObjectRegistry {
         if (isSittableFurniture(obj)) {
             return SlotKind.SEAT;
         }
+        if (isWorkstationObject(obj)) {
+            return SlotKind.WORKSTATION;
+        }
         return null;
     }
 
@@ -511,6 +547,9 @@ public final class SmartObjectRegistry {
         if (!slot.active && (slot.loadedMask & slot.fullMask) == slot.fullMask) {
             slot.active = true;
             ss.activeByKind.get(kind).add(slot);
+            if (kind == SlotKind.WORKSTATION) {
+                syncWorkstationBindings(ss, slot);
+            }
         }
         return slot;
     }
@@ -1250,7 +1289,7 @@ public final class SmartObjectRegistry {
     public static synchronized String getSummary(String settlementId) {
         SettlementSlots ss = settlementId != null ? SETTLEMENTS.get(settlementId) : null;
         if (ss == null) {
-            return "none(beds=0,seats=0,containers=0,haulOut=0)";
+            return "none(beds=0,seats=0,containers=0,haulOut=0,workstations=0)";
         }
         int beds = ss.activeByKind.get(SlotKind.BED).size();
         int bedsOccupied = countOccupied(ss.activeByKind.get(SlotKind.BED));
@@ -1258,9 +1297,10 @@ public final class SmartObjectRegistry {
         int seatsOccupied = countOccupied(ss.activeByKind.get(SlotKind.SEAT));
         int containers = ss.activeByKind.get(SlotKind.CONTAINER).size();
         int haulOut = ss.advertisedHaulOutSlots.size();
+        int workstations = ss.activeByKind.get(SlotKind.WORKSTATION).size();
         return String.format(
-                "%s(beds=%d/%d,seats=%d/%d,containers=%d,haulOut=%d)",
-                settlementId, bedsOccupied, beds, seatsOccupied, seats, containers, haulOut);
+                "%s(beds=%d/%d,seats=%d/%d,containers=%d,haulOut=%d,workstations=%d)",
+                settlementId, bedsOccupied, beds, seatsOccupied, seats, containers, haulOut, workstations);
     }
 
     private static int countOccupied(List<SmartSlot> list) {
