@@ -288,3 +288,21 @@ function EmberRoutesJava.getNpcBrainStatePath(npcId) end
 ---@return string
 function EmberRoutesJava.getSmartSlotSummary(settlementId) end
 
+---@param npcId string
+---@param needKind string
+---@return string
+function EmberRoutesJava.debugApplyNpcNeed(npcId, needKind) end
+
+---@param npcId string
+---@param settlementId string
+---@return boolean
+function EmberRoutesJava.assignNpcToSettlement(npcId, settlementId) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.getNpcAssignedSettlement(npcId) end
+
+---@param settlementId string
+---@return number
+function EmberRoutesJava.clearSettlementNpcAssignments(settlementId) end
+

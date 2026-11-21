@@ -660,6 +660,36 @@ public final class WarehouseFastIndex {
         return s != null ? s.settlementId : null;
     }
 
+    public static boolean containsPoint(String settlementId, int x, int y) {
+        if (settlementId == null) {
+            return false;
+        }
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        return s != null && s.contains2D(x, y);
+    }
+
+    /** 返回指定据点领地的代表锚点格坐标 {@code {x, y}}（取最大连通子矩形中心），若据点不存在或无领地返回 {@code null}。 */
+    public static int[] getSettlementAnchorTile(String settlementId) {
+        if (settlementId == null) {
+            return null;
+        }
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null || s.rects.isEmpty()) {
+            return null;
+        }
+        int[] best = s.rects.get(0);
+        long bestArea = (long) best[2] * best[3];
+        for (int i = 1, n = s.rects.size(); i < n; i++) {
+            int[] r = s.rects.get(i);
+            long area = (long) r[2] * r[3];
+            if (area > bestArea) {
+                bestArea = area;
+                best = r;
+            }
+        }
+        return new int[]{best[0] + best[2] / 2, best[1] + best[3] / 2};
+    }
+
     public static double typeCount(String settlementId, String fullType) {
         if (settlementId == null || fullType == null) return 0;
         SettlementState s = SETTLEMENTS.get(settlementId);

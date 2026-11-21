@@ -174,6 +174,23 @@ function NpcRuntime.getSmartSlotSummary(settlementId)
     return EmberRoutesJava.getSmartSlotSummary(settlementId) or "none"
 end
 
+function NpcRuntime.debugApplyNeed(npcId, needKind)
+    if not EmberRoutesJava or not EmberRoutesJava.debugApplyNpcNeed or not npcId or not needKind then
+        return "UNAVAILABLE"
+    end
+    return EmberRoutesJava.debugApplyNpcNeed(npcId, needKind) or "UNAVAILABLE"
+end
+
+function NpcRuntime.assignToSettlement(npcId, settlementId)
+    if not EmberRoutesJava or not EmberRoutesJava.assignNpcToSettlement or not npcId then return false end
+    return EmberRoutesJava.assignNpcToSettlement(npcId, settlementId) == true
+end
+
+function NpcRuntime.getAssignedSettlement(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.getNpcAssignedSettlement or not npcId then return "" end
+    return EmberRoutesJava.getNpcAssignedSettlement(npcId) or ""
+end
+
 Kernel.exposeApi("npc", NpcRuntime)
 Kernel.registerModule({
     id = "npc-runtime",

@@ -24,6 +24,10 @@ import zombie.GameTime;
 import zombie.ZomboidFileSystem;
 import zombie.characters.AttachedItems.AttachedItem;
 import zombie.characters.AttachedItems.AttachedItems;
+import zombie.characters.BodyDamage.BodyDamage;
+import zombie.characters.BodyDamage.BodyPart;
+import zombie.characters.BodyDamage.BodyPartType;
+import zombie.characters.CharacterStat;
 import zombie.characters.IsoGameCharacter;
 import zombie.characters.IsoPlayer;
 import zombie.characters.SurvivorDesc;
@@ -33,6 +37,9 @@ import zombie.characters.WornItems.WornItem;
 import zombie.characters.WornItems.WornItems;
 import zombie.core.Core;
 import zombie.debug.DebugLog;
+import zombie.entity.ComponentType;
+import zombie.entity.components.fluids.Fluid;
+import zombie.entity.components.fluids.FluidContainer;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.InventoryItemFactory;
 import zombie.inventory.ItemContainer;
@@ -57,6 +64,7 @@ import zombie.scripting.objects.ItemBodyLocation;
  * </ul>
  */
 public final class NpcManager {
+    public static final String MODDATA_HOME_SETTLEMENT_KEY = "ER_HomeSettlementId";
     private static final String SAVE_FILE_NAME = "emberroutes_npcs.bin";
     private static final int RETIRE_FORCE_DIE_TICKS = 180;
     private static final int RETIRE_HARD_CLEANUP_TICKS = 360;
@@ -88,6 +96,7 @@ public final class NpcManager {
         IsoNPC liveNpc;
         NpcSnapshot offscreenSnapshot;
         BrainMode brainMode = BrainMode.SETTLEMENT;
+        String assignedSettlementId;
         boolean phasedIn;
         boolean deadRetired;
         int deathWatchdogTicks;
@@ -237,6 +246,12 @@ public final class NpcManager {
             attachToCell(npc, cell, sq, spawnX, spawnY, iz, npc.getDirectionAngle());
 
             NpcRecord rec = new NpcRecord(npcId);
+            String homeId = WarehouseFastIndex.findSettlementIdAt(
+                    (int) Math.floor(spawnX), (int) Math.floor(spawnY));
+            if (homeId != null && !homeId.isEmpty()) {
+                rec.assignedSettlementId = homeId;
+                npc.getModData().rawset(MODDATA_HOME_SETTLEMENT_KEY, homeId);
+            }
             rec.liveNpc = npc;
             rec.phasedIn = true;
             records.put(npcId, rec);
@@ -478,14 +493,59 @@ public final class NpcManager {
             ctx.frameTick = frameTick;
             ctx.dtSim = stepDt;
             ctx.simTime = brainSimTimeSec;
-            ctx.settlementId = WarehouseFastIndex.findSettlementIdAt(
-                    (int) Math.floor(npc.getX()), (int) Math.floor(npc.getY()));
+            String homeId = rec.assignedSettlementId;
+            ctx.settlementId = (homeId != null && !homeId.isEmpty())
+                    ? homeId
+                    : WarehouseFastIndex.findSettlementIdAt(
+                            (int) Math.floor(npc.getX()), (int) Math.floor(npc.getY()));
             try {
                 npc.getBrain().tick(ctx);
             } catch (Throwable t) {
                 DebugLog.log("[EmberRoutes] Brain tick failed for " + rec.npcId + ": " + t.getMessage());
             }
         }
+    }
+
+    public static synchronized boolean assignToSettlement(String npcId, String settlementId) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null) {
+            return false;
+        }
+        String normalized = (settlementId != null && !settlementId.isBlank()) ? settlementId.trim() : null;
+        rec.assignedSettlementId = normalized;
+        if (rec.liveNpc != null) {
+            if (normalized != null) {
+                rec.liveNpc.getModData().rawset(MODDATA_HOME_SETTLEMENT_KEY, normalized);
+            } else if (rec.liveNpc.hasModData()) {
+                rec.liveNpc.getModData().rawset(MODDATA_HOME_SETTLEMENT_KEY, null);
+            }
+        }
+        if (normalized != null) {
+            setBrainMode(npcId, BrainMode.SETTLEMENT.name());
+        }
+        return true;
+    }
+
+    public static synchronized String getAssignedSettlementId(String npcId) {
+        NpcRecord rec = records.get(npcId);
+        return rec != null && rec.assignedSettlementId != null ? rec.assignedSettlementId : "";
+    }
+
+    public static synchronized int clearSettlementAssignments(String settlementId) {
+        if (settlementId == null || settlementId.isEmpty()) {
+            return 0;
+        }
+        int cleared = 0;
+        for (NpcRecord rec : records.values()) {
+            if (settlementId.equals(rec.assignedSettlementId)) {
+                rec.assignedSettlementId = null;
+                if (rec.liveNpc != null && rec.liveNpc.hasModData()) {
+                    rec.liveNpc.getModData().rawset(MODDATA_HOME_SETTLEMENT_KEY, null);
+                }
+                cleared++;
+            }
+        }
+        return cleared;
     }
 
     public static synchronized boolean setBrainMode(String npcId, String modeName) {
@@ -501,7 +561,15 @@ public final class NpcManager {
         }
         rec.brainMode = parsed;
         if (rec.phasedIn && rec.liveNpc != null && !rec.liveNpc.isDead()) {
-            rec.liveNpc.getBrain().setMode(parsed, rec.liveNpc.getBrainContext());
+            IsoNPC npc = rec.liveNpc;
+            if (parsed == BrainMode.SETTLEMENT) {
+                // 切回据点自治时无条件解除小队跟随（防旧跟随句柄阻挡空闲/返回据点分支）
+                npc.getPosture().clearPendingContinuation();
+                if (npc.getFollow().isEnabled()) {
+                    npc.getFollow().stop(npc, false, "BRAIN_SETTLEMENT");
+                }
+            }
+            npc.getBrain().setMode(parsed, npc.getBrainContext());
         }
         return true;
     }
@@ -526,6 +594,89 @@ public final class NpcManager {
             return "OFFSCREEN";
         }
         return rec.liveNpc.getBrain().getActivePathString();
+    }
+
+    /** M3 实机调试专用：给指定 NPC 施加饥饿/口渴/疲劳/安全无感染流血、发放真实补给或恢复全满健康。 */
+    public static synchronized String debugApplyNeed(String npcId, String needKind) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null || !rec.phasedIn || rec.liveNpc == null || rec.liveNpc.isDead()) {
+            return "NO_LIVE_NPC";
+        }
+        IsoNPC npc = rec.liveNpc;
+        String kind = needKind != null ? needKind.trim().toUpperCase(Locale.ROOT) : "";
+        switch (kind) {
+            case "HUNGER" -> {
+                if (npc.getStats() != null) {
+                    npc.getStats().set(CharacterStat.HUNGER, 0.70F);
+                }
+            }
+            case "THIRST" -> {
+                if (npc.getStats() != null) {
+                    npc.getStats().set(CharacterStat.THIRST, 0.70F);
+                }
+            }
+            case "FATIGUE" -> {
+                if (npc.getStats() != null) {
+                    npc.getStats().set(CharacterStat.FATIGUE, 0.85F);
+                }
+            }
+            case "BLEEDING" -> {
+                BodyDamage bd = npc.getBodyDamage();
+                if (bd != null) {
+                    BodyPart part = bd.getBodyPart(BodyPartType.ForeArm_L);
+                    if (part != null) {
+                        part.setBandaged(false, 0.0F);
+                        part.setScratched(true, true);
+                        part.setBleeding(true);
+                        if (part.getBleedingTime() < 5.0F) {
+                            part.setBleedingTime(10.0F);
+                        }
+                    }
+                }
+            }
+            case "SURVIVAL_KIT" -> {
+                ItemContainer inv = npc.getInventory();
+                if (inv != null) {
+                    InventoryItem apple = createFirstAvailable("Base.Apple", "Base.TinnedBeans");
+                    if (apple != null) inv.AddItem(apple);
+                    InventoryItem bottle = createFirstAvailable("Base.WaterBottle", "Base.PopBottle");
+                    if (bottle != null) {
+                        if (bottle.hasComponent(ComponentType.FluidContainer)) {
+                            FluidContainer fc = bottle.getFluidContainer();
+                            if (fc != null && fc.isEmpty()) {
+                                fc.addFluid(Fluid.Water, fc.getCapacity());
+                            }
+                        }
+                        inv.AddItem(bottle);
+                    }
+                    for (int i = 0; i < 2; i++) {
+                        InventoryItem bandage = createFirstAvailable("Base.Bandage", "Base.RippedSheets");
+                        if (bandage != null) inv.AddItem(bandage);
+                    }
+                    try { inv.setDrawDirty(true); } catch (Throwable ignored) {}
+                }
+            }
+            case "RESTORE" -> {
+                if (npc.getStats() != null) {
+                    npc.getStats().set(CharacterStat.HUNGER, 0.0F);
+                    npc.getStats().set(CharacterStat.THIRST, 0.0F);
+                    npc.getStats().set(CharacterStat.FATIGUE, 0.0F);
+                    npc.getStats().set(CharacterStat.ENDURANCE, 1.0F);
+                }
+                if (npc.getBodyDamage() != null) {
+                    npc.getBodyDamage().RestoreToFullHealth();
+                }
+            }
+            default -> {
+                return "UNKNOWN_NEED:" + kind;
+            }
+        }
+        float h = npc.getStats() != null ? npc.getStats().get(CharacterStat.HUNGER) : 0.0F;
+        float t = npc.getStats() != null ? npc.getStats().get(CharacterStat.THIRST) : 0.0F;
+        float f = npc.getStats() != null ? npc.getStats().get(CharacterStat.FATIGUE) : 0.0F;
+        int bleeds = npc.getBodyDamage() != null ? npc.getBodyDamage().getNumPartsBleeding() : 0;
+        return String.format(Locale.US, "%s [%s] H=%.2f T=%.2f F=%.2f bleed=%d path=%s",
+                npcId, kind, h, t, f, bleeds, npc.getBrain().getActivePathString());
     }
 
     public static synchronized void onGameWindowSave() {
@@ -679,16 +830,21 @@ public final class NpcManager {
         if (rec == null || !rec.phasedIn || rec.liveNpc == null || rec.liveNpc.isDead()) {
             return false;
         }
-        rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "FOLLOW_START");
+        IsoNPC npc = rec.liveNpc;
+        rec.brainMode = BrainMode.SQUAD;
+        npc.getBrainContext().followPlayerIndex = playerIndex;
+        npc.getBrainContext().followSlot = slot;
+        npc.getBrain().setMode(BrainMode.SQUAD, npc.getBrainContext());
+        npc.getLocomotion().interrupt(npc, "FOLLOW_START");
         collectSettledMoveEventLocked(rec);
-        if (rec.liveNpc.getPosture().isBlockingLocomotion()) {
-            rec.liveNpc.getPosture().queueFollowAfterStandUp(rec.liveNpc, playerIndex, slot);
+        if (npc.getPosture().isBlockingLocomotion()) {
+            npc.getPosture().queueFollowAfterStandUp(npc, playerIndex, slot);
             return true;
         }
-        if (rec.liveNpc.getPosture().isActive()) {
-            rec.liveNpc.getPosture().commandStandUp(rec.liveNpc, true);
+        if (npc.getPosture().isActive()) {
+            npc.getPosture().commandStandUp(npc, true);
         }
-        rec.liveNpc.getFollow().start(playerIndex, slot);
+        npc.getFollow().start(playerIndex, slot);
         return true;
     }
 
@@ -804,7 +960,12 @@ public final class NpcManager {
     public static synchronized boolean stopFollow(String npcId) {
         NpcRecord rec = records.get(npcId);
         if (rec == null || rec.liveNpc == null) return false;
+        rec.liveNpc.getPosture().clearPendingContinuation();
         rec.liveNpc.getFollow().stop(rec.liveNpc, true, "USER_STOP");
+        if (rec.brainMode == BrainMode.SQUAD) {
+            rec.brainMode = BrainMode.SETTLEMENT;
+            rec.liveNpc.getBrain().setMode(BrainMode.SETTLEMENT, rec.liveNpc.getBrainContext());
+        }
         return true;
     }
 
@@ -1246,6 +1407,13 @@ public final class NpcManager {
                     rec.npcId, cell, placeholder,
                     (int) Math.floor(snap.x), (int) Math.floor(snap.y), EmberTargetProjector.levelOf(snap.z));
             snap.restoreTo(npc);
+            if (npc.hasModData()
+                    && npc.getModData().rawget(MODDATA_HOME_SETTLEMENT_KEY) instanceof String savedHome
+                    && !savedHome.isBlank()) {
+                rec.assignedSettlementId = savedHome.trim();
+            } else if (rec.assignedSettlementId != null && !rec.assignedSettlementId.isBlank()) {
+                npc.getModData().rawset(MODDATA_HOME_SETTLEMENT_KEY, rec.assignedSettlementId);
+            }
             attachToCell(npc, cell, sq, snap.x, snap.y, snap.z, snap.dirAngleDeg);
             npc.getBrain().setMode(rec.brainMode, npc.getBrainContext());
             rec.liveNpc = npc;

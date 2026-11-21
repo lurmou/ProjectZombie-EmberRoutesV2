@@ -6,9 +6,9 @@ import emberroutes.npc.IsoNPC;
 import emberroutes.npc.NpcPostureController;
 import emberroutes.npc.brain.NeedsPolicy.UrgentNeed;
 import emberroutes.warehouse.SmartObjectRegistry;
-import emberroutes.warehouse.SmartSlot;
 import emberroutes.warehouse.SmartSlot.SlotKind;
 import emberroutes.warehouse.SmartSlot.SmartSlotLease;
+import emberroutes.warehouse.WarehouseFastIndex;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import zombie.characters.CharacterStat;
@@ -60,11 +60,12 @@ public final class SettlementBrainBuilder {
 
         StateNode returnTool = new ReturnToolNode();
         StateNode workDuty = new WorkDutyNode(work);
+        StateNode returnHome = new ReturnToSettlementNode();
         StateNode seatRest = new SeatLeisureNode();
         StateNode idleStand = new IdleStandNode();
         StateNode leisureBranch = new BranchNode(
                 "LEISURE_AND_IDLE",
-                new StateNode[]{seatRest, idleStand},
+                new StateNode[]{returnHome, seatRest, idleStand},
                 false);
 
         StateNode root = new RootNode(
@@ -108,6 +109,15 @@ public final class SettlementBrainBuilder {
         }
     }
 
+    private static void deferStopMove(BrainContext ctx, StateScope scope) {
+        scope.defer(() -> {
+            if (ctx.npc != null && !ctx.npc.isDead()) {
+                ctx.npc.getPosture().clearPendingContinuation();
+                ctx.npc.getLocomotion().stop(ctx.npc);
+            }
+        });
+    }
+
     private static final class RootNode extends StateNode {
         RootNode(String id, StateNode[] children, StateEvaluator[] evaluators) {
             super(id, children, evaluators, 0.0, false);
@@ -146,12 +156,7 @@ public final class SettlementBrainBuilder {
             sentGoalY = Float.NaN;
             sentGoalZ = Integer.MIN_VALUE;
             issueMoveIfNeeded(ctx);
-            scope.defer(() -> {
-                if (ctx.npc != null && !ctx.npc.isDead()) {
-                    ctx.npc.getPosture().clearPendingContinuation();
-                    ctx.npc.getLocomotion().stop(ctx.npc);
-                }
-            });
+            deferStopMove(ctx, scope);
         }
 
         @Override
@@ -586,6 +591,75 @@ public final class SettlementBrainBuilder {
             this.cooldownUntilSimTime = ctx.simTime + COOLDOWN_AFTER_EXIT_SEC;
             this.tempPropEquipped = false;
             super.onExit(ctx);
+        }
+    }
+
+    /** 若 NPC 被指派了所属据点且当前身处领地外（例如切回据点自治模式后），自动经起身屏障步行返回据点。 */
+    private static final class ReturnToSettlementNode extends StateNode {
+        private String targetSettlementId;
+        private int anchorX;
+        private int anchorY;
+        private double nextRetrySimTime;
+
+        ReturnToSettlementNode() {
+            super("RETURN_TO_SETTLEMENT", null, null, 0.0, false);
+        }
+
+        @Override
+        public boolean canEnter(BrainContext ctx) {
+            if (ctx.npc == null || ctx.settlementId == null || ctx.npc.getFollow().isEnabled()) {
+                return false;
+            }
+            int nx = (int) Math.floor(ctx.npc.getX());
+            int ny = (int) Math.floor(ctx.npc.getY());
+            if (WarehouseFastIndex.containsPoint(ctx.settlementId, nx, ny)) {
+                return false;
+            }
+            return WarehouseFastIndex.getSettlementAnchorTile(ctx.settlementId) != null;
+        }
+
+        @Override
+        public boolean canContinue(BrainContext ctx) {
+            return canEnter(ctx);
+        }
+
+        @Override
+        public void onEnter(BrainContext ctx, StateScope scope) {
+            ctx.working = false;
+            this.targetSettlementId = ctx.settlementId;
+            this.nextRetrySimTime = 0.0;
+            int[] anchor = WarehouseFastIndex.getSettlementAnchorTile(ctx.settlementId);
+            if (anchor == null) {
+                return;
+            }
+            this.anchorX = anchor[0];
+            this.anchorY = anchor[1];
+            ctx.requestMoveTo(anchorX + 0.5, anchorY + 0.5, 0.0, false);
+            deferStopMove(ctx, scope);
+        }
+
+        @Override
+        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
+            if (ctx.npc == null || ctx.settlementId == null) {
+                return;
+            }
+            if (!ctx.settlementId.equals(this.targetSettlementId)) {
+                int[] anchor = WarehouseFastIndex.getSettlementAnchorTile(ctx.settlementId);
+                if (anchor != null) {
+                    this.targetSettlementId = ctx.settlementId;
+                    this.anchorX = anchor[0];
+                    this.anchorY = anchor[1];
+                    ctx.requestMoveTo(anchorX + 0.5, anchorY + 0.5, 0.0, false);
+                    this.nextRetrySimTime = ctx.simTime + 2.5;
+                }
+                return;
+            }
+            if (!ctx.npc.getLocomotion().isMoving()
+                    && !ctx.npc.getPosture().isBlockingLocomotion()
+                    && ctx.simTime >= this.nextRetrySimTime) {
+                ctx.requestMoveTo(anchorX + 0.5, anchorY + 0.5, 0.0, false);
+                this.nextRetrySimTime = ctx.simTime + 3.0;
+            }
         }
     }
 

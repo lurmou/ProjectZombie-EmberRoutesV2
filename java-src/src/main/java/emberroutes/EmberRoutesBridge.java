@@ -458,4 +458,20 @@ public final class EmberRoutesBridge {
     public static String getSmartSlotSummary(String settlementId) {
         return SmartObjectRegistry.getSummary(settlementId);
     }
+
+    public static String debugApplyNpcNeed(String npcId, String needKind) {
+        return NpcManager.debugApplyNeed(npcId, needKind);
+    }
+
+    public static boolean assignNpcToSettlement(String npcId, String settlementId) {
+        return NpcManager.assignToSettlement(npcId, settlementId);
+    }
+
+    public static String getNpcAssignedSettlement(String npcId) {
+        return NpcManager.getAssignedSettlementId(npcId);
+    }
+
+    public static double clearSettlementNpcAssignments(String settlementId) {
+        return NpcManager.clearSettlementAssignments(settlementId);
+    }
 }

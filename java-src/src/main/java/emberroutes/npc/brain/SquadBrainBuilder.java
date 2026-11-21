@@ -32,7 +32,7 @@ public final class SquadBrainBuilder {
             if (ctx.npc == null || ctx.npc.isDead()) {
                 return;
             }
-            ctx.requestFollow(0, -1);
+            ctx.requestFollow(ctx.followPlayerIndex, ctx.followSlot);
             scope.defer(() -> {
                 if (ctx.npc != null && !ctx.npc.isDead()) {
                     ctx.npc.getPosture().clearPendingContinuation();
@@ -47,7 +47,7 @@ public final class SquadBrainBuilder {
                     && !ctx.npc.getFollow().isEnabled()
                     && !ctx.npc.getPosture().isBlockingLocomotion()) {
                 // 如未在等待起身队列且意外处于非跟随态，保持重连
-                ctx.requestFollow(0, -1);
+                ctx.requestFollow(ctx.followPlayerIndex, ctx.followSlot);
             }
         }
     }

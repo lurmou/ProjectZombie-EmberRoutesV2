@@ -254,9 +254,42 @@ local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z, bedObj, 
         end)
 
         local brainTarget = pickedId or targetId
+        local curSettlement = SettlementStore.findSettlementAt(gx, gy)
+        if curSettlement then
+            m2Sub:addOption(
+                getText("ContextMenu_ER_M3_AssignCurSettlementFmt", curSettlement.name, brainTarget),
+                actor,
+                function()
+                    local ok = NpcRuntime.assignToSettlement(brainTarget, curSettlement.id)
+                    print("[EmberRoutes][M3] AssignToSettlement " .. tostring(brainTarget)
+                        .. " -> " .. tostring(curSettlement.id) .. " (" .. tostring(curSettlement.name) .. ") ok=" .. tostring(ok))
+                end
+            )
+        end
+
+        local allSettlements = SettlementStore.list()
+        if #allSettlements > 0 then
+            local assignSub = ISContextMenu:getNew(context)
+            local assignOpt = m2Sub:addOption(getText("ContextMenu_ER_M3_AssignSettlementSubFmt", brainTarget), nil, nil)
+            context:addSubMenu(assignOpt, assignSub)
+            for i = 1, #allSettlements do
+                local st = allSettlements[i]
+                assignSub:addOption(getText("ContextMenu_ER_M3_AssignSettlementItemFmt", st.name, st.id), actor, function()
+                    local ok = NpcRuntime.assignToSettlement(brainTarget, st.id)
+                    print("[EmberRoutes][M3] AssignToSettlement " .. tostring(brainTarget)
+                        .. " -> " .. tostring(st.id) .. " (" .. tostring(st.name) .. ") ok=" .. tostring(ok))
+                end)
+            end
+            assignSub:addOption(getText("ContextMenu_ER_M3_UnassignSettlementFmt", brainTarget), actor, function()
+                NpcRuntime.assignToSettlement(brainTarget, nil)
+                local ok = NpcRuntime.setBrainMode(brainTarget, "SETTLEMENT")
+                print("[EmberRoutes][M3] Unassigned home & switched to SETTLEMENT " .. tostring(brainTarget) .. " -> " .. tostring(ok))
+            end)
+        end
+
         m2Sub:addOption(getText("ContextMenu_ER_M3_SetBrainSettlementFmt", brainTarget), actor, function()
             local ok = NpcRuntime.setBrainMode(brainTarget, "SETTLEMENT")
-            print("[EmberRoutes][M3] SetBrainMode SETTLEMENT " .. tostring(brainTarget) .. " -> " .. tostring(ok))
+            print("[EmberRoutes][M3] SetBrainMode SETTLEMENT (stopFollow) " .. tostring(brainTarget) .. " -> " .. tostring(ok))
         end)
 
         m2Sub:addOption(getText("ContextMenu_ER_M3_SetBrainSquadFmt", brainTarget), actor, function()
@@ -265,17 +298,39 @@ local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z, bedObj, 
         end)
 
         m2Sub:addOption(getText("ContextMenu_ER_M3_InspectBrainsAndSlots"), actor, function()
-            local curSettlement = SettlementStore.findSettlementAt(gx, gy)
             local sid = curSettlement and curSettlement.id or nil
-            print("[EmberRoutes][M3] SmartSlots=" .. tostring(NpcRuntime.getSmartSlotSummary(sid)))
+            print("[EmberRoutes][M3] CursorSmartSlots=" .. tostring(NpcRuntime.getSmartSlotSummary(sid)))
             for i = 1, #ids do
                 local id = ids[i]
+                local homeId = NpcRuntime.getAssignedSettlement(id)
+                local homeLabel = (homeId ~= "" and homeId) or "none"
+                local homeSlots = (homeId ~= "" and NpcRuntime.getSmartSlotSummary(homeId)) or "none"
                 print("[EmberRoutes][M3] NPC " .. tostring(id)
+                    .. " home=" .. tostring(homeLabel)
                     .. " mode=" .. tostring(NpcRuntime.getBrainMode(id))
+                    .. " following=" .. tostring(NpcLocomotionPort.isFollowing(id))
                     .. " path=" .. tostring(NpcRuntime.getBrainStatePath(id))
-                    .. " posture=" .. tostring(NpcRuntime.getPostureState(id)))
+                    .. " posture=" .. tostring(NpcRuntime.getPostureState(id))
+                    .. " homeSlots=" .. tostring(homeSlots))
             end
         end)
+
+        local needSub = ISContextMenu:getNew(context)
+        local needOpt = m2Sub:addOption(getText("ContextMenu_ER_M3_NeedsDebugFmt", brainTarget), nil, nil)
+        context:addSubMenu(needOpt, needSub)
+
+        local function addNeedOption(key, needKind)
+            needSub:addOption(getText(key), actor, function()
+                local res = NpcRuntime.debugApplyNeed(brainTarget, needKind)
+                print("[EmberRoutes][M3] NeedDebug -> " .. tostring(res))
+            end)
+        end
+        addNeedOption("ContextMenu_ER_M3_NeedKit", "SURVIVAL_KIT")
+        addNeedOption("ContextMenu_ER_M3_NeedHunger", "HUNGER")
+        addNeedOption("ContextMenu_ER_M3_NeedThirst", "THIRST")
+        addNeedOption("ContextMenu_ER_M3_NeedFatigue", "FATIGUE")
+        addNeedOption("ContextMenu_ER_M3_NeedBleeding", "BLEEDING")
+        addNeedOption("ContextMenu_ER_M3_NeedRestore", "RESTORE")
     end
 end
 
