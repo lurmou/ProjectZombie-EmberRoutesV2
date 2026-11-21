@@ -152,6 +152,8 @@ public final class NpcManager {
                 try {
                     rec.liveNpc.getBrain().shutdown(rec.liveNpc.getBrainContext());
                     TempPropHelper.cleanupAllTempProps(rec.liveNpc);
+                    rec.liveNpc.getGaze().forceReset(rec.liveNpc);
+                    rec.liveNpc.getPerception().reset();
                     rec.liveNpc.getPosture().forceImmediateReset(rec.liveNpc, "RESET", true);
                     rec.liveNpc.getFollow().stop(rec.liveNpc, false, "RESET");
                     rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "RESET");
@@ -272,6 +274,8 @@ public final class NpcManager {
         if (rec.liveNpc != null) {
             rec.liveNpc.getBrain().shutdown(rec.liveNpc.getBrainContext());
             TempPropHelper.cleanupAllTempProps(rec.liveNpc);
+            rec.liveNpc.getGaze().forceReset(rec.liveNpc);
+            rec.liveNpc.getPerception().reset();
             rec.liveNpc.getPosture().forceImmediateReset(rec.liveNpc, "DESPAWN", true);
             rec.liveNpc.getFollow().stop(rec.liveNpc, false, "DESPAWN");
             rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "DESPAWN");
@@ -302,6 +306,8 @@ public final class NpcManager {
         IsoNPC npc = rec.liveNpc;
         npc.getBrain().shutdown(npc.getBrainContext());
         TempPropHelper.cleanupAllTempProps(npc);
+        npc.getGaze().forceReset(npc);
+        npc.getPerception().reset();
         npc.getPosture().forceImmediateReset(npc, "PHASE_OUT", true);
         npc.getFollow().stop(npc, true, "OFFSCREEN");
         npc.getLocomotion().interrupt(npc, "OFFSCREEN");
@@ -459,6 +465,8 @@ public final class NpcManager {
         if (rec != null) {
             npc.getBrain().shutdown(npc.getBrainContext());
             TempPropHelper.cleanupAllTempProps(npc);
+            npc.getGaze().forceReset(npc);
+            npc.getPerception().reset();
             npc.getPosture().forceImmediateReset(npc, "DEATH", true);
             npc.getFollow().stop(npc, false, "DEAD");
             npc.getLocomotion().interrupt(npc, "DEAD");
@@ -499,6 +507,7 @@ public final class NpcManager {
                     : WarehouseFastIndex.findSettlementIdAt(
                             (int) Math.floor(npc.getX()), (int) Math.floor(npc.getY()));
             try {
+                npc.getPerception().tick(npc, brainSimTimeSec, stepDt);
                 npc.getBrain().tick(ctx);
             } catch (Throwable t) {
                 DebugLog.log("[EmberRoutes] Brain tick failed for " + rec.npcId + ": " + t.getMessage());

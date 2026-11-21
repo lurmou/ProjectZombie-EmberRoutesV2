@@ -229,6 +229,7 @@ flowchart TD
 | **`SmartObjectRegistry` & `SmartSlot`** | `WarehouseFastIndex.scanSquareInternal` 扫描方块（多格家具按主格唯一键、预计算 8 方位掩码与房间门连通表）；`updateContainerAggregates` $O(1)$ 切换广播表。 | 租约经 `StateScope` 逆序释放并扣减预留余量；余量为 `0` 时 swap-and-pop 撤出广播。 | 区块卸载/容器砸毁触发 `markSquareUnloadedInternal` 摘除广播并置租约 `INVALIDATED`；单方位寻路受阻记 `30s` 局部退避换侧；`resetWarehouse()` 全量清空。 |
 | **`SettlementTaskAuctioneer` & `BatchTour`** | `auctionDirty` + `250ms` 节拍触发 `solveRectangularHungarian` 分配 `TaskSlice` 及 Lookahead `nextChainedSlice`（预锁入 `chainedNextScope`）。 | 投递或工序切片返回 `STATUS_COMPLETED` 核销预留重量，并调用 `chainedNextScope.transferTo(activeLeafScope)` 无缝接力。 | 战斗打断、超时或切换 `SQUAD` 立即 `chainedNextScope.close()` 归还所有 `SmartSlot` / `30s` 软锁；已入背包物品保持真原件，借用工具空闲按 `ModData` 来源戳自动归还。 |
 | **`EmberSquadDirector` & 令牌/载具** | `80ms` 粗筛更新 `ThreatEntry / HordeCluster` 与 `DangerField`；进入战斗/乘车分支绑定令牌与 `VehicleSeatReservation`。 | 目标死亡或退回跟随分支时，`StateScope.close()` 自动释放环绕/换弹令牌与 `FiringCorridor`。 | **`phaseOut` 离屏前真脱离载具；`GameWindow.save` 在场热存盘保持 `liveNpc` 坐车不动，仅将 `NpcSnapshot` 存盘坐标写为车门旁安全点并瞬时屏蔽 `BaseVehicle` 乘客序列化**。 |
+| **`NpcPerception` & `EmberGazeController`** | `IsoNPC` 构造器挂载，与 `locomotion / posture` 平级；`AGENT_BRAIN` 阶段经 `distSq <= 64 -> IsoGridSquare.isCouldSee(0) -> 0.12s 错相位视野锥 -> 无状态 LosUtil.lineClear` 四级漏斗刷新刺激记忆槽（禁止单人调 `lineClearCached` 防永不清零脏读）。 | `EmberGazeController.beforeUpdate` 按姿态查 `PostureGazeProfile` 自动驱动或淡出归还头/颈骨骼遮罩，为头部通道唯一写者（拦截 `IsoPlayer.updateInternal2` 每帧归零与真玩家右键瞄准窜扰）；行为请求/压制令牌经 `StateScope.defer` 自动归还。 | 死亡、`phaseOut`、`despawn`、`reset` 与强制起身统一调 `gaze.forceReset(npc)` + `perception.reset()`；纯瞬态不落盘，读档归零。 |
 
 ---
 
@@ -265,7 +266,7 @@ EmberRoutesV2/
 │   ├── EmberRoutesBridge.java                          # Lua 静态桥接门面（域级 reset* / 批事件 drain* / 诊断时钟）
 │   ├── Patch_*.java                                    # L0 字节码无损传感器（根包铁律：ItemContainer / IsoChunk / GameWindowSave / IngameExit / WorldRender）
 │   ├── warehouse/                                      # 脏队列、Chunk 包围盒感知、增量仓储索引、SmartObjectRegistry、Auctioneer 与 BatchTour
-│   ├── npc/                                            # [M2–M5] IsoNPC 躯壳、寻路姿态、brain/（BrainRouter / EmberStateTree / StateScope / BaseAction / SquadDirector）
+│   ├── npc/                                            # [M2–M5] IsoNPC 躯壳、寻路姿态、EmberGazeController/PostureGazeProfile、perception/（NpcPerception / AttentionSelector）、brain/（BrainRouter / EmberStateTree / StateScope / BaseAction / SquadDirector）
 │   ├── caravan/                                        # [M6 按需] 路网拓扑与 VehiclesDB2 真车虚实封装
 │   └── llm/                                            # [M4 按需] 独立大模型通信与配置桥
 │
