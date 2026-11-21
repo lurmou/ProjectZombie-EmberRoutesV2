@@ -35,6 +35,7 @@ import zombie.iso.IsoCamera;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoChunk;
 import zombie.iso.IsoGridSquare;
+import zombie.iso.IsoObject;
 import zombie.iso.IsoWorld;
 import zombie.scripting.objects.ItemBodyLocation;
 
@@ -106,6 +107,7 @@ public final class NpcManager {
             long moveSeq,
             long settledSeq,
             int itemCount,
+            String postureState,
             String debugLine) {}
 
     private static final Map<String, NpcRecord> records = new LinkedHashMap<>();
@@ -129,6 +131,7 @@ public final class NpcManager {
         for (NpcRecord rec : records.values()) {
             if (rec.liveNpc != null) {
                 try {
+                    rec.liveNpc.getPosture().forceImmediateReset(rec.liveNpc, "RESET", true);
                     rec.liveNpc.getFollow().stop(rec.liveNpc, false, "RESET");
                     rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "RESET");
                 } catch (Throwable ignored) {}
@@ -238,6 +241,7 @@ public final class NpcManager {
         NpcRecord rec = records.remove(npcId);
         if (rec == null) return false;
         if (rec.liveNpc != null) {
+            rec.liveNpc.getPosture().forceImmediateReset(rec.liveNpc, "DESPAWN", true);
             rec.liveNpc.getFollow().stop(rec.liveNpc, false, "DESPAWN");
             rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "DESPAWN");
             collectSettledMoveEventLocked(rec);
@@ -265,6 +269,7 @@ public final class NpcManager {
             return false;
         }
         IsoNPC npc = rec.liveNpc;
+        npc.getPosture().forceImmediateReset(npc, "PHASE_OUT", true);
         npc.getFollow().stop(npc, true, "OFFSCREEN");
         npc.getLocomotion().interrupt(npc, "OFFSCREEN");
         collectSettledMoveEventLocked(rec);
@@ -419,6 +424,7 @@ public final class NpcManager {
         if (npc == null) return;
         NpcRecord rec = records.get(npc.getNpcId());
         if (rec != null) {
+            npc.getPosture().forceImmediateReset(npc, "DEATH", true);
             npc.getFollow().stop(npc, false, "DEAD");
             npc.getLocomotion().interrupt(npc, "DEAD");
             collectSettledMoveEventLocked(rec);
@@ -546,6 +552,15 @@ public final class NpcManager {
             return -1L;
         }
         rec.liveNpc.getFollow().stop(rec.liveNpc, false, "MOVE_TO");
+        if (rec.liveNpc.getPosture().isBlockingLocomotion()) {
+            collectSettledMoveEventLocked(rec);
+            long reservedSeq = Math.max(1L, rec.liveNpc.getLocomotion().getMoveSeq() + 1L);
+            rec.liveNpc.getPosture().queueMoveAfterStandUp(rec.liveNpc, x, y, z, running);
+            return reservedSeq;
+        }
+        if (rec.liveNpc.getPosture().isActive()) {
+            rec.liveNpc.getPosture().commandStandUp(rec.liveNpc, true);
+        }
         long seq = rec.liveNpc.getLocomotion().moveTo(rec.liveNpc, x, y, z, running);
         collectSettledMoveEventLocked(rec);
         return seq;
@@ -555,6 +570,10 @@ public final class NpcManager {
         NpcRecord rec = records.get(npcId);
         if (rec == null || rec.liveNpc == null) return false;
         rec.liveNpc.getFollow().stop(rec.liveNpc, false, "STOP");
+        rec.liveNpc.getPosture().clearPendingContinuation();
+        if (rec.liveNpc.getPosture().isActive()) {
+            rec.liveNpc.getPosture().commandStandUp(rec.liveNpc, true);
+        }
         rec.liveNpc.getLocomotion().stop(rec.liveNpc);
         collectSettledMoveEventLocked(rec);
         return true;
@@ -567,8 +586,92 @@ public final class NpcManager {
         }
         rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "FOLLOW_START");
         collectSettledMoveEventLocked(rec);
+        if (rec.liveNpc.getPosture().isBlockingLocomotion()) {
+            rec.liveNpc.getPosture().queueFollowAfterStandUp(rec.liveNpc, playerIndex, slot);
+            return true;
+        }
+        if (rec.liveNpc.getPosture().isActive()) {
+            rec.liveNpc.getPosture().commandStandUp(rec.liveNpc, true);
+        }
         rec.liveNpc.getFollow().start(playerIndex, slot);
         return true;
+    }
+
+    public static synchronized boolean sitNpcOnFurniture(String npcId, IsoObject furniture) {
+        IsoNPC npc = getLiveNpc(npcId);
+        return npc != null && npc.getPosture().commandSitOnFurniture(npc, furniture);
+    }
+
+    public static synchronized boolean sleepNpcOnBed(String npcId, IsoObject bed) {
+        IsoNPC npc = getLiveNpc(npcId);
+        return npc != null && npc.getPosture().commandSleepOnBed(npc, bed);
+    }
+
+    public static synchronized boolean standUpNpc(String npcId, boolean urgent) {
+        IsoNPC npc = getLiveNpc(npcId);
+        if (npc == null) {
+            return false;
+        }
+        npc.getPosture().clearPendingContinuation();
+        return npc.getPosture().commandStandUp(npc, urgent);
+    }
+
+    public static synchronized int standUpAllNpcs(boolean urgent) {
+        int count = 0;
+        for (NpcRecord rec : records.values()) {
+            if (rec.phasedIn && !rec.deadRetired && rec.liveNpc != null && !rec.liveNpc.isDead()) {
+                rec.liveNpc.getPosture().clearPendingContinuation();
+                if (rec.liveNpc.getPosture().commandStandUp(rec.liveNpc, urgent)) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    public static synchronized String getPostureState(String npcId) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null) {
+            return "MISSING";
+        }
+        if (!rec.phasedIn || rec.liveNpc == null) {
+            return "OFFSCREEN";
+        }
+        return rec.liveNpc.getPosture().getState().name();
+    }
+
+    static synchronized boolean isFurnitureTileClaimedByOther(IsoNPC self, IsoObject tile) {
+        if (tile == null) {
+            return false;
+        }
+        for (NpcRecord rec : records.values()) {
+            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc == self || rec.liveNpc.isDead()) {
+                continue;
+            }
+            IsoNPC other = rec.liveNpc;
+            if (other.getPosture().getTargetObject() == tile || other.getSitOnFurnitureObject() == tile) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static synchronized boolean isBedHeadClaimedByOther(IsoNPC self, IsoObject headObj) {
+        if (headObj == null) {
+            return false;
+        }
+        for (NpcRecord rec : records.values()) {
+            if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc == self || rec.liveNpc.isDead()) {
+                continue;
+            }
+            IsoNPC other = rec.liveNpc;
+            if (other.getPosture().getTargetObject() == headObj
+                    || other.getBed() == headObj
+                    || other.getSitOnFurnitureObject() == headObj) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static synchronized boolean stopFollow(String npcId) {
@@ -838,6 +941,7 @@ public final class NpcManager {
                     loco.getMoveSeq(),
                     loco.getSettledSeq(),
                     count,
+                    npc.getPosture().getState().name(),
                     loco.getLiveDebugLine(npc)
             );
         }
@@ -859,6 +963,7 @@ public final class NpcManager {
                     0L,
                     0L,
                     0,
+                    "OFFSCREEN",
                     "[OFFSCREEN]"
             );
         }

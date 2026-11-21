@@ -33,6 +33,8 @@ import se.krka.kahlua.vm.LuaClosure;
 import zombie.GameWindow;
 import zombie.Lua.LuaManager;
 import zombie.core.Core;
+import zombie.core.skinnedmodel.advancedanimation.AnimNode;
+import zombie.util.PZXmlUtil;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
 import zombie.inventory.types.DrainableComboItem;
@@ -1277,14 +1279,25 @@ public final class VerifyModule1 {
                     }
                 }
             }
-            check(patchCount == 25, "Expected exact 25 @Patch classes in root package 'emberroutes', got " + patchCount);
+            check(patchCount == 27, "Expected exact 27 @Patch classes in root package 'emberroutes', got " + patchCount);
             // 验证 NpcManager 防空写存档门闩：未成功 loadFromCurrentSave 前，saveAllToDisk 必须拒绝覆写返回 false
             NpcManager.reset();
             check(!NpcManager.isLoadedForCurrentSave(), "After reset, loadedForCurrentSave must be false");
             check(!NpcManager.saveAllToDisk(), "saveAllToDisk MUST refuse to overwrite save before loadFromCurrentSave");
             check(EmberRoutesBridge.drainNpcMoveEvents() == null, "Idle drainNpcMoveEvents must return null (zero alloc)");
             verifyLuaLayerBoundaries(luaRoot);
-            System.out.println("[VerifyModule1] 6/7 Verified all " + patchCount + " @Patch classes in root package 'emberroutes', save latch, zero-alloc drain & Lua layer boundaries.");
+
+            Path sitIdleAnimDir = root.resolve("Contents/mods/EmberRoutes/42/media/AnimSets/player/sitonfurniture/idle");
+            verifySitSleepAnimXml(sitIdleAnimDir.resolve("ER_SitSleepAwake.xml"), "Bob_Awake", true);
+            verifySitSleepAnimXml(sitIdleAnimDir.resolve("ER_SitSleepEnter.xml"), "Bob_AwakeToAsleep", false);
+            verifySitSleepAnimXml(sitIdleAnimDir.resolve("ER_SitSleepIdle.xml"), "Bob_Asleep", true);
+            verifySitSleepAnimXml(sitIdleAnimDir.resolve("ER_SitSleepExit.xml"), "Bob_AsleepToAwake", false);
+            verifySitTransitionXml(sitIdleAnimDir.resolve("ER_SitToBedLeft.xml"), "Bob_GetOutBedLeft", true);
+            verifySitTransitionXml(sitIdleAnimDir.resolve("ER_SitToBedRight.xml"), "Bob_GetOutBedRight", true);
+            verifySitTransitionXml(sitIdleAnimDir.resolve("ER_BedToSitLeft.xml"), "Bob_GetOutBedLeft", false);
+            verifySitTransitionXml(sitIdleAnimDir.resolve("ER_BedToSitRight.xml"), "Bob_GetOutBedRight", false);
+
+            System.out.println("[VerifyModule1] 6/7 Verified all " + patchCount + " @Patch classes in root package 'emberroutes', save latch, zero-alloc drain, Lua layer boundaries & 8 sitonfurniture AnimNode XMLs.");
         }
 
         // 7. M2 NpcSnapshot 二进制存读档与 100% InventoryItem.id / 嵌套背包原件守恒契约校验
@@ -1458,5 +1471,45 @@ public final class VerifyModule1 {
                 }
             }
         }
+    }
+
+    private static AnimNode loadAndVerifyAnimNode(
+            Path xmlPath, String expectedAnimName, int expectedConditions) throws Exception {
+        check(Files.isRegularFile(xmlPath), "Missing AnimNode XML: " + xmlPath);
+        var dbf = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+        var doc = dbf.newDocumentBuilder().parse(xmlPath.toFile());
+        AnimNode node = PZXmlUtil.unmarshall(AnimNode.class, doc.getDocumentElement());
+        check(node != null, "PZXmlUtil.unmarshall returned null for " + xmlPath);
+        check(expectedAnimName.equals(node.animName),
+                xmlPath.getFileName() + " animName expected " + expectedAnimName + ", got " + node.animName);
+        check(node.conditions != null && node.conditions.length == expectedConditions,
+                xmlPath.getFileName() + " conditions length expected " + expectedConditions);
+        for (var cond : node.conditions) {
+            cond.parseValue();
+        }
+        return node;
+    }
+
+    private static void verifySitSleepAnimXml(
+            Path xmlPath, String expectedAnimName, boolean expectedLooped) throws Exception {
+        AnimNode node = loadAndVerifyAnimNode(xmlPath, expectedAnimName, 2);
+        check(node.isLooped == expectedLooped,
+                xmlPath.getFileName() + " isLooped expected " + expectedLooped + ", got " + node.isLooped);
+        check(node.conditionPriority == 1,
+                xmlPath.getFileName() + " conditionPriority expected 1, got " + node.conditionPriority);
+    }
+
+    private static void verifySitTransitionXml(
+            Path xmlPath, String expectedAnimName, boolean expectedReverse) throws Exception {
+        AnimNode node = loadAndVerifyAnimNode(xmlPath, expectedAnimName, 2);
+        check(node.isAnimReverse == expectedReverse,
+                xmlPath.getFileName() + " isAnimReverse expected " + expectedReverse + ", got " + node.isAnimReverse);
+        check(!node.isLooped, xmlPath.getFileName() + " must have isLooped=false");
+        check(node.conditionPriority == 1,
+                xmlPath.getFileName() + " conditionPriority expected 1, got " + node.conditionPriority);
+        check(node.useDeferedRotation, xmlPath.getFileName() + " must have useDeferedRotation=true");
+        check(!node.useDeferredMovement, xmlPath.getFileName() + " must have useDeferredMovement=false");
+        check("ER_BedSitFrac".equals(node.trackTimeToVariable),
+                xmlPath.getFileName() + " trackTimeToVariable expected ER_BedSitFrac, got " + node.trackTimeToVariable);
     }
 }

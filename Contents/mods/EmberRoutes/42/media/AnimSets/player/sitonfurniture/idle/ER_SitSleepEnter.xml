@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animNode>
+	<m_Name>ER_SitSleepEnter</m_Name>
+	<m_ConditionPriority>1</m_ConditionPriority>
+	<m_AnimName>Bob_AwakeToAsleep</m_AnimName>
+	<m_Looped>false</m_Looped>
+	<m_BlendTime>0.20</m_BlendTime>
+	<m_BlendOutTime>0.20</m_BlendOutTime>
+	<m_SpeedScale>1.00</m_SpeedScale>
+	<m_SyncTrackingEnabled>false</m_SyncTrackingEnabled>
+	<m_Conditions x_name="b2f5a102-4c8d-491a-9e01-8c1a2b300001">
+		<m_Name>SitOnFurnitureAnim</m_Name>
+		<m_Type>STRING</m_Type>
+		<m_Value>Idle</m_Value>
+	</m_Conditions>
+	<m_Conditions x_name="b2f5a102-4c8d-491a-9e01-8c1a2b300002">
+		<m_Name>ER_SitSleepAnim</m_Name>
+		<m_Type>STRING</m_Type>
+		<m_Value>AwakeToAsleep</m_Value>
+	</m_Conditions>
+	<m_Events x_name="b2f5a102-4c8d-491a-9e01-8c1a2b300003">
+		<m_EventName>FlagWhileAlive</m_EventName>
+		<m_Time>Start</m_Time>
+		<m_ParameterValue>hideEquippedHandL</m_ParameterValue>
+	</m_Events>
+	<m_Events x_name="b2f5a102-4c8d-491a-9e01-8c1a2b300004">
+		<m_EventName>FlagWhileAlive</m_EventName>
+		<m_Time>Start</m_Time>
+		<m_ParameterValue>hideEquippedHandR</m_ParameterValue>
+	</m_Events>
+</animNode>

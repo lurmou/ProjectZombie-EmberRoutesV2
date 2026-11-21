@@ -424,6 +424,12 @@ public final class EmberLocomotionController {
 
     public void beforeUpdate(IsoNPC npc) {
         if (npc == null) return;
+        if (npc.getPosture().isBlockingLocomotion()) {
+            npc.setEmberControlActive(false);
+            applyZeroMoveInput(npc);
+            resetStuckMonitor(npc);
+            return;
+        }
         npc.setEmberControlActive(true);
         npc.setNativeSmoothPathUnlock(true);
 

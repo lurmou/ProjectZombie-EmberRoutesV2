@@ -37,10 +37,10 @@ flowchart TD
         Kernel["Kernel.lua<br/>RAII Scope / 显式 BootOrder / 多阶段会话 / 单入口 5 阶段双时钟 Tick 管线 / 慢 Stage 点名 / 隔离槽"]
     end
 
-    subgraph L1["L1：高性能计算与域级隔离底座层 (Java emberroutes.*)"]
+    subgraph L1["L1：高性能计算、AI 大脑与域级隔离底座层 (Java emberroutes.* —— 占核心逻辑 85%+)"]
         Bridge["EmberRoutesBridge (EmberRoutesJava 门面：域级 resetWarehouse / resetNpcs / 批事件 drainNpcMoveEvents)"]
-        FastIdx["WarehouseFastIndex (2D 矩形包围盒 / Chunk 级感知 / 全楼层增量快照)"]
-        NpcCore["IsoNPC &amp; NpcManager (ByteBuffer 快照 / loadedForCurrentSave 门闩 / 零分配移动事件队列)"]
+        FastIdx["WarehouseFastIndex &amp; SmartObjectRegistry (2D 矩形包围盒 / Chunk 级感知 / 逆向广播 SmartSlot / 组合拍卖器)"]
+        NpcCore["IsoNPC &amp; NpcManager &amp; BrainRouter (EmberStateTree / StateScope / BaseAction / EmberSquadDirector)"]
     end
 
     subgraph L0["L0：原版引擎与字节码无损传感器层 (Java @Patch + Vanilla B42)"]
@@ -68,13 +68,17 @@ flowchart TD
    - 因 ZombieBuddy `PatchEngine.collectPatches` 仅按根包精确匹配扫描，**所有 `Patch_*` 类必须严格留在根包 `emberroutes` 下**；只做最薄的无损钩子（`@Patch.OnEnter` / `@Patch.OnExit`），严禁修改原版方法返回值或吞掉原版调用（如 [Patch_ItemContainer.java](../java-src/src/main/java/emberroutes/Patch_ItemContainer.java)、[Patch_IsoChunk.java](../java-src/src/main/java/emberroutes/Patch_IsoChunk.java)、[Patch_GameWindowSave.java](../java-src/src/main/java/emberroutes/Patch_GameWindowSave.java)、[Patch_IngameExit.java](../java-src/src/main/java/emberroutes/Patch_IngameExit.java)、[Patch_WorldRender.java](../java-src/src/main/java/emberroutes/Patch_WorldRender.java)）；
    - 因区块流式加载可能在后台线程触发 `ItemContainer.load`，补丁内**严禁触碰非线程安全的 `KahluaTable` 或调用 Lua 闭包**，只能写入并发无锁结构（如 [ContainerDirtyQueue.java](../java-src/src/main/java/emberroutes/warehouse/ContainerDirtyQueue.java)）；
    - Gradle 的 ArchUnit 测试（[ArchitectureBoundaryTest.java](../java-src/src/test/java/emberroutes/ArchitectureBoundaryTest.java)）强制检查全部生产 `Patch_*` 类及其内部类不直接依赖 `se.krka.kahlua..`。
-2. **L1 Java 底座层（`emberroutes.*`）**：
-   - 独占承担大规模格点遍历、Chunk 级包围盒过滤、全楼层世界容器聚合（[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/warehouse/WarehouseFastIndex.java)）、`IsoRegions` 屋顶封闭查询（[EmberRoutesBridge.java](../java-src/src/main/java/emberroutes/EmberRoutesBridge.java)）、C++ `PathfindNative` 路径拉直、`ByteBuffer` 实体存读档与移动状态跃迁批队列；
+2. **L1 Java 重核底座层（`emberroutes.*` —— 一步到位承载 85%+ 核心业务与 AI）**：
+   - **严禁“先写 Lua 再迁 Java”**：凡 B42 `projectzomboid.jar` 已提供原生 Java 类的模块——包括大规模格点遍历、Chunk 级包围盒过滤、全楼层世界容器聚合（[WarehouseFastIndex.java](../java-src/src/main/java/emberroutes/warehouse/WarehouseFastIndex.java)）、`SmartObjectRegistry & SmartSlot` 逆向广播、`SettlementTaskAuctioneer` 匈牙利组合拍卖与 `BatchTourBuilder`、`BrainRouter` 与 `EmberStateTree / StateScope` 状态树内核、`BaseAction` 动作执行器、`EmberSquadDirector` 80ms 战斗导演与 7 大微操内核、M5 伐木/烹饪/工坊合成（`HandcraftLogic / CraftLogic`）以及 M6 商队路网与真车（`WorldMapStreets / VehiclesDB2 / ZomboidRadio`）——**100% 直接在 Java 层单实现落地**；
    - **域级隔离重置与防空写门闩**：严禁单个业务域调用全局 `EmberRoutesJava.reset()` 误杀其他域（仓储重挂载只调 `resetWarehouse()`，NPC 域只调 `resetNpcs()`）；任何二进制快照存盘（如 [NpcManager.java](../java-src/src/main/java/emberroutes/npc/NpcManager.java) `saveAllToDisk()`）必须校验 `loadedForCurrentSave == true`，杜绝 B42 存档跨版本升级在 `GameLoadingState` 早期触发 `GameWindow.save(true)` 时空写覆盖存档；
    - **统一「Push-to-Queue + Single-Drain」跨语言事件协议**：Java→Lua 高频热事件（容器脏格、NPC 移动终结事件）一律在 Java 侧入队，由 Lua 帧管线单次批拉取，无事件时返回 `null`，**热路径 0 `KahluaTable` 分配**。
-3. **L2 分阶段仿真内核与 L3 静态业务域（Lua）**：
-   - 内部核心域 100% 静态 `require`，由 [check_arch.py](../tools/check_arch.py) 强制执行**域级单向 DAG**（`Settlement(10) → Warehouse(20) → Npc(30) → Work(40) → Squad(50) → Caravan(60) → UI(70) → Compat(80)`）与**循环 `require` 环检测**；
-   - 对外仅通过只读门面 `EmberRoutes.api` 暴露收敛的公开能力，绝不把内部模块表混成扁平全局 DI 字典。
+3. **L2 分阶段仿真内核与 L3 薄壳业务层（Lua —— 严格收敛于 15% 胶水与 UI）**：
+   - **Lua 层职责白名单（仅限 4 类）**：
+     1. 基于前置 `EmberUI` 的所有窗口面板、`SquadHUD`、右键菜单与基于原版 `ISRadialMenu` 的 `SquadWheel`；
+     2. 原版仅存在纯 Lua 实现的 2 个子系统薄调用胶水（M5 农耕 `SFarmingSystem.lua` 与野外搜寻 `forageSystem.lua`：决策、选格、寻路与拿种子 100% 在 Java 完成，到位落地瞬间由 Java 调 15 行 Lua 薄函数触发原版脚本）；
+     3. 第三方工坊模组兼容槽（`Compat/*.lua`）、公开扩展门面 `EmberRoutes.api` 与声明式配置预设表（如 `SmartZoning` 默认规则词典，`onWorldReady` 一次性同步至 Java）；
+     4. 会话生命周期总装配（[Kernel.lua](../Contents/mods/EmberRoutes/42/media/lua/shared/EmberRoutes/Kernel.lua) + [Boot.lua](../Contents/mods/EmberRoutes/42/media/lua/client/EmberRoutes/Boot.lua)）与宏观 `ModData` 档案门面（[SettlementStore.lua](../Contents/mods/EmberRoutes/42/media/lua/shared/EmberRoutes/Settlement/SettlementStore.lua)）。
+   - 内部 Lua 模块 100% 静态 `require`，由 [check_arch.py](../tools/check_arch.py) 强制执行**域级单向 DAG**（`Settlement(10) → Warehouse(20) → Npc(30) → Work(40) → Squad(50) → Caravan(60) → UI(70) → Compat(80)`）与**循环 `require` 环检测**。
 
 ---
 
@@ -149,15 +153,15 @@ flowchart TD
 
 ### 4.3 第三层：2% 社区附属子模组「强契约扩展点 + 安全逃生口」
 
-不暴露内部实现依赖图；对外提供 **5 个强契约扩展点**（随 M3–M4 逐级按需开放，带参数校验与 `scope` 自动回收）以及 1 个隔离逃生口 `EmberRoutes.registerAddon({ id, when, apply(scope, EmberRoutes.api) })`：
+不暴露内部实现依赖图；对外提供 **5 个强契约扩展点**（随 M3–M5 逐级按需开放，带参数校验与 `scope` 自动回收）以及 1 个隔离逃生口 `EmberRoutes.registerAddon({ id, when, apply(scope, EmberRoutes.api) })`：
 
-| 扩展域 | 标准契约接口（随 M1–M4 逐级开放） | 社区子模组典型用途 |
+| 扩展域 | 标准契约接口（随 M1–M5 逐级开放） | 社区子模组典型用途 |
 | :--- | :--- | :--- |
 | **仓储分类** | `EmberRoutesJava.registerCategoryOverride` / 后续 `Warehouse.registerClassifier` | 为大型综合模组自定义物资分类节点 |
 | **智能分拣 (M3)** | `SmartZoning.registerPreset(id, def)` | 为模组专属容器（军火柜、酿造桶、医疗箱）配置自动分拣预设 |
-| **生产工种 (M4)** | `Work.registerJob(def)`（强约束 `id / probe / createAction / diagnose`） | 新增自定义 NPC 工种（酿酒、拆车、无线电值守） |
+| **生产工种 (M5)** | `Work.registerJob(def)`（强约束 `id / probe / createAction / diagnose`） | 新增自定义 NPC 工种（酿酒、拆车、无线电值守） |
 | **生活与姿态 (M3)** | `Npc.registerLeisure(def)` / `Npc.registerFurnitureAdapter(def)` | 适配第三方家具包坐卧锚点或新增闲暇表现 |
-| **据点界面 (M4)** | **直接复用 `EmberUI.SlotRegistry`**（`onWorldReady` 注入能力位、`onTeardown` 清空） | 在据点管理面板注入专属页签与卡片（不重复造第二套 UI 注册表） |
+| **据点界面 (M3/M5)** | **直接复用 `EmberUI.SlotRegistry`**（`onWorldReady` 注入能力位、`onTeardown` 清空） | 在据点管理面板注入专属页签与卡片（不重复造第二套 UI 注册表） |
 
 ---
 
@@ -180,21 +184,51 @@ flowchart TD
 - **NPC 微观执行态**：单点身体控制队列、寻路折线、批移动终结事件队列、`BaseAction` 计时进度、`30s` 软预约锁（以 `simTime` 计时）、`TEMP_PROP` 闲暇道具全部纯内存驻留，打断或重载即天然释放，**永不产生死锁烂账**；
 - **借用工具自动归回**：唯一允许落于物品自身的轻量标记是在真实工具 `InventoryItem:getModData()` 写入借出来源容器键，NPC 空闲自检时直接寻址归还并置 `nil`。
 
-### 5.3 NPC 双大脑分层决策架构（M3：`BrainRouter`：`SETTLEMENT` vs `SQUAD`）
+### 5.3 NPC 双大脑分层决策与四大前沿内核架构（100% Java 单一实现）
 
-从 M3（`EMB-12`）起，每名 `IsoNPC` 在 `AGENT_BRAIN` 阶段的决策层摒弃 V1“多状态机各自抢占”与“纯通用效用曲线”的混乱模型，采用 **「顶层职责硬分叉（`BrainRouter`）+ 据点确定性优先级树 + 轻量效用闲暇 + 共享执行层」**：
+从 M3（`EMB-12 / EMB-13`）与 M4（`EMB-19 / EMB-30`）起，每名 `IsoNPC` 的决策层在保持「**顶层职责硬分叉（`BrainRouter`：`SETTLEMENT` vs `SQUAD`）**」的同时，**统一在 Java 层（`emberroutes.npc.brain.*` 与 `emberroutes.warehouse.*`）一步到位实现以下四套真内核机制**（Lua 仅在 `AGENT_BRAIN` 阶段调一次 `EmberRoutesJava.tickNpcBrains(frameTick, dtSim, simTime)` 并下发声明式配置），彻底杜绝 Lua/Java 双套状态树维护与跨 Kahlua 矩阵建表开销：
 
 ```mermaid
 flowchart TD
-    Root["BrainRouter（AGENT_BRAIN 单入口）"] --> Mode{"当前职责模式"}
-    Mode -- "SETTLEMENT / 据点自治态<br/>（类环世界 Colony ThinkTree）" --> CB["1. 遇险逃离 / 守卫防务(M5)<br/>2. 生理急需（NeedsPolicy 滞回：空闲 0.25/0.20 → 工作 0.50）<br/>3. 睡眠（跨楼层 SeatingManager + 内存座位锁）<br/>4. 归还借用工具（ModData 来源戳）<br/>5. 前置预检 + 30s 内存软锁通过的当班工种<br/>6. 闲暇生活（轻量模拟人生式效用选点 + TEMP_PROP + 10~15s 驻留锁）"]
-    Mode -- "SQUAD / 征召跟随态<br/>（类环世界 Drafted）" --> SB["完全屏蔽据点床铺 / 仓库 / 工种队列<br/>1. 玩家实时指令（跟随 / 驻守 / 撤退）<br/>2. ROE 交战与防卫（M5：近远战 / 弹药 / 防黑枪）<br/>3. 战间随身轻自理（仅消耗随身绷带/干粮，绝不离队找床）<br/>4. 编队跟速与警戒（复用 Java EmberFollow）"]
-    CB --> Exec["共享执行层：BaseAction（3.0s 起身硬超时） + NpcLocomotionPort + Java IsoNPC/Ember 小脑"]
+    Root["BrainRouter（Java AGENT_BRAIN 单入口硬分叉）"] --> Mode{"当前职责模式"}
+    Mode -- "SETTLEMENT / 据点自治态<br/>EmberStateTree（Java 统一内核）" --> CB["Evaluators: SettlementDangerFieldEval / NeedsEval / LeaseWatchdog<br/>1. THREAT_EVADE（0 帧抢占，退入 isEnclosedSafe 安全室）<br/>2. SURVIVAL_CRITICAL（NeedsPolicy 滞回 0.25/0.20→0.50 + BedSmartSlot）<br/>3. RETURN_BORROWED_TOOL（ModData 来源戳自愈归还）<br/>4. WORK_DUTY（经 Auctioneer 竞拍：BatchHaul / 提货配送 / 制造切片）<br/>5. LEISURE_AND_IDLE（SeatSmartSlot + TEMP_PROP + ≥10s 防抖）"]
+    Mode -- "SQUAD / 征召跟随态<br/>EmberStateTree 60Hz（Java 统一内核）" --> SB["完全屏蔽据点床铺 / 仓库 / 工种队列<br/>Evaluators: EmberSquadDirector(80ms) / StaggerPressureEval / WeaponEval<br/>1. VEHICLE_CO_RIDE（BaseVehicle 自动上下车 + 存盘快照坐标落地不跳车）<br/>2. EMERGENCY_SELF_DEFENSE（<1.35 格贴身无视 HOLD 自卫推砍）<br/>3. COMBAT_ENGAGE（尸潮二段撤退 / 掩护换弹 / CQB 切角 / 远程虚拟准星 / 近战环绕微操）<br/>4. FORMATION_FOLLOW（四阵型 WEDGE/COLUMN/LINE/RING 2D 匈牙利动态跟随）"]
+    CB --> Exec["Java 共享执行层：BaseAction + 起身屏障（Posture Barrier） + EmberLocomotionController + NpcPostureController"]
     SB --> Exec
 ```
 
-- **`SETTLEMENT ↔ SQUAD` 零烂账无缝切换**：切换只修改纯内存模式枚举，并立即打断当前 `BaseAction`、释放内存 `30s` 软预约与座位锁；所有实物与借出工具完全依赖背包真实原件及 `InventoryItem:getModData()` 来源戳自愈。
-- **域级 DAG 天然吻合**：`Npc(30)` 托管 `BrainRouter`、`BaseAction` 与 `NeedsPolicy`；`Work(40)` 仅向 `SettlementBrain` 注册工种；`Squad(50)`（M5）向 `BrainRouter` 的 `SQUAD` 分支挂接 ROE 与编队逻辑（M3 阶段 `SQUAD` 先以极简短路对接现有 Java `EmberFollowController`）。
+1. **UE5 `EmberStateTree` 层级状态树、RAII `StateScope` 与「起身屏障（Posture Barrier）」**：
+   - **持久化激活路径栈 + LCA 差分进出（纯 Java 单实现）**：维护定长 `activeStack[0..k]` 与每层独立 `StateScope`（`defer(cleanup, handle)`）。每帧固定三阶段 Tick：`① Scoped Evaluators（仅根部与活跃链评估） -> ② Target Path Selection & LCA Transition -> ③ Active Path Tick`。
+   - **防泄漏硬保证**：当目标路径变更或被高优分支抢占时，计算新旧路径的**最近公共祖先（LCA）**，自当前叶子向 LCA 逆序调用 `onExit(ctx)` 并自动执行 `activeScopes[d].close(ctx)`（LIFO 自动释放该层绑定的 `SmartSlot` 租约、`30s` 软锁、寻路票据与令牌）；位于 LCA 之上的父级租约在子状态切换期间保持存活。支持防抖最小驻留 `minDwellSimSeconds` 与前置高优兄弟零延迟抢占。
+   - **异步起身屏障与双层占座锁（防躺姿滑步与床上叠罗汉）**：
+     - 所有经运动层下发的 `moveTo / follow`，若检测到 `npc.getPosture().isActive()`（角色尚在床/椅上或处于 `WAKING_BED / STANDING_UP`），**自动转入 `NpcPostureController.queueMoveAfterStandUp(...)` 排队**，待姿态回到 `STANDING` 当帧自动点火出发；
+     - `StateScope.close()` 立即释放决策层逻辑预约句柄并下发 `commandStandUp(npc, urgent)`，但家具瓦片的**物理防碰撞占用（`isFurnitureTileClaimedByOther`）由 `NpcPostureController` 持有至回到 `STANDING` 那一帧才清空**。
+2. **UE5 `SmartObjectRegistry & SmartSlot` 逆向广播插槽（0 扫图、0 轮询、动态世界自愈）**：
+   - **Inside-Out 世界主动注册**：直接寄生于 `WarehouseFastIndex.scanSquareInternal / markSquareUnloadedInternal` 与 `updateContainerAggregates`（`Patch_ItemContainer` 脏排空管线），预计算床铺 `BedSlot`（`EmberPostureMath.isRealBedObject`）、座椅站位、工作台与容器四角色（`STORAGE / BUFFER_IN / WORKSTATION_IO / PICKUP_OUT`）。
+   - **动态世界 3 大加固契约**：
+     1. **多格家具主格唯一键**：凡 `IsoSpriteGrid != null` 的多格家具（双人床 `2x2`、沙发 `1x2`），严格以网格原点主格 `(gridPosX == 0, gridPosY == 0)` 作为唯一注册键；仅当跨 Chunk 所有子格均已加载齐备时才激活 `SmartSlot`，任一子格卸载即整体下架；
+     2. **8 方位站位掩码与局部失败退避**：容器/工位 `SmartSlot` 预计算 8 邻格可达方位掩码 `standDirMask`（邻格发生方块增删时 $O(1)$ 刷新）；NPC 走向某方位报告 `NO_PATH / STUCK` 时仅对该 `(slotId, dir)` 记 `30s` 局部退避并自动换另一侧站位；
+     3. **`WORKSTATION_IO` 双向对称绑定**：扫到工作台时搜已加载的同层 Chebyshev $\le 3$ 格 `WORKSTATION_IO`；扫到容器（或 UI 更改容器角色为 `WORKSTATION_IO`）时反向搜 3 格内已加载的工作台，保证加载次序无关。
+   - **O(1) 稠密广播表**：`BUFFER_IN` 卸货箱内未加锁可用物品 `> 0` 时，$O(1)$ 自动加入 `advertisedHaulOutSlots`；余量归零或区块卸载时 $O(1)$ swap-and-pop 撤下并置关联租约 `INVALIDATED`。所有 `SmartSlot` 租约申请强制要求绑定进 `StateScope`。
+3. **Factorio 2.0 / ONI `SettlementTaskAuctioneer` 边际成本组合拍卖与零空驶任务链**：
+   - **全局矩形匈牙利求解 + Lookahead 终点锚点（Java 预分配 0-GC）**：竞标池同时纳入空闲 NPC（$T_{\text{wait}}=0$，取当前坐标）与 **`remainingEtaSec <= 2.5s` 即将完工的在途 NPC**（锚点 $\mathbf{A}_i$ 取其**当前任务终点插槽站位坐标**）。统一按“等效秒”构造 $M \times K$ 物理量纲成本矩阵并调用扩展后的 `EmberFormationMatcher.solveRectangularHungarian(M, K, costMatrix)`（虚拟行/列填 `DUMMY_COST = 1e6`，自动剔除不可达配对并复用工作数组）：
+     $$C(i, j) = T_{\text{wait}}(i) + T_{\text{travel}}(\mathbf{A}_i, \mathbf{P}_j) + T_{\text{exec}}(i, j) - B_{\text{chain}}(\mathbf{A}_i, \mathbf{P}_j) - B_{\text{urgency}}(j) + C_{\text{offset}}$$
+     （含基于**同层相邻 `roomId` 门连通邻接表**的隔墙修正：同室 `+0s`、有门直通邻室 `+2.5s`、同层无直通绕行 `+9.0s`、跨楼层 `+12.0s/层`；技能加速与 `+8.0s` 专家干普通搬运机会成本；同层 4 格内 `-6.0s` 顺路接力奖励；`0.30s/s` 上限 `35.0s` 防饥饿老化）。
+   - **单槽 `chainedNextScope` 预锁托管与节拍门控**：在途获胜者的 `nextChainedSlice` 预锁挂入独立的单槽 `chainedNextScope`（硬 TTL `6.0s` `simTime`），正常完工时 `transferTo(newLeafScope)` 零拷贝继承，中途受阻/超时/抢占立即 `chainedNextScope.close()`；拍卖器由 `auctionDirty` + **`250ms` 最短冷却窗**门控，防止倾倒物品时高频重算。
+   - 获胜后由 `BatchTourBuilder` 执行同源+3 格同层打包拼单与最近邻巡回卸货（并写 `tourTerminalAnchor`），玩家取货通过 `WarehouseFastIndex.sourcesByType` 按 FEFO/高耐久挑件并由 NPC 实体配送（`2.5` 格交接，离基地外扩 `15` 格/遇险/超重降级存 `PICKUP_OUT`）。
+4. **GDC `EmberSquadDirector` 80ms 战术导演 + 7 大战斗微操内核**：
+   - **单次粗筛扫描与共享危险场**：每 `80ms` 单遍扫描 `cell.getZombieList()`（先做 `|dx|<=22 && |dy|<=22 && |dz|<=1.5` 粗筛跳过 95% 远端丧尸），生成零 GC `ThreatEntry[64]`（含 `CombatTargetState` 姿态掩码、EMA 速度估计）与 `HordeCluster[8]`（$\ge 4$ 只且均距 $< 0.5$ 格尸潮质心），并同步写入 `SettlementDangerField` 供据点平民 $O(1)$ 避险。
+   - **双令牌池、2D 射界走廊与窄走廊横向净空门控**：每个威胁维护 `MeleeRingTokenTable`（1 主攻 $0^\circ$ + 2 侧翼 $\pm 30^\circ/\pm 60^\circ$ + 外圈预备位，`550ms` 槽位承诺锁）；小队维护 `ReloadCoverTokenPool`（并发换弹上限 $\max(1, \lfloor R_{\text{active}}/2 \rfloor)$，`5.0s` 租约）；活跃射手与玩家瞄准轴注册 2D `FiringCorridor`（半宽 `0.65f`）——**附带「横向净空门控（Lateral Clearance Gate）」：仅当垂直枪线至少一侧 `0.8` 格内有可通行净空时才施加侧向让路斥力；若在两侧皆墙的窄走廊内则关闭侧向推力（近距 `< 2.2` 格由近战顶上、射手停火，远距近战退后半格让出射界），杜绝走廊内被斥力与墙壁夹死抽搐**。
+   - **7 大战斗微操内核与 C5 零全局污染扣弹**：在 Java `SquadCombatBrain` 叶子内 1:1 实现 `StaggerPressure`（`1800ms` 硬直窗 + `+250ms` 次级威胁余量）、`SpacingController`（`0.25s` 预测 + 冷却外推 `+0.38` 格 + 爬行者排斥 + `1.5` 格 `wallAvoid`）、姿态转换期（`FallDown/GetUp`）禁踩禁推转普通挥击、二段尸潮质心撤退、`NPCVirtualAim + AIAimingReadiness` 阻尼虚拟准星与原版缩圈复刻，以及 `CQBMode`（8 方向 `3.0m` 门窗切角警戒）；**C5 扣弹药仅在最小字节码点 `@Patch` 替换 `this`（或无 Lua 事件的纯 Java 语句块内瞬切），严禁在整个 `DoAttack()` 外层包裹切换 `IsoPlayer.setInstance(npc)` 污染第三方 Lua 事件 `getPlayer()`**。
+- **`SETTLEMENT ↔ SQUAD` 零烂账切换**：切换只修改纯内存模式枚举并立即执行旧大脑 `StateTreeRunner.shutdown(ctx)`，自动触发全栈 `StateScope` 与 `chainedNextScope` 逆序清空当前 `BaseAction`、内存 `SmartSlot` / `30s` 软预约锁与令牌；所有实物与借出工具完全依赖背包真实原件及 `InventoryItem:getModData()` 来源戳自愈。
+- **`StateScope` 生命周期三端闭环契约**：
+
+| 内核子系统 | 1. 创建 / 挂载端 | 2. 正常释放 / 裁剪端 | 3. 异常打断 / 区块卸载 / 读档重置端 |
+| :--- | :--- | :--- | :--- |
+| **`EmberStateTree` & `StateScope`** | `phaseIn` 初始化定长栈 `StateScope[6]` 与 `chainedNextScope`；`onEnter(ctx, scope)` 挂载该层租约与动作句柄。 | LCA 差分过渡自叶子向公共祖先逆序 `onExit(ctx)` + `activeScopes[d].close(ctx)`；物理占座延至 `STANDING` 释放。 | 高优抢占（如 `THREAT_EVADE`）回退 LCA 至 `ROOT` 并自动走「起身屏障」；`phaseOut` / 切档调 `runner.shutdown(ctx)` 全栈 LIFO 归零。 |
+| **`SmartObjectRegistry` & `SmartSlot`** | `WarehouseFastIndex.scanSquareInternal` 扫描方块（多格家具按主格唯一键、预计算 8 方位掩码与房间门连通表）；`updateContainerAggregates` $O(1)$ 切换广播表。 | 租约经 `StateScope` 逆序释放并扣减预留余量；余量为 `0` 时 swap-and-pop 撤出广播。 | 区块卸载/容器砸毁触发 `markSquareUnloadedInternal` 摘除广播并置租约 `INVALIDATED`；单方位寻路受阻记 `30s` 局部退避换侧；`resetWarehouse()` 全量清空。 |
+| **`SettlementTaskAuctioneer` & `BatchTour`** | `auctionDirty` + `250ms` 节拍触发 `solveRectangularHungarian` 分配 `TaskSlice` 及 Lookahead `nextChainedSlice`（预锁入 `chainedNextScope`）。 | 投递或工序切片返回 `STATUS_COMPLETED` 核销预留重量，并调用 `chainedNextScope.transferTo(activeLeafScope)` 无缝接力。 | 战斗打断、超时或切换 `SQUAD` 立即 `chainedNextScope.close()` 归还所有 `SmartSlot` / `30s` 软锁；已入背包物品保持真原件，借用工具空闲按 `ModData` 来源戳自动归还。 |
+| **`EmberSquadDirector` & 令牌/载具** | `80ms` 粗筛更新 `ThreatEntry / HordeCluster` 与 `DangerField`；进入战斗/乘车分支绑定令牌与 `VehicleSeatReservation`。 | 目标死亡或退回跟随分支时，`StateScope.close()` 自动释放环绕/换弹令牌与 `FiringCorridor`。 | **`phaseOut` 离屏前真脱离载具；`GameWindow.save` 在场热存盘保持 `liveNpc` 坐车不动，仅将 `NpcSnapshot` 存盘坐标写为车门旁安全点并瞬时屏蔽 `BaseVehicle` 乘客序列化**。 |
 
 ---
 
@@ -230,24 +264,24 @@ EmberRoutesV2/
 │   ├── Main.java                                       # ZombieBuddy 入口（织入根包 @Patch + 暴露桥接门面）
 │   ├── EmberRoutesBridge.java                          # Lua 静态桥接门面（域级 reset* / 批事件 drain* / 诊断时钟）
 │   ├── Patch_*.java                                    # L0 字节码无损传感器（根包铁律：ItemContainer / IsoChunk / GameWindowSave / IngameExit / WorldRender）
-│   ├── warehouse/                                      # 脏队列、Chunk 包围盒感知、2D 空间查表与增量仓储索引
-│   ├── npc/                                            # [M2+] IsoNPC 躯壳、ByteBuffer 快照、防空写门闩与批移动事件队列
+│   ├── warehouse/                                      # 脏队列、Chunk 包围盒感知、增量仓储索引、SmartObjectRegistry、Auctioneer 与 BatchTour
+│   ├── npc/                                            # [M2–M5] IsoNPC 躯壳、寻路姿态、brain/（BrainRouter / EmberStateTree / StateScope / BaseAction / SquadDirector）
 │   ├── caravan/                                        # [M6 按需] 路网拓扑与 VehiclesDB2 真车虚实封装
-│   └── llm/                                            # [M5 按需] 独立大模型通信与配置桥
+│   └── llm/                                            # [M4 按需] 独立大模型通信与配置桥
 │
 └── Contents/mods/EmberRoutes/42/media/lua/
     ├── shared/EmberRoutes/
     │   ├── Kernel.lua                                  # 分阶段仿真内核 + RAII Scope + 5 阶段双时钟 Tick 管线 + 隔离槽
     │   ├── Settlement/                                 # 据点几何算法（SettlementGeometry）与持久化（SettlementStore）
-    │   ├── Warehouse/                                  # [M1–M3 按需] 分类规则与 SmartZoning 容器过滤纯逻辑
-    │   └── Work/                                       # [M4 按需] 工种强契约注册表与库存双阈值配置模型
+    │   ├── Warehouse/                                  # [M1–M3 按需] 分类规则与 SmartZoning 声明式预设表
+    │   └── Work/                                       # [M5 按需] 工种声明式注册协议与库存双阈值配置模型
     │
     └── client/EmberRoutes/
         ├── Boot.lua                                    # 唯一显式启动顺序清单与引擎顶层事件挂接
         ├── Warehouse/                                  # 仓储 WORLD_SYNC 节拍与暂停态 O(1) 脏排空入口
-        ├── Npc/                                        # [M2–M3] 躯壳管理、零分配批移动端口、BrainRouter / SettlementBrain / BaseAction
-        ├── Work/                                       # [M4] 伐木 / 农耕 / 烹饪 / 工坊工种实现
-        ├── Squad/                                      # [M5 按需] SquadBrain（随从编队 / 守卫 ROE / 战间随身自理）
-        ├── UI/                                         # 基于 EmberUI 的界面面板（扩展页签直复用 EmberUI.SlotRegistry）
+        ├── Npc/                                        # [M2–M3] Java NPC/Brain 驱动桥接与零分配批移动端口
+        ├── Work/                                       # [M5 按需] 仅保留原版纯 Lua 系统（SFarmingSystem / forageSystem）15 行薄胶水
+        ├── Squad/                                      # [M4 按需] SquadWheel 环形菜单与小队指令下发薄层
+        ├── UI/                                         # 基于 EmberUI 的界面面板（据点终端 / 容器向导 / SquadHUD，扩展直复用 EmberUI.SlotRegistry）
         └── Compat/                                     # 第三方工坊模组隔离适配槽（主干业务零引用）
 ```

@@ -2,6 +2,7 @@ package emberroutes;
 
 import emberroutes.npc.IsoNPC;
 import emberroutes.npc.NpcManager;
+import emberroutes.npc.NpcPostureController;
 import emberroutes.warehouse.ContainerDirtyQueue;
 import emberroutes.warehouse.TerritoryContour;
 import emberroutes.warehouse.TerritoryRenderer;
@@ -270,6 +271,7 @@ public final class EmberRoutesBridge {
         out.rawset("moveSeq", Double.valueOf(info.moveSeq()));
         out.rawset("settledSeq", Double.valueOf(info.settledSeq()));
         out.rawset("itemCount", Double.valueOf(info.itemCount()));
+        out.rawset("postureState", info.postureState());
         out.rawset("debugLine", info.debugLine());
         return out;
     }
@@ -402,5 +404,35 @@ public final class EmberRoutesBridge {
     public static String getNpcDebugLine(String npcId) {
         NpcManager.NpcInfoView info = NpcManager.getInfo(npcId);
         return info != null ? info.debugLine() : "";
+    }
+
+    // ==================== 5. M3-A 原生坐卧睡眠动作控制 ====================
+
+    public static boolean sitNpcOnFurniture(String npcId, IsoObject furniture) {
+        return NpcManager.sitNpcOnFurniture(npcId, furniture);
+    }
+
+    public static boolean sleepNpcOnBed(String npcId, IsoObject bed) {
+        return NpcManager.sleepNpcOnBed(npcId, bed);
+    }
+
+    public static boolean standUpNpc(String npcId, boolean urgent) {
+        return NpcManager.standUpNpc(npcId, urgent);
+    }
+
+    public static double standUpAllNpcs(boolean urgent) {
+        return NpcManager.standUpAllNpcs(urgent);
+    }
+
+    public static String getNpcPostureState(String npcId) {
+        return NpcManager.getPostureState(npcId);
+    }
+
+    public static boolean isSittableFurniture(IsoObject obj) {
+        return NpcPostureController.isSittableFurniture(obj);
+    }
+
+    public static boolean isBedObject(IsoObject obj) {
+        return NpcPostureController.isBedObject(obj);
     }
 }

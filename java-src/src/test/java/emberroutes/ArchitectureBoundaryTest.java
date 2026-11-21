@@ -31,6 +31,7 @@ class ArchitectureBoundaryTest {
 	checkPatch(classes, "emberroutes.Patch_IngameExit");
 	checkPatch(classes, "emberroutes.Patch_IsoChunk");
 	checkPatch(classes, "emberroutes.Patch_WorldRender");
+	checkPatch(classes, "emberroutes.Patch_BedRenderElevation");
     }
 
     @Test

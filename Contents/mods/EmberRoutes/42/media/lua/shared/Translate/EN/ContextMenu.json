@@ -28,5 +28,8 @@
     "ContextMenu_ER_Npc_StopFollowFmt": "Hold Position | %1",
     "ContextMenu_ER_Npc_MedicalCheckFmt": "Medical Check | %1",
     "ContextMenu_ER_Npc_OpenInventoryFmt": "Open Backpack | %1",
-    "ContextMenu_ER_NpcInv_TakeToPlayer": "Take to My Inventory"
+    "ContextMenu_ER_NpcInv_TakeToPlayer": "Take to My Inventory",
+    "ContextMenu_ER_M3_SitHereFmt": "Make Nearest NPC Sit Here [%1]",
+    "ContextMenu_ER_M3_SleepBedFmt": "Make Nearest NPC Sleep on Bed [%1]",
+    "ContextMenu_ER_M3_StandUpAll": "Make All NPCs Stand Up"
 }

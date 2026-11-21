@@ -39,7 +39,91 @@ local function appendSquareContainerPrivacyOptions(sub, actor, gx, gy, z)
     end
 end
 
-local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z)
+local function findClickedFurnitureAndBed(gx, gy, z, worldobjects)
+    local bedObj, seatObj = nil, nil
+    local function inspectObj(obj)
+        if not obj then return end
+        if not bedObj and EmberRoutesJava.isBedObject(obj) then
+            bedObj = obj
+        end
+        if not seatObj and EmberRoutesJava.isSittableFurniture(obj) then
+            seatObj = obj
+        end
+    end
+
+    local cell = getCell and getCell()
+    local sq = cell and cell:getGridSquare(gx, gy, z)
+    local objs = sq and sq:getObjects()
+    if objs then
+        for i = 0, objs:size() - 1 do
+            inspectObj(objs:get(i))
+            if bedObj and seatObj then return bedObj, seatObj end
+        end
+    end
+
+    if worldobjects then
+        for _, obj in ipairs(worldobjects) do
+            if obj and obj.getSquare then
+                local osq = obj:getSquare()
+                if osq and math.floor(osq:getZ()) == z then
+                    inspectObj(obj)
+                    if bedObj and seatObj then break end
+                end
+            end
+        end
+    end
+    return bedObj, seatObj
+end
+
+local function pickBestNpcForPosture(ids, tx, ty, tz)
+    if not ids or #ids == 0 then return nil end
+    local bestStandingId, bestStandingDist = nil, math.huge
+    local bestAnyId, bestAnyDist = nil, math.huge
+    for i = 1, #ids do
+        local id = ids[i]
+        local info = NpcRuntime.getInfo(id)
+        if info and info.phasedIn and not info.dead then
+            local dx = (info.x or 0) - tx
+            local dy = (info.y or 0) - ty
+            local dz = math.abs(math.floor(info.z or 0) - tz) * 12.0
+            local dist = math.sqrt(dx * dx + dy * dy) + dz
+            if info.postureState == "STANDING" then
+                if dist < bestStandingDist then
+                    bestStandingDist = dist
+                    bestStandingId = id
+                end
+            end
+            if dist < bestAnyDist then
+                bestAnyDist = dist
+                bestAnyId = id
+            end
+        end
+    end
+    return bestStandingId or bestAnyId
+end
+
+local function appendPostureOptions(menu, actor, pickedId, bedObj, seatObj, includeStandUp)
+    if seatObj and pickedId then
+        menu:addOption(getText("ContextMenu_ER_M3_SitHereFmt", pickedId), actor, function()
+            local ok = NpcRuntime.sitOnFurniture(pickedId, seatObj)
+            print("[EmberRoutes][M3] SitOnFurniture " .. tostring(pickedId) .. " -> " .. tostring(ok))
+        end)
+    end
+    if bedObj and pickedId then
+        menu:addOption(getText("ContextMenu_ER_M3_SleepBedFmt", pickedId), actor, function()
+            local ok = NpcRuntime.sleepOnBed(pickedId, bedObj)
+            print("[EmberRoutes][M3] SleepOnBed " .. tostring(pickedId) .. " -> " .. tostring(ok))
+        end)
+    end
+    if includeStandUp then
+        menu:addOption(getText("ContextMenu_ER_M3_StandUpAll"), actor, function()
+            local n = NpcRuntime.standUpAll(false)
+            print("[EmberRoutes][M3] StandUpAll count=" .. tostring(n))
+        end)
+    end
+end
+
+local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z, bedObj, seatObj, pickedId)
     local m2Sub = ISContextMenu:getNew(context)
     local m2Opt = parentSub:addOption(getText("ContextMenu_ER_M2_Root"), nil, nil)
     context:addSubMenu(m2Opt, m2Sub)
@@ -77,6 +161,7 @@ local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z)
     local ids = NpcRuntime.listIds()
     local targetId = ids and #ids > 0 and ids[#ids] or nil
     if targetId then
+        appendPostureOptions(m2Sub, actor, pickedId or targetId, bedObj, seatObj, true)
         local info = NpcRuntime.getInfo(targetId)
         m2Sub:addOption(getText("ContextMenu_ER_M2_WalkHereFmt", targetId), actor, function()
             NpcLocomotionPort.moveTo(targetId, tx, ty, tz, {
@@ -226,7 +311,12 @@ local function onFillWorldMenu(playerIndex, context, worldobjects, test)
         EmberUI.openThemeSettings("er.warehouse")
     end)
 
-    appendM2NpcSubmenu(sub, context, actor, gx, gy, z)
+    local ids = NpcRuntime.listIds()
+    local bedObj, seatObj = findClickedFurnitureAndBed(gx, gy, z, worldobjects)
+    local pickedId = pickBestNpcForPosture(ids, gx + 0.5, gy + 0.5, z)
+    appendPostureOptions(sub, actor, pickedId, bedObj, seatObj, #ids > 0 and (bedObj ~= nil or seatObj ~= nil))
+
+    appendM2NpcSubmenu(sub, context, actor, gx, gy, z, bedObj, seatObj, pickedId)
 end
 
 local DebugContextMenu = {}
