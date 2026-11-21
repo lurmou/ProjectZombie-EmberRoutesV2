@@ -11,7 +11,7 @@ package emberroutes.npc.brain;
 public final class BrainRouter {
     private BrainMode mode = BrainMode.SETTLEMENT;
     private StateTreeRunner activeRunner;
-    private WorkDutyProvider workProvider = WorkDutyProvider.NOOP;
+    private WorkDutyProvider workProvider = LogisticsWorkDutyProvider.INSTANCE;
 
     public BrainRouter() {
         this.activeRunner = SettlementBrainBuilder.createRunner(this.workProvider);
@@ -40,7 +40,7 @@ public final class BrainRouter {
     }
 
     public void setWorkDutyProvider(WorkDutyProvider provider) {
-        this.workProvider = provider != null ? provider : WorkDutyProvider.NOOP;
+        this.workProvider = provider != null ? provider : LogisticsWorkDutyProvider.INSTANCE;
         if (settlementOverride == null && mode == BrainMode.SETTLEMENT) {
             shutdown(null);
             this.activeRunner = SettlementBrainBuilder.createRunner(this.workProvider);

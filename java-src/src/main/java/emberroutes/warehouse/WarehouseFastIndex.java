@@ -45,6 +45,7 @@ import zombie.iso.objects.IsoStove;
 import zombie.iso.objects.IsoTrap;
 import zombie.iso.objects.IsoWheelieBin;
 import zombie.iso.objects.IsoWorldInventoryObject;
+import zombie.scripting.objects.Item;
 import zombie.scripting.objects.ItemTag;
 import zombie.util.list.PZArrayList;
 
@@ -74,15 +75,57 @@ public final class WarehouseFastIndex {
     private static final Map<String, String> CATEGORY_CACHE = new ConcurrentHashMap<>();
 
     private static final Set<String> MEDICAL_TAG_KEYS = Set.of(
-            "pills", "bandage", "disinfectant", "tweezers", "sutureneedle", "medical", "firstaid"
+            "pills", "bandage", "reusablebandage", "disinfectant", "tweezers", "sutureneedle",
+            "sutureneedleholder", "scalpel", "medical", "firstaid", "removebullet", "removeglass",
+            "stitch", "splint", "comfrey", "plantain", "wildgarlic"
     );
     private static final Set<String> TOOL_TAG_KEYS = Set.of(
-            "hammer", "saw", "screwdriver", "wrench", "lugwrench", "pipewrench",
-            "choptree", "cutplant", "digplow", "diggrave", "sledgehammer",
-            "weldingmask", "blowtorch", "crowbar", "scissors", "pliers", "file", "tongs"
+            "hammer", "hammerstone", "clubhammer", "smithinghammer", "mallet",
+            "saw", "crudesaw", "metalsaw", "smallsaw",
+            "screwdriver", "wrench", "pipewrench",
+            "choptree", "cutplant", "diggrave", "sledgehammer",
+            "weldingmask", "blowtorch", "crowbar", "prybar", "scissors",
+            "pliers", "metalworkingpliers", "visegrips", "file", "smallfiles",
+            "tongs", "crudetongs", "carpentrychisel", "masonschisel", "metalworkingchisel",
+            "awl", "boltcutters", "sheetmetalsnips", "lightmetalsnips", "pickaxe",
+            "flashlight", "flashlightpillar", "lighter", "refillablelighter",
+            "canopener", "knappingtool", "fleshingtool"
     );
     private static final Set<String> UTENSIL_OR_STATIONERY_TAG_KEYS = Set.of(
-            "write", "pen", "pencil", "eraser", "fork", "spoon", "butterknife"
+            "write", "pen", "pencil", "redpen", "bluepen", "greenpen",
+            "eraser", "fork", "spoon", "butterknife", "rollingpin", "pizzacutter"
+    );
+    private static final Set<String> KIT_FISHING_TAGS = Set.of(
+            "fishinghook", "fishingline", "fishingnet", "fishingrod", "fishingspear"
+    );
+    private static final Set<String> KIT_FARMING_TAGS = Set.of(
+            "isseed", "fertilizer", "farmingloot", "digplow", "sprayer"
+    );
+    private static final Set<String> KIT_TAILORING_TAGS = Set.of(
+            "sewingneedle", "thread", "thimble", "knittingneedles", "pickaramidthread"
+    );
+    private static final Set<String> KIT_MECHANIC_TAGS = Set.of(
+            "lugwrench", "wholetire", "brake", "carbattery", "siphongas"
+    );
+    private static final Set<String> LITERATURE_TAGS = Set.of(
+            "magazine", "newspaper", "newspaper_new", "newspaperread",
+            "hardcover", "softcover", "fancybook", "picturebook", "consumeonread"
+    );
+    private static final Set<String> AMMO_TAGS = Set.of(
+            "ammo", "ammocase", "shotgunshell", "pistolmagazine", "riflemagazine",
+            "reloadfastbullets", "reloadfastmagazines", "reloadfastshells"
+    );
+    private static final Set<String> ARMOR_TAGS = Set.of(
+            "gasmask", "respirator", "hazmatsuit", "scba"
+    );
+    private static final Set<String> APPAREL_TAGS = Set.of(
+            "wearable", "gasmask", "respirator", "hazmatsuit", "fitsclothingrack", "long_johns"
+    );
+    private static final Set<String> BAG_TAGS = Set.of(
+            "duffelbag", "largesack", "burlapbag"
+    );
+    private static final Set<String> ELECTRONICS_TAGS = Set.of(
+            "miscelectronic", "usesbattery", "tvremote"
     );
 
     private WarehouseFastIndex() {}
@@ -119,14 +162,19 @@ public final class WarehouseFastIndex {
 
     public static String classifyItem(InventoryItem item) {
         if (item == null) return "other";
+        boolean isDynamicFood = item instanceof Food || item.isFood();
         String ft = item.getFullType();
-        if (ft != null) {
+        if (!isDynamicFood && ft != null) {
             String cached = CATEGORY_CACHE.get(ft);
             if (cached != null) return cached;
         }
         String node = doClassify(item);
         if (ft != null) {
-            CATEGORY_CACHE.put(ft, node);
+            if (!isDynamicFood) {
+                CATEGORY_CACHE.put(ft, node);
+            } else {
+                CATEGORY_CACHE.putIfAbsent(ft, "scrap.compost".equals(node) ? "food.perishable" : node);
+            }
         }
         return node;
     }
@@ -134,85 +182,358 @@ public final class WarehouseFastIndex {
     private static String doClassify(InventoryItem item) {
         try {
             String ft = item.getFullType();
-            if (ft != null) {
-                String customExact = CUSTOM_CATEGORY_OVERRIDES.get(ft.toLowerCase(Locale.ROOT));
-                if (customExact != null) return customExact;
-            }
-
             Set<ItemTag> rawTags = null;
             try {
                 rawTags = item.getTags();
             } catch (RuntimeException ignored) {
             }
 
-            boolean hasMedicalTag = false;
-            boolean hasToolTag = false;
-            boolean isUtensilOrStationery = false;
-            if (rawTags != null) {
+            Set<String> normalizedTags = null;
+            if (rawTags != null && !rawTags.isEmpty()) {
+                normalizedTags = new HashSet<>(rawTags.size() * 2);
                 for (ItemTag tag : rawTags) {
                     String tk = normalizeTagKey(tag);
-                    if (tk.isEmpty()) continue;
-                    String customByTag = CUSTOM_CATEGORY_OVERRIDES.get("tag:" + tk);
-                    if (customByTag != null) return customByTag;
-                    if (MEDICAL_TAG_KEYS.contains(tk)) hasMedicalTag = true;
-                    if (TOOL_TAG_KEYS.contains(tk)) hasToolTag = true;
-                    if (UTENSIL_OR_STATIONERY_TAG_KEYS.contains(tk)) isUtensilOrStationery = true;
+                    if (!tk.isEmpty()) {
+                        normalizedTags.add(tk);
+                    }
                 }
             }
 
-            String cat = item.getCategory();
-            String disp = item.getDisplayCategory();
+            boolean isFood = item instanceof Food || item.isFood();
+            boolean rotten = false;
+            if (item instanceof Food food) {
+                rotten = food.isRotten();
+            } else if (isFood) {
+                rotten = item.IsRotten();
+            }
+            boolean cooked = item.isCooked();
+            boolean perishable = item.getOffAgeMax() < 1_000_000_000;
+            boolean isLiterature = item instanceof Literature || item.IsLiterature();
+            boolean isContainer = item instanceof InventoryContainer || item.IsInventoryContainer();
+            boolean isClothing = item.IsClothing();
+            boolean isRanged = item instanceof HandWeapon hw && hw.isRanged();
+            boolean hasFluidContainer = item.getFluidContainer() != null;
+            Item scriptItem = item.getScriptItem();
+            boolean extraMedical = item.getBandagePower() > 0.0F
+                    || (scriptItem != null && scriptItem.isMedicalLoot());
 
-            if (item.isFood() || "Food".equalsIgnoreCase(cat)) {
-                return item.getOffAgeMax() < 1_000_000_000 ? "food.perishable" : "food.stable";
-            }
-            if (item instanceof Literature
-                    || "Literature".equalsIgnoreCase(cat)
-                    || "SkillBook".equalsIgnoreCase(disp)
-                    || "Literature".equalsIgnoreCase(disp)) {
-                return "literature";
-            }
-            if (item instanceof InventoryContainer || "Container".equalsIgnoreCase(cat)) {
-                return "containers";
-            }
-            if ("FirstAid".equalsIgnoreCase(cat) || "FirstAid".equalsIgnoreCase(disp) || hasMedicalTag) {
-                return "medical";
-            }
-            if ("Ammo".equalsIgnoreCase(cat) || "Ammo".equalsIgnoreCase(disp)) {
-                return "weapons.ammo";
-            }
-            if (item instanceof HandWeapon hw && hw.isRanged()) {
-                return "weapons.guns";
-            }
-            if ("Tool".equalsIgnoreCase(cat)
-                    || "ToolWeapon".equalsIgnoreCase(cat)
-                    || "Tool".equalsIgnoreCase(disp)
-                    || "ToolWeapon".equalsIgnoreCase(disp)
-                    || hasToolTag) {
-                return "tools";
-            }
-            // 防伪武器误判（原版脚本把圆珠笔、铅笔、叉子、勺子标为 Category=Weapon）
-            if (isUtensilOrStationery
-                    || "Household".equalsIgnoreCase(disp)
-                    || "Cooking".equalsIgnoreCase(disp)
-                    || "Stationery".equalsIgnoreCase(disp)) {
-                return "other";
-            }
-            if ("Weapon".equalsIgnoreCase(cat) || "WeaponPart".equalsIgnoreCase(cat)) {
-                return "weapons.other";
-            }
-            if ("Clothing".equalsIgnoreCase(cat) || "Accessory".equalsIgnoreCase(disp)) {
-                return "apparel";
-            }
-            if ("Material".equalsIgnoreCase(cat) || "Material".equalsIgnoreCase(disp)) {
-                return "materials";
-            }
-            if (item.getFluidContainer() != null) {
-                return "fluids";
-            }
+            return classifyItemFactsInternal(
+                    ft,
+                    item.getCategory(),
+                    item.getDisplayCategory(),
+                    normalizedTags,
+                    isFood,
+                    rotten,
+                    cooked,
+                    perishable,
+                    isLiterature,
+                    isContainer,
+                    isClothing,
+                    isRanged,
+                    hasFluidContainer,
+                    extraMedical);
         } catch (RuntimeException ignored) {
         }
         return "other";
+    }
+
+    /** 纯数据可单测分类入口：按最常用用途优先级输出大类与细分小类节点。 */
+    public static String classifyItemFacts(
+            String fullType,
+            String category,
+            String displayCategory,
+            Set<String> normalizedTags,
+            boolean isFood,
+            boolean rotten,
+            boolean cooked,
+            boolean perishable,
+            boolean isLiterature,
+            boolean isContainer,
+            boolean isClothing,
+            boolean isRanged,
+            boolean hasFluidContainer) {
+        return classifyItemFactsInternal(
+                fullType,
+                category,
+                displayCategory,
+                normalizedTags,
+                isFood,
+                rotten,
+                cooked,
+                perishable,
+                isLiterature,
+                isContainer,
+                isClothing,
+                isRanged,
+                hasFluidContainer,
+                false);
+    }
+
+    private static String classifyItemFactsInternal(
+            String fullType,
+            String category,
+            String displayCategory,
+            Set<String> normalizedTags,
+            boolean isFood,
+            boolean rotten,
+            boolean cooked,
+            boolean perishable,
+            boolean isLiterature,
+            boolean isContainer,
+            boolean isClothing,
+            boolean isRanged,
+            boolean hasFluidContainer,
+            boolean extraMedicalSignal) {
+        String ftLower = fullType != null ? fullType.trim().toLowerCase(Locale.ROOT) : "";
+        String catLower = category != null ? category.trim().toLowerCase(Locale.ROOT) : "";
+        String dispLower = displayCategory != null ? displayCategory.trim().toLowerCase(Locale.ROOT) : "";
+
+        // 1. 自定义精确/Tag 覆盖规则最高优先
+        if (!ftLower.isEmpty()) {
+            String customExact = CUSTOM_CATEGORY_OVERRIDES.get(ftLower);
+            if (customExact != null) return customExact;
+        }
+        Set<String> tags = normalizeTagSet(normalizedTags);
+        if (!tags.isEmpty() && !CUSTOM_CATEGORY_OVERRIDES.isEmpty()) {
+            for (String tk : tags) {
+                String customByTag = CUSTOM_CATEGORY_OVERRIDES.get("tag:" + tk);
+                if (customByTag != null) return customByTag;
+            }
+        }
+
+        // 2. 医疗优先（在食物/武器/工具之前：含手术刀、镊子、缝合针、持针器、药片与抗生素）
+        boolean isMedical = extraMedicalSignal
+                || "firstaid".equals(catLower)
+                || "medical".equals(catLower)
+                || "firstaid".equals(dispLower)
+                || "firstaidweapon".equals(dispLower)
+                || "bandage".equals(dispLower)
+                || "medical".equals(dispLower)
+                || hasAnyTagIn(tags, MEDICAL_TAG_KEYS)
+                || (!ftLower.contains("spear") && ftLower.contains("scalpel"))
+                || containsAnyToken(ftLower,
+                        "tweezers", "forceps", "suture", "bandage", "alcoholwipes", "cottonballs",
+                        "disinfectant", "splint", "poultice", "cataplasm", "comfrey", "plantain",
+                        "wildgarlic", "firstaid", "medkit", "stethoscope", "otoscope", "thermometer",
+                        "pills", "vitamin", "antibiotic", "painkiller", "sedative",
+                        "antidepressant", "betablocker", "sleepingtablet", "antihistamine", "coldmedicine");
+        if (isMedical) {
+            if (tags.contains("pills")
+                    || containsAnyToken(ftLower,
+                            "pills", "vitamin", "antibiotic", "painkiller", "sedative",
+                            "antidepressant", "betablocker", "sleepingtablet", "antihistamine", "coldmedicine")) {
+                return "medical.pills";
+            }
+            return "medical.bandages";
+        }
+
+        // 3. 食物与腐烂堆肥
+        if (isFood || "food".equals(catLower) || "food".equals(dispLower)) {
+            if (rotten) {
+                return "scrap.compost";
+            }
+            if (cooked || containsAnyToken(ftLower,
+                    "soup", "stew", "roast", "salad", "sandwich", "burger", "pizza",
+                    "casserole", "stirfry", "omelette", "porridge", "oatmeal", "pasta")
+                    || (ftLower.contains("pie") && !ftLower.contains("piece"))) {
+                return "food.meals";
+            }
+            return perishable ? "food.perishable" : "food.stable";
+        }
+
+        // 4. 专业套组 kits.*（缝合针已在步骤 2 归医疗）
+        if ("fishing".equals(dispLower)
+                || "fishingweapon".equals(dispLower)
+                || hasAnyTagIn(tags, KIT_FISHING_TAGS)
+                || containsAnyToken(ftLower, "fishing", "fishhook", "lure", "tacklebox", "bobber")) {
+            return "kits.fishing";
+        }
+        if ("gardening".equals(dispLower)
+                || "farming".equals(dispLower)
+                || "gardeningweapon".equals(dispLower)
+                || hasAnyTagIn(tags, KIT_FARMING_TAGS)
+                || containsAnyToken(ftLower, "seed", "fertilizer", "wateringcan", "plantspray", "gardening")) {
+            return "kits.farming";
+        }
+        if ("tailoring".equals(dispLower)
+                || hasAnyTagIn(tags, KIT_TAILORING_TAGS)
+                || containsAnyToken(ftLower, "sewing", "thread", "knitting", "thimble", "yarn")
+                || (ftLower.contains("needle") && !ftLower.contains("suture"))) {
+            return "kits.tailoring";
+        }
+        if ("vehiclemaintenance".equals(dispLower)
+                || "vehiclemaintenanceweapon".equals(dispLower)
+                || "mechanics".equals(dispLower)
+                || "vehicle".equals(dispLower)
+                || hasAnyTagIn(tags, KIT_MECHANIC_TAGS)
+                || containsAnyToken(ftLower,
+                        "lugwrench", "tirepump", "carbattery", "carjack", "sparkplug",
+                        "tireiron", "muffler", "windshield")
+                || ftLower.endsWith(".jack")
+                || ftLower.endsWith("_jack")) {
+            return "kits.mechanic";
+        }
+
+        // 5. 文献（先排除弹匣 Ammo 与枪械弹夹 Tag）
+        boolean isAmmoTagged = "ammo".equals(catLower)
+                || "ammo".equals(dispLower)
+                || hasAnyTagIn(tags, AMMO_TAGS);
+        if (!isAmmoTagged && (isLiterature
+                || "literature".equals(catLower)
+                || "literature".equals(dispLower)
+                || "skillbook".equals(dispLower)
+                || "cartography".equals(dispLower)
+                || "entertainment".equals(dispLower)
+                || hasAnyTagIn(tags, LITERATURE_TAGS)
+                || containsAnyToken(ftLower,
+                        "book", "comic", "magazine", "manual", "newspaper", "vhs", "brochure", "flyer")
+                || ftLower.contains("_map")
+                || ftLower.endsWith(".map"))) {
+            if ("skillbook".equals(dispLower)
+                    || tags.contains("consumeonread")
+                    || containsAnyToken(ftLower, "skill", "recipe", "manual", "vol")) {
+                return "literature.skills";
+            }
+            return "literature.entertainment";
+        }
+
+        // 6. 穿戴与背包容器
+        if (isContainer
+                || "container".equals(catLower)
+                || "bag".equals(dispLower)
+                || hasAnyTagIn(tags, BAG_TAGS)
+                || (!"junk".equals(dispLower) && containsAnyToken(
+                        ftLower, "backpack", "duffel", "satchel", "alicepack", "hikingbag", "schoolbag", "fannypack"))) {
+            return "apparel.bags";
+        }
+        if (isClothing
+                || "clothing".equals(catLower)
+                || "clothing".equals(dispLower)
+                || "protectivegear".equals(dispLower)
+                || "accessory".equals(dispLower)
+                || "appearance".equals(dispLower)
+                || hasAnyTagIn(tags, APPAREL_TAGS)) {
+            if ("protectivegear".equals(dispLower)
+                    || hasAnyTagIn(tags, ARMOR_TAGS)
+                    || containsAnyToken(ftLower,
+                            "bulletproof", "vest_bullet", "armor", "armour", "helmet",
+                            "riot", "gasmask", "kneepad", "elbowpad", "shinpad", "gorget",
+                            "vambrace", "greave", "cuirass")) {
+                return "apparel.armor";
+            }
+            return "apparel.clothing";
+        }
+
+        // 7. 弹药 / 枪械 / 枪械配件
+        if (isAmmoTagged) {
+            return "weapons.ammo";
+        }
+        if (isRanged || tags.contains("firearm")) {
+            return "weapons.guns";
+        }
+        if ("weaponpart".equals(catLower)
+                || "weaponpart".equals(dispLower)
+                || containsAnyToken(ftLower, "gunpart", "choketube", "reddot", "recoilpad", "bayonet")) {
+            return "weapons.parts";
+        }
+
+        // 8. 常用工具（优先于 weapons.other）
+        if ("tool".equals(catLower)
+                || "tool".equals(dispLower)
+                || "toolweapon".equals(catLower)
+                || "toolweapon".equals(dispLower)
+                || "lightsource".equals(dispLower)
+                || "firesource".equals(dispLower)
+                || hasAnyTagIn(tags, TOOL_TAG_KEYS)) {
+            return "tools";
+        }
+
+        // 9. 防伪武器误判（文具、餐具、家居日用等最常用并非武器）
+        if (hasAnyTagIn(tags, UTENSIL_OR_STATIONERY_TAG_KEYS)
+                || containsAnyToken(dispLower, "household", "stationery")
+                || "cooking".equals(dispLower)
+                || containsAnyToken(ftLower, "rollingpin", "butterknife", "letteropener")) {
+            return "other";
+        }
+
+        // 10. 废品 / 破损武器（优先于近战武器）
+        if ("junk".equals(catLower)
+                || "junk".equals(dispLower)
+                || "trash".equals(dispLower)
+                || "scrap".equals(dispLower)
+                || "brokenweapon".equals(dispLower)
+                || tags.contains("emptycan")) {
+            return "scrap.waste";
+        }
+
+        // 11. 近战武器与爆炸物
+        if ("weapon".equals(catLower) || dispLower.contains("weapon") || "explosives".equals(dispLower)) {
+            return "weapons.other";
+        }
+
+        // 12. 电子元件与常规建材五金
+        if ("electronics".equals(dispLower)
+                || "communications".equals(dispLower)
+                || hasAnyTagIn(tags, ELECTRONICS_TAGS)
+                || containsAnyToken(ftLower, "electronic", "battery", "circuit", "walkietalkie", "radio")) {
+            return "materials.electronics";
+        }
+        if ("material".equals(catLower)
+                || "material".equals(dispLower)
+                || "reciperesource".equals(dispLower)
+                || "paint".equals(dispLower)) {
+            return "materials";
+        }
+
+        // 13. 液体容器
+        if (hasFluidContainer || "watercontainer".equals(dispLower) || "water".equals(dispLower)) {
+            return "fluids";
+        }
+
+        return "other";
+    }
+
+    private static Set<String> normalizeTagSet(Set<String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return Collections.emptySet();
+        }
+        Set<String> out = new HashSet<>(raw.size() * 2);
+        for (String tag : raw) {
+            if (tag == null) continue;
+            String trimmed = tag.trim().toLowerCase(Locale.ROOT);
+            int colon = trimmed.lastIndexOf(':');
+            int dot = trimmed.lastIndexOf('.');
+            int cut = Math.max(colon, dot);
+            String clean = cut >= 0 && cut + 1 < trimmed.length() ? trimmed.substring(cut + 1) : trimmed;
+            if (!clean.isEmpty()) {
+                out.add(clean);
+            }
+        }
+        return out;
+    }
+
+    private static boolean hasAnyTagIn(Set<String> tags, Set<String> candidates) {
+        if (tags.isEmpty()) {
+            return false;
+        }
+        for (String tk : tags) {
+            if (candidates.contains(tk)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsAnyToken(String value, String... tokens) {
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        for (String token : tokens) {
+            if (value.contains(token)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isEligibleItem(InventoryItem item) {
@@ -592,6 +913,7 @@ public final class WarehouseFastIndex {
         currentTick = 0L;
         TerritoryRenderer.reset();
         SmartObjectRegistry.reset();
+        SmartItemPicker.reset();
     }
 
     public static int getAwakeTickerCount() {
@@ -643,6 +965,7 @@ public final class WarehouseFastIndex {
             }
             TerritoryRenderer.removeSettlement(settlementId);
             SmartObjectRegistry.invalidateSettlement(settlementId);
+            SmartItemPicker.clearSettlement(settlementId);
         }
     }
 
@@ -688,6 +1011,148 @@ public final class WarehouseFastIndex {
             }
         }
         return new int[]{best[0] + best[2] / 2, best[1] + best[3] / 2};
+    }
+
+    /** 计算世界 2D 坐标点到据点领地最近矩形边界的距离（在领地内返回 {@code 0.0}，无据点返回 {@code Double.MAX_VALUE}）。 */
+    public static double distanceToSettlement2D(String settlementId, double x, double y) {
+        if (settlementId == null) {
+            return Double.MAX_VALUE;
+        }
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null || s.rects.isEmpty()) {
+            return Double.MAX_VALUE;
+        }
+        double minDistSq = Double.MAX_VALUE;
+        for (int i = 0, n = s.rects.size(); i < n; i++) {
+            int[] r = s.rects.get(i);
+            double x0 = r[0];
+            double y0 = r[1];
+            double x1 = r[0] + r[2];
+            double y1 = r[1] + r[3];
+            double dx = x < x0 ? (x0 - x) : (x > x1 ? (x - x1) : 0.0);
+            double dy = y < y0 ? (y0 - y) : (y > y1 ? (y - y1) : 0.0);
+            double dSq = dx * dx + dy * dy;
+            if (dSq == 0.0) {
+                return 0.0;
+            }
+            if (dSq < minDistSq) {
+                minDistSq = dSq;
+            }
+        }
+        return Math.sqrt(minDistSq);
+    }
+
+    public record LoadedSource(String containerId, int x, int y, int z, int count, String kind, String customName) {}
+
+    public record LiveContainerRef(IsoObject object, ItemContainer container, IsoGridSquare square, String containerId) {}
+
+    /** 查询指定据点当前已加载在场的所有 {@code fullType} 真实容器来源列表。 */
+    public static List<LoadedSource> getLoadedSourcesByType(String settlementId, String fullType) {
+        if (settlementId == null || fullType == null) {
+            return Collections.emptyList();
+        }
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null) {
+            return Collections.emptyList();
+        }
+        List<Source> raw = s.aggregate.sourcesByType.get(fullType);
+        if (raw == null || raw.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<LoadedSource> out = new ArrayList<>(raw.size());
+        for (int i = 0, n = raw.size(); i < n; i++) {
+            Source src = raw.get(i);
+            if (src.loaded && src.count > 0) {
+                out.add(new LoadedSource(src.id, src.x, src.y, src.z, src.count, src.kind, src.customName));
+            }
+        }
+        return out;
+    }
+
+    /** 根据稳定 {@code containerId}（{@code x:y:z#sprite:kind:ci#ord}）解析实时世界对象与容器。 */
+    public static LiveContainerRef resolveLiveContainer(String containerId) {
+        if (containerId == null || containerId.isEmpty() || IsoWorld.instance == null) {
+            return null;
+        }
+        IsoCell cell = IsoWorld.instance.currentCell;
+        if (cell == null) {
+            return null;
+        }
+        int firstHash = containerId.indexOf('#');
+        int secondHash = firstHash > 0 ? containerId.indexOf('#', firstHash + 1) : -1;
+        if (firstHash <= 0 || secondHash <= firstHash + 1) {
+            return null;
+        }
+        String[] xyz = containerId.substring(0, firstHash).split(":");
+        if (xyz.length < 3) {
+            return null;
+        }
+        int x, y, z, targetOrd;
+        try {
+            x = Integer.parseInt(xyz[0]);
+            y = Integer.parseInt(xyz[1]);
+            z = Integer.parseInt(xyz[2]);
+            targetOrd = Integer.parseInt(containerId.substring(secondHash + 1));
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+        String targetSig = containerId.substring(firstHash + 1, secondHash);
+
+        IsoGridSquare sq = cell.getGridSquare(x, y, z);
+        if (sq == null) {
+            return null;
+        }
+        PZArrayList<IsoObject> objects = sq.getObjects();
+        if (objects == null) {
+            return null;
+        }
+        int matchedOrd = 0;
+        for (int oi = 0, objSize = objects.size(); oi < objSize; oi++) {
+            IsoObject obj = objects.get(oi);
+            if (!isEligibleStorageObject(obj) || isObjectPrivate(obj)) {
+                continue;
+            }
+            String spriteName = resolveSpriteName(obj);
+            int contCount = resolveContainerCount(obj);
+            for (int ci = 0; ci < contCount; ci++) {
+                ItemContainer ic = resolveEligibleContainerAt(obj, ci);
+                if (ic == null) {
+                    continue;
+                }
+                String kind = resolveContainerKind(ic);
+                String sig = spriteName + ":" + kind + ":" + ci;
+                if (targetSig.equals(sig)) {
+                    if (matchedOrd == targetOrd) {
+                        return new LiveContainerRef(obj, ic, sq, containerId);
+                    }
+                    matchedOrd++;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String resolveSpriteName(IsoObject obj) {
+        String spriteName = obj.getSpriteName();
+        return (spriteName == null || spriteName.isEmpty()) ? "nosprite" : spriteName;
+    }
+
+    private static int resolveContainerCount(IsoObject obj) {
+        int cnt = obj.getContainerCount();
+        return (cnt <= 0 && obj.getContainer() != null) ? 1 : cnt;
+    }
+
+    private static ItemContainer resolveEligibleContainerAt(IsoObject obj, int ci) {
+        ItemContainer ic = obj.getContainerByIndex(ci);
+        if (ic == null && ci == 0) {
+            ic = obj.getContainer();
+        }
+        return isEligibleContainerType(ic) ? ic : null;
+    }
+
+    private static String resolveContainerKind(ItemContainer ic) {
+        String kind = ic.getType();
+        return (kind == null || kind.isEmpty()) ? "container" : kind;
     }
 
     public static double typeCount(String settlementId, String fullType) {
@@ -778,6 +1243,7 @@ public final class WarehouseFastIndex {
                     ContainerContribution removed = s.containers.remove(cid);
                     if (removed != null) {
                         s.aggregate.subtract(removed);
+                        SmartObjectRegistry.onContainerRemoved(s.settlementId, cid);
                         changed = true;
                     }
                 }
@@ -1064,24 +1530,16 @@ public final class WarehouseFastIndex {
                     continue;
                 }
 
-                String spriteName = obj.getSpriteName();
-                if (spriteName == null || spriteName.isEmpty()) spriteName = "nosprite";
+                String spriteName = resolveSpriteName(obj);
                 String customName = resolveCustomName(obj);
                 boolean markedPrivate = isObjectPrivate(obj);
 
-                int contCount = obj.getContainerCount();
-                if (contCount <= 0 && obj.getContainer() != null) {
-                    contCount = 1;
-                }
-
+                int contCount = resolveContainerCount(obj);
                 for (int ci = 0; ci < contCount; ci++) {
-                    ItemContainer ic = obj.getContainerByIndex(ci);
-                    if (ic == null && ci == 0) ic = obj.getContainer();
-                    if (!isEligibleContainerType(ic)) continue;
+                    ItemContainer ic = resolveEligibleContainerAt(obj, ci);
+                    if (ic == null) continue;
 
-                    String kind = ic.getType();
-                    if (kind == null || kind.isEmpty()) kind = "container";
-
+                    String kind = resolveContainerKind(ic);
                     String sig = spriteName + ":" + kind + ":" + ci;
                     int ord = stackOrdinals.getOrDefault(sig, 0);
                     stackOrdinals.put(sig, ord + 1);
@@ -1091,6 +1549,7 @@ public final class WarehouseFastIndex {
 
                     ContainerContribution existing = s.containers.get(cid);
                     if (markedPrivate) {
+                        SmartObjectRegistry.onContainerRemoved(s.settlementId, cid);
                         if (existing != null && STATUS_PRIVATE.equals(existing.status)) {
                             continue;
                         }
@@ -1118,6 +1577,7 @@ public final class WarehouseFastIndex {
                         continue;
                     }
 
+                    SmartZoningPolicy.ContainerFilterRule zoneRule = SmartZoningPolicy.readRule(obj);
                     double cap = ic.getCapacity();
                     if (existing != null
                             && STATUS_LOADED.equals(existing.status)
@@ -1126,6 +1586,11 @@ public final class WarehouseFastIndex {
                             && Objects.equals(existing.kind, kind)
                             && Objects.equals(existing.customName, customName)
                             && existing.fingerprint.matchesContainer(ic)) {
+                        if (hasSmartZoneRuleChanged(s.settlementId, cid, zoneRule)) {
+                            SmartObjectRegistry.onContainerScanned(
+                                    s.settlementId, cid, sq, zoneRule, existing.count, cap, existing.usedWeight);
+                            changed = true;
+                        }
                         continue;
                     }
 
@@ -1141,6 +1606,8 @@ public final class WarehouseFastIndex {
 
                     populateLoadedContribution(existing, ic, fp, cap, used, kind, customName);
                     s.aggregate.add(existing);
+                    SmartObjectRegistry.onContainerScanned(
+                            s.settlementId, cid, sq, zoneRule, existing.count, cap, used);
                     changed = true;
                 }
             }
@@ -1153,6 +1620,7 @@ public final class WarehouseFastIndex {
                     ContainerContribution old = s.containers.remove(oldId);
                     if (old != null) {
                         s.aggregate.subtract(old);
+                        SmartObjectRegistry.onContainerRemoved(s.settlementId, oldId);
                         changed = true;
                     }
                 }
@@ -1168,6 +1636,25 @@ public final class WarehouseFastIndex {
         }
         SmartObjectRegistry.onSquareScanned(s.settlementId, sq);
         return changed;
+    }
+
+    private static boolean hasSmartZoneRuleChanged(
+            String settlementId, String containerId, SmartZoningPolicy.ContainerFilterRule rule) {
+        SmartSlot slot = SmartObjectRegistry.getContainerSlot(settlementId, containerId);
+        if (slot == null) {
+            return true;
+        }
+        SmartZoningPolicy.ContainerFilterRule cur = slot.getFilterRule();
+        if (cur == null) {
+            return true;
+        }
+        return cur.role != rule.role
+                || cur.priority != rule.priority
+                || cur.enabled != rule.enabled
+                || !cur.allowGroups.equals(rule.allowGroups)
+                || !cur.denyGroups.equals(rule.denyGroups)
+                || !cur.allowTypes.equals(rule.allowTypes)
+                || !cur.denyTypes.equals(rule.denyTypes);
     }
 
     private static void populateLoadedContribution(
@@ -1273,6 +1760,14 @@ public final class WarehouseFastIndex {
             contEntry.rawset("count", Double.valueOf(c.count));
             contEntry.rawset("loaded", Boolean.valueOf(isLoaded));
             contEntry.rawset("status", c.status);
+            SmartSlot slot = SmartObjectRegistry.getContainerSlot(s.settlementId, c.containerId);
+            if (slot != null) {
+                contEntry.rawset("role", slot.getContainerRole().name());
+                contEntry.rawset("priority", Double.valueOf(slot.getPriority()));
+            } else {
+                contEntry.rawset("role", ContainerRole.STORAGE.name());
+                contEntry.rawset("priority", Double.valueOf(SmartZoningPolicy.DEFAULT_PRIORITY));
+            }
             containersTable.rawset(Double.valueOf(contIndex++), contEntry);
         }
 

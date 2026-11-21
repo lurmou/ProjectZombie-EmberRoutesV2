@@ -306,3 +306,36 @@ function EmberRoutesJava.getNpcAssignedSettlement(npcId) end
 ---@return number
 function EmberRoutesJava.clearSettlementNpcAssignments(settlementId) end
 
+---@param id string
+---@param allowGroups table
+---@param defaultPriority number
+function EmberRoutesJava.registerSmartZoningPreset(id, allowGroups, defaultPriority) end
+
+---@param obj any
+---@return string
+function EmberRoutesJava.getContainerRole(obj) end
+
+---@param obj any
+---@param roleName string
+---@return string
+function EmberRoutesJava.setContainerRole(obj, roleName) end
+
+---@param obj any
+---@return string
+function EmberRoutesJava.autoConfigureContainer(obj) end
+
+---@param settlementId string
+---@param playerIndex number
+---@param fullType string
+---@param count number
+---@return string
+function EmberRoutesJava.submitDeliveryOrder(settlementId, playerIndex, fullType, count) end
+
+---@param orderId string
+---@return boolean
+function EmberRoutesJava.cancelDeliveryOrder(orderId) end
+
+---@param settlementId string
+---@return string
+function EmberRoutesJava.getLogisticsSummary(settlementId) end
+

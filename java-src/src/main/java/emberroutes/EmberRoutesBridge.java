@@ -3,8 +3,12 @@ package emberroutes;
 import emberroutes.npc.IsoNPC;
 import emberroutes.npc.NpcManager;
 import emberroutes.npc.NpcPostureController;
+import emberroutes.npc.brain.DeliveryOrderManager;
+import emberroutes.npc.brain.LogisticsWorkDutyProvider;
 import emberroutes.warehouse.ContainerDirtyQueue;
+import emberroutes.warehouse.ContainerRole;
 import emberroutes.warehouse.SmartObjectRegistry;
+import emberroutes.warehouse.SmartZoningPolicy;
 import emberroutes.warehouse.TerritoryContour;
 import emberroutes.warehouse.TerritoryRenderer;
 import emberroutes.warehouse.WarehouseFastIndex;
@@ -12,6 +16,8 @@ import java.util.ArrayList;
 import java.util.List;
 import se.krka.kahlua.j2se.J2SEPlatform;
 import se.krka.kahlua.vm.KahluaTable;
+import se.krka.kahlua.vm.KahluaTableIterator;
+import zombie.inventory.ItemContainer;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 import zombie.iso.areas.isoregion.IsoRegions;
@@ -473,5 +479,75 @@ public final class EmberRoutesBridge {
 
     public static double clearSettlementNpcAssignments(String settlementId) {
         return NpcManager.clearSettlementAssignments(settlementId);
+    }
+
+    // ==================== 7. M3-② SmartZoning 预设、容器角色与实体配送 ====================
+
+    public static void registerSmartZoningPreset(String id, KahluaTable allowGroups, double defaultPriority) {
+        List<String> groups = new ArrayList<>();
+        if (allowGroups != null) {
+            KahluaTableIterator it = allowGroups.iterator();
+            while (it.advance()) {
+                Object val = it.getValue();
+                if (val instanceof String s && !s.isBlank()) {
+                    groups.add(s);
+                } else if (Boolean.TRUE.equals(val) && it.getKey() instanceof String k && !k.isBlank()) {
+                    groups.add(k);
+                }
+            }
+        }
+        SmartZoningPolicy.registerPreset(id, groups, (int) Math.round(defaultPriority));
+    }
+
+    public static String getContainerRole(IsoObject obj) {
+        return SmartZoningPolicy.readRule(obj).role.name();
+    }
+
+    public static String setContainerRole(IsoObject obj, String roleName) {
+        if (obj == null) {
+            return ContainerRole.STORAGE.name();
+        }
+        SmartZoningPolicy.ContainerFilterRule rule = SmartZoningPolicy.readRule(obj);
+        rule.role = ContainerRole.fromString(roleName);
+        SmartZoningPolicy.writeRule(obj, rule);
+        return rule.role.name();
+    }
+
+    public static String autoConfigureContainer(IsoObject obj) {
+        if (obj == null) {
+            return "INVALID";
+        }
+        ItemContainer ic = obj.getContainer();
+        if (ic == null && obj.getContainerCount() > 0) {
+            ic = obj.getContainerByIndex(0);
+        }
+        if (ic == null) {
+            return "NO_CONTAINER";
+        }
+        SmartZoningPolicy.ContainerFilterRule evaluated = SmartZoningPolicy.evaluateAutoRule(obj, ic);
+        SmartZoningPolicy.ContainerFilterRule existing = SmartZoningPolicy.readRule(obj);
+        if (existing.role != ContainerRole.STORAGE) {
+            evaluated.role = existing.role;
+        }
+        SmartZoningPolicy.writeRule(obj, evaluated);
+        return evaluated.role.name() + ":P" + evaluated.priority + ":" + String.join(",", evaluated.allowGroups);
+    }
+
+    public static String submitDeliveryOrder(
+            String settlementId, double playerIndex, String fullType, double count) {
+        return DeliveryOrderManager.submitOrder(
+                settlementId,
+                (int) Math.round(playerIndex),
+                fullType,
+                (int) Math.round(count),
+                SmartObjectRegistry.getCurrentSimTime());
+    }
+
+    public static boolean cancelDeliveryOrder(String orderId) {
+        return DeliveryOrderManager.cancelOrder(orderId);
+    }
+
+    public static String getLogisticsSummary(String settlementId) {
+        return LogisticsWorkDutyProvider.getDebugSummary(settlementId);
     }
 }
