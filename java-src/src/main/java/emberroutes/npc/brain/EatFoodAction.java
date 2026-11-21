@@ -17,9 +17,11 @@ public final class EatFoodAction extends BaseAction {
     private Food activeFood;
     private float targetPercentage = 1.0F;
     private boolean useUtensil;
+    private String eatSound;
 
     public EatFoodAction() {
         super(3.0, "eat");
+        setReportEventName("EventEating");
     }
 
     public static ItemLocation findBestEdibleFood(IsoNPC npc) {
@@ -54,7 +56,7 @@ public final class EatFoodAction extends BaseAction {
             return;
         }
         ItemLocation loc = findBestEdibleFood(npc);
-        if (loc == null || !(loc.item() instanceof Food food)) {
+        if (loc == null || !(loc.item() instanceof Food food) || !unpackToMainInventoryIfNeeded(npc, loc)) {
             return;
         }
         this.activeFood = food;
@@ -101,6 +103,23 @@ public final class EatFoodAction extends BaseAction {
         this.useUtensil = (secondItem != null);
         if (foodTypeVar != null && !foodTypeVar.isBlank()) {
             setExtraAnimVar("FoodType", foodTypeVar);
+        }
+        if ("Pot".equals(eatType) || "PotForged".equals(eatType)) {
+            configureHandModels(food, null);
+        } else {
+            configureHandModels(secondItem, food);
+        }
+
+        String customSound = food.getCustomEatSound();
+        this.eatSound = (customSound != null && !customSound.isBlank()) ? customSound : "Eating";
+        playActionSound(npc, this.eatSound);
+    }
+
+    @Override
+    protected void onTick(BrainContext ctx, double dtSim) {
+        IsoNPC npc = ctx != null ? ctx.npc : null;
+        if (npc != null && !npc.isDead()) {
+            ensureActionSoundPlaying(npc, this.eatSound);
         }
     }
 

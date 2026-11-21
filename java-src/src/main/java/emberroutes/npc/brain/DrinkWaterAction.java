@@ -18,9 +18,11 @@ public final class DrinkWaterAction extends BaseAction {
     private FluidContainer activeContainer;
     private float startRatio;
     private float targetConsumedRatio;
+    private String drinkSound;
 
     public DrinkWaterAction() {
         super(2.2, "drink", "FoodType", "bottle");
+        setReportEventName("EventEating");
     }
 
     public static ItemLocation findCleanWaterContainer(IsoNPC npc) {
@@ -47,7 +49,7 @@ public final class DrinkWaterAction extends BaseAction {
             return;
         }
         ItemLocation loc = findCleanWaterContainer(npc);
-        if (loc == null) {
+        if (loc == null || !unpackToMainInventoryIfNeeded(npc, loc)) {
             return;
         }
         this.activeItem = loc.item();
@@ -68,8 +70,19 @@ public final class DrinkWaterAction extends BaseAction {
         String eatType = activeItem.getEatType();
         if (eatType != null && !eatType.isBlank()) {
             setExtraAnimVar("FoodType", eatType);
+            if ("Pot".equals(eatType) || "PotForged".equals(eatType)) {
+                configureHandModels(activeItem, null);
+            } else {
+                configureHandModels(null, activeItem);
+            }
         } else {
             setExtraAnimVar("FoodType", "bottle");
+            configureHandModels(null, activeItem);
+        }
+
+        this.drinkSound = activeContainer.getCustomDrinkSound();
+        if (this.drinkSound != null && !this.drinkSound.isBlank()) {
+            playActionSound(npc, this.drinkSound);
         }
     }
 
@@ -79,6 +92,7 @@ public final class DrinkWaterAction extends BaseAction {
         if (npc == null || npc.isDead()) {
             return;
         }
+        ensureActionSoundPlaying(npc, this.drinkSound);
         updateDrinkStep(npc, getProgress01());
     }
 
@@ -107,7 +121,7 @@ public final class DrinkWaterAction extends BaseAction {
     }
 
     private void updateDrinkStep(IsoNPC npc, float delta01) {
-        if (activeItem == null || activeContainer == null || activeContainer.isEmpty() || targetConsumedRatio <= 0.0F) {
+        if (activeItem == null || activeContainer == null || npc.getInventory() == null || !npc.getInventory().contains(activeItem)) {
             return;
         }
         float curFilledRatio = activeContainer.getFilledRatio();

@@ -17,6 +17,7 @@ import zombie.inventory.InventoryItem;
 public final class BandageSelfAction extends BaseAction {
     public BandageSelfAction() {
         super(2.8, "Bandage", "BandageType", "LeftArm");
+        setReportEventName("EventBandage");
     }
 
     public static boolean hasBleedingUnbandagedPart(IsoNPC npc) {
@@ -100,8 +101,14 @@ public final class BandageSelfAction extends BaseAction {
         if (npc == null || npc.isDead()) {
             return;
         }
+        ItemLocation loc = findBestBandage(npc);
+        if (loc != null) {
+            unpackToMainInventoryIfNeeded(npc, loc);
+        }
         BodyPart targetPart = findFirstBleedingUnbandagedPart(npc);
         setExtraAnimVar("BandageType", resolveBandageType(targetPart));
+        configureHandModels(null, null);
+        playActionSound(npc, "FirstAidApplyBandage");
     }
 
     @Override

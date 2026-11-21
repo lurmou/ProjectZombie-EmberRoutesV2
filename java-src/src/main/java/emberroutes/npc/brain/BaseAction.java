@@ -2,6 +2,7 @@ package emberroutes.npc.brain;
 
 import emberroutes.npc.IsoNPC;
 import java.util.List;
+import java.util.Stack;
 import java.util.function.Predicate;
 import zombie.characters.CharacterStat;
 import zombie.inventory.InventoryItem;
@@ -9,10 +10,11 @@ import zombie.inventory.ItemContainer;
 import zombie.inventory.types.InventoryContainer;
 
 /**
- * M3 纯 Java 确定性动作器基类（视觉壳 + 严格倍速对齐计时结算）：
+ * M3 纯 Java 确定性动作器基类（直接挂载原版 {@link zombie.characters.CharacterTimedActions.BaseAction} 驱动手模与动画 + 严格倍速对齐计时结算）：
  * <ul>
- *   <li>仅向引擎动画层写入 {@code PerformingAction} / {@code IsPerformingAnAction}（可选 {@code FoodType / BandageType / ReadType}），绝不构造原版 UI 读条或玩家槽 {@code TimedAction}；</li>
- *   <li>打断时立即清除全部动作动画变量，并由所属 {@link StateScope} 自动清理其余租约/临时道具。</li>
+ *   <li>通过向 {@code npc.getCharacterActions()} 挂载无进度条（{@code useProgressBar = false}）的原版 {@code CharacterTimedActions.BaseAction}，
+ *       100% 复用原版 {@code ModelManager#ResetCharacterEquippedHands} 渲染管线（自动隐藏原武器、按 {@code FluidContainer > 0.5F} 选 {@code _Fluid} 水位模型、初始化 {@code SmartTexture} 贴图并挂载至 {@code Bip01_Prop1 / Bip01_Prop2}）；</li>
+ *   <li>由本类根据 {@code dtSim} 推进进度并在完成/打断时直接调用原版 {@code stopTimedActionAnim()} + 从 {@code characterActions} 移除，绝不触发原版 {@code UIManager.getProgressBar} 污染真玩家 HUD。</li>
  * </ul>
  */
 public abstract class BaseAction {
@@ -30,6 +32,14 @@ public abstract class BaseAction {
     private final String performingActionAnim;
     private String extraVarKey;
     private String extraVarValue;
+    private String reportEventName;
+    private InventoryItem overridePrimaryItem;
+    private InventoryItem overrideSecondaryItem;
+    private boolean handModelsConfigured;
+    private InventoryItem unpackedItem;
+    private ItemContainer unpackedFromContainer;
+    private zombie.characters.CharacterTimedActions.BaseAction nativeAction;
+    private long soundHandle = -1L;
 
     private ActionStatus status = ActionStatus.IDLE;
     private double elapsedSimSec;
@@ -74,15 +84,105 @@ public abstract class BaseAction {
         this.extraVarValue = value;
     }
 
+    protected final void setReportEventName(String eventName) {
+        this.reportEventName = eventName;
+    }
+
+    /** 配置动作期间左右手临时显示的真实物品原件（对应原版 {@code setOverrideHandModels(primaryHand, secondaryHand)}）。 */
+    protected final void configureHandModels(InventoryItem primaryHand, InventoryItem secondaryHand) {
+        this.overridePrimaryItem = primaryHand;
+        this.overrideSecondaryItem = secondaryHand;
+        this.handModelsConfigured = true;
+    }
+
+    /**
+     * 严格对齐原版玩家背包掏取规则：
+     * 若目标物品位于随身嵌套背包而非主物品栏（{@code npc.getInventory()}），先将其转移至主物品栏，
+     * 并在动作结束或被打断时（若物品未被完全消耗）自动放回原背包。
+     */
+    protected final boolean unpackToMainInventoryIfNeeded(IsoNPC npc, ItemLocation loc) {
+        if (npc == null || loc == null || loc.item() == null) {
+            return false;
+        }
+        ItemContainer mainInv = npc.getInventory();
+        InventoryItem item = loc.item();
+        ItemContainer source = item.getContainer() != null ? item.getContainer() : loc.container();
+        if (mainInv == null || source == null) {
+            return false;
+        }
+        if (source == mainInv) {
+            return true;
+        }
+        try {
+            source.DoRemoveItem(item);
+            source.setDrawDirty(true);
+            mainInv.AddItem(item);
+            mainInv.setDrawDirty(true);
+            this.unpackedItem = item;
+            this.unpackedFromContainer = source;
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void returnUnpackedItemIfRemaining(IsoNPC npc) {
+        InventoryItem item = this.unpackedItem;
+        ItemContainer dest = this.unpackedFromContainer;
+        this.unpackedItem = null;
+        this.unpackedFromContainer = null;
+        if (npc == null || item == null || dest == null) {
+            return;
+        }
+        ItemContainer mainInv = npc.getInventory();
+        if (mainInv == null || dest == mainInv || !mainInv.contains(item)) {
+            return;
+        }
+        try {
+            mainInv.DoRemoveItem(item);
+            mainInv.setDrawDirty(true);
+            dest.AddItem(item);
+            dest.setDrawDirty(true);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    protected final void playActionSound(IsoNPC npc, String soundName) {
+        if (npc == null || soundName == null || soundName.isEmpty() || npc.getEmitter() == null) {
+            return;
+        }
+        try {
+            this.soundHandle = npc.getEmitter().playSound(soundName);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    protected final void ensureActionSoundPlaying(IsoNPC npc, String soundName) {
+        if (npc == null || soundName == null || soundName.isEmpty() || npc.getEmitter() == null) {
+            return;
+        }
+        try {
+            if (this.soundHandle != -1L && !npc.getEmitter().isPlaying(this.soundHandle)) {
+                this.soundHandle = npc.getEmitter().playSound(soundName);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     public final void start(BrainContext ctx) {
         this.elapsedSimSec = 0.0;
         this.status = ActionStatus.RUNNING;
+        this.handModelsConfigured = false;
+        this.overridePrimaryItem = null;
+        this.overrideSecondaryItem = null;
+        this.unpackedItem = null;
+        this.unpackedFromContainer = null;
         if (ctx != null) {
             ctx.activeAction = this;
         }
         onStart(ctx);
         if (ctx != null && status == ActionStatus.RUNNING) {
-            applyAnimVars(ctx.npc);
+            applyAnimVarsAndNativeAction(ctx.npc);
         }
     }
 
@@ -98,7 +198,7 @@ public abstract class BaseAction {
                 ok = onComplete(ctx);
             } finally {
                 if (ctx != null) {
-                    clearAnimVars(ctx.npc);
+                    clearAnimVarsAndNativeAction(ctx.npc);
                     refreshContextStats(ctx);
                     if (ctx.activeAction == this) {
                         ctx.activeAction = null;
@@ -117,7 +217,7 @@ public abstract class BaseAction {
             onInterrupt(ctx, reason);
         } finally {
             if (ctx != null) {
-                clearAnimVars(ctx.npc);
+                clearAnimVarsAndNativeAction(ctx.npc);
                 refreshContextStats(ctx);
                 if (ctx.activeAction == this) {
                     ctx.activeAction = null;
@@ -144,20 +244,81 @@ public abstract class BaseAction {
         }
     }
 
-    private void applyAnimVars(IsoNPC npc) {
-        if (npc == null || performingActionAnim == null || performingActionAnim.isEmpty()) {
-            return;
-        }
-        npc.setVariable("PerformingAction", performingActionAnim);
-        if (extraVarKey != null && !extraVarKey.isEmpty() && extraVarValue != null) {
-            npc.setVariable(extraVarKey, extraVarValue);
-        }
-        npc.setVariable("IsPerformingAnAction", true);
-    }
-
-    private void clearAnimVars(IsoNPC npc) {
+    private void applyAnimVarsAndNativeAction(IsoNPC npc) {
         if (npc == null) {
             return;
+        }
+        try {
+            zombie.characters.CharacterTimedActions.BaseAction act =
+                    new zombie.characters.CharacterTimedActions.BaseAction(npc);
+            act.useProgressBar = false;
+            act.forceProgressBar = false;
+            // maxTime = -1 使 IsoGameCharacter.updateInternal 中 act.finished() 恒为 false，完全由本类 dtSim 驱动生命周期
+            act.maxTime = -1;
+            act.started = true;
+            act.stopOnWalk = false;
+            act.stopOnRun = false;
+            act.stopOnAim = false;
+
+            if (extraVarKey != null && !extraVarKey.isEmpty() && extraVarValue != null) {
+                act.setAnimVariable(extraVarKey, extraVarValue);
+            }
+            if (performingActionAnim != null && !performingActionAnim.isEmpty()) {
+                act.setActionAnim(performingActionAnim);
+            }
+            if (handModelsConfigured) {
+                act.setOverrideHandModels(overridePrimaryItem, overrideSecondaryItem);
+            }
+
+            Stack<zombie.characters.CharacterTimedActions.BaseAction> stack = npc.getCharacterActions();
+            if (stack != null) {
+                stack.clear();
+                stack.push(act);
+            }
+            this.nativeAction = act;
+
+            if (reportEventName != null && !reportEventName.isEmpty()) {
+                npc.reportEvent(reportEventName);
+            }
+        } catch (Throwable ignored) {
+            // 脱机单测环境（无完整引擎实例）退化为直接写变量
+            if (performingActionAnim != null && !performingActionAnim.isEmpty()) {
+                npc.setVariable("PerformingAction", performingActionAnim);
+            }
+            if (extraVarKey != null && !extraVarKey.isEmpty() && extraVarValue != null) {
+                npc.setVariable(extraVarKey, extraVarValue);
+            }
+            npc.setVariable("IsPerformingAnAction", true);
+        }
+    }
+
+    private void clearAnimVarsAndNativeAction(IsoNPC npc) {
+        if (npc == null) {
+            return;
+        }
+        if (this.soundHandle != -1L && npc.getEmitter() != null) {
+            try {
+                if (npc.getEmitter().isPlaying(this.soundHandle)) {
+                    npc.stopOrTriggerSound(this.soundHandle);
+                }
+            } catch (Throwable ignored) {
+            }
+            this.soundHandle = -1L;
+        }
+        zombie.characters.CharacterTimedActions.BaseAction act = this.nativeAction;
+        this.nativeAction = null;
+        if (act != null) {
+            try {
+                act.stopTimedActionAnim();
+            } catch (Throwable ignored) {
+            }
+            try {
+                Stack<zombie.characters.CharacterTimedActions.BaseAction> stack = npc.getCharacterActions();
+                if (stack != null) {
+                    stack.removeElement(act);
+                }
+            } catch (Throwable ignored) {
+            }
         }
         if (performingActionAnim != null && !performingActionAnim.isEmpty()) {
             npc.clearVariable("PerformingAction");
@@ -166,6 +327,7 @@ public abstract class BaseAction {
             npc.clearVariable(extraVarKey);
         }
         npc.setVariable("IsPerformingAnAction", false);
+        returnUnpackedItemIfRemaining(npc);
     }
 
     /** 递归扫描 NPC 主背包与嵌套随身容器，零重复查找首个满足条件的真物品原件及所属容器。 */
