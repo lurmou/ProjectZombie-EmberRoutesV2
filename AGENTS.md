@@ -14,6 +14,7 @@
 ## 2. 核心架构与边界红线
 
 - **专注单人、零兼容代码**：不为联机预留冗余协议；严禁编写任何兼容旧格式、旧接口的转发壳或双轨 fallback。
+- **Java 重核（85%）+ Lua 薄壳（15%）一步到位铁律**：凡 B42 `projectzomboid.jar` 已有 Java 类支撑的仿真、AI 大脑（`BrainRouter` / `EmberStateTree` / `StateScope`）、空间感知（`SmartObjectRegistry`）、组合拍卖（`SettlementTaskAuctioneer`）、动作器（`BaseAction`）、战斗导演（`EmberSquadDirector`）、工坊合成（`HandcraftLogic / CraftLogic`）与商队路网（`WorldMapStreets / VehiclesDB2`），**100% 直接在 Java 层一步到位实现**；Lua 层仅保留 `EmberUI` 界面、右键/环形菜单、声明式预设表、原版纯 Lua 系统（如 `SFarmingSystem.lua` / `forageSystem.lua`）的 15 行薄胶水以及 `Compat` 槽，**严禁“先在 Lua 写第一版核心逻辑、后期再往 Java 迁移”**。
 - **B42 生命周期与跨语言硬防线**：
   - 内部核心业务 100% 静态 `require` 并遵守域级 DAG（禁字符串 DI、禁业务域私调总 `EmberRoutesJava.reset()`）；
   - `onModDataReady` 跑在后台加载线程，严禁触碰世界/实体/UI；二进制存盘必须强验 `loadedForCurrentSave` 门闩防版本升级空写覆写；

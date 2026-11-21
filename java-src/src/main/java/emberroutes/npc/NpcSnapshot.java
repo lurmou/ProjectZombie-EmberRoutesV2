@@ -211,9 +211,15 @@ public final class NpcSnapshot {
         NpcSnapshot s = new NpcSnapshot();
         s.npcId = npc.getNpcId();
         s.displayName = npc.getDescriptor() != null ? npc.getDescriptor().getForename() : npc.getUsername();
-        s.x = npc.getX();
-        s.y = npc.getY();
-        s.z = npc.getZ();
+        if (npc.getPosture().hasSafeStandPos()) {
+            s.x = npc.getPosture().getSafeStandX();
+            s.y = npc.getPosture().getSafeStandY();
+            s.z = npc.getPosture().getSafeStandZ();
+        } else {
+            s.x = npc.getX();
+            s.y = npc.getY();
+            s.z = npc.getZ();
+        }
         s.dirAngleDeg = npc.getDirectionAngle();
         s.worldVersion = resolveWorldVersion();
 

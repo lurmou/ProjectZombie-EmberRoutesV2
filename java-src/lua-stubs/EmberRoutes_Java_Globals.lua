@@ -235,3 +235,34 @@ function EmberRoutesJava.drainNpcMoveEvents() end
 ---@return string
 function EmberRoutesJava.getNpcDebugLine(npcId) end
 
+---@param npcId string
+---@param furniture any
+---@return boolean
+function EmberRoutesJava.sitNpcOnFurniture(npcId, furniture) end
+
+---@param npcId string
+---@param bed any
+---@return boolean
+function EmberRoutesJava.sleepNpcOnBed(npcId, bed) end
+
+---@param npcId string
+---@param urgent boolean
+---@return boolean
+function EmberRoutesJava.standUpNpc(npcId, urgent) end
+
+---@param urgent boolean
+---@return number
+function EmberRoutesJava.standUpAllNpcs(urgent) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.getNpcPostureState(npcId) end
+
+---@param obj any
+---@return boolean
+function EmberRoutesJava.isSittableFurniture(obj) end
+
+---@param obj any
+---@return boolean
+function EmberRoutesJava.isBedObject(obj) end
+

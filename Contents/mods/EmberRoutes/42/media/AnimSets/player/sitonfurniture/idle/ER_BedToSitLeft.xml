@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animNode>
+	<m_Name>ER_BedToSitLeft</m_Name>
+	<m_ConditionPriority>1</m_ConditionPriority>
+	<m_AnimName>Bob_GetOutBedLeft</m_AnimName>
+	<m_DeferredBoneName>Bip01</m_DeferredBoneName>
+	<m_deferredBoneAxis>Z</m_deferredBoneAxis>
+	<m_useDeferedRotation>true</m_useDeferedRotation>
+	<m_useDeferredMovement>false</m_useDeferredMovement>
+	<m_deferredRotationScale>1.70</m_deferredRotationScale>
+	<m_Looped>false</m_Looped>
+	<m_BlendTime>0.25</m_BlendTime>
+	<m_BlendOutTime>0.20</m_BlendOutTime>
+	<m_SyncTrackingEnabled>false</m_SyncTrackingEnabled>
+	<m_TrackTimeToVariable>ER_BedSitFrac</m_TrackTimeToVariable>
+	<m_Conditions x_name="b2f5b103-4c8d-491a-9e01-8c1a2b400001">
+		<m_Name>SitOnFurnitureAnim</m_Name>
+		<m_Type>STRING</m_Type>
+		<m_Value>Idle</m_Value>
+	</m_Conditions>
+	<m_Conditions x_name="b2f5b103-4c8d-491a-9e01-8c1a2b400002">
+		<m_Name>ER_SitSleepAnim</m_Name>
+		<m_Type>STRING</m_Type>
+		<m_Value>ToSitLeft</m_Value>
+	</m_Conditions>
+	<m_Events x_name="b2f5b103-4c8d-491a-9e01-8c1a2b400003">
+		<m_EventName>FlagWhileAlive</m_EventName>
+		<m_Time>Start</m_Time>
+		<m_ParameterValue>hideEquippedHandL</m_ParameterValue>
+	</m_Events>
+	<m_Events x_name="b2f5b103-4c8d-491a-9e01-8c1a2b400004">
+		<m_EventName>FlagWhileAlive</m_EventName>
+		<m_Time>Start</m_Time>
+		<m_ParameterValue>hideEquippedHandR</m_ParameterValue>
+	</m_Events>
+</animNode>

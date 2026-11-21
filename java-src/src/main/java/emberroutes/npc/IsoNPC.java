@@ -29,6 +29,7 @@ public final class IsoNPC extends IsoPlayer {
     private final String npcId;
     private final EmberLocomotionController locomotion = new EmberLocomotionController();
     private final EmberFollowController follow = new EmberFollowController();
+    private final NpcPostureController posture = new NpcPostureController();
 
     private boolean attached;
     private boolean runningMode;
@@ -76,6 +77,10 @@ public final class IsoNPC extends IsoPlayer {
 
     public EmberFollowController getFollow() {
         return follow;
+    }
+
+    public NpcPostureController getPosture() {
+        return posture;
     }
 
     public void setAttached(boolean attached) {
@@ -321,6 +326,11 @@ public final class IsoNPC extends IsoPlayer {
     }
 
     @Override
+    public void processWakingUp() {
+        // 阻止原版早上 9:00 自动强制唤醒 NPC 或篡改本地玩家 SoundManager 音乐状态
+    }
+
+    @Override
     public UpdateSchedulerSimulationLevel getMinimumSimulationLevel() {
         return UpdateSchedulerSimulationLevel.FULL;
     }
@@ -338,6 +348,7 @@ public final class IsoNPC extends IsoPlayer {
     public void OnDeath() {
         this.emberTrackSpeedScale = 1.0F;
         applyEmberTrackSpeedScale();
+        posture.forceImmediateReset(this, "DEATH", true);
         follow.stop(this, "DEATH");
         locomotion.interrupt(this, "DEATH");
         StopAllActionQueue();
@@ -369,7 +380,10 @@ public final class IsoNPC extends IsoPlayer {
         IsoReticleMode reticleBefore = reticle != null ? reticle.getTargetReticleMode() : null;
         try {
             if (!isDead()) {
-                follow.beforeLocomotion(this);
+                posture.beforeUpdate(this);
+                if (!posture.isBlockingLocomotion()) {
+                    follow.beforeLocomotion(this);
+                }
                 locomotion.beforeUpdate(this);
             }
             applyEmberTrackSpeedScale();
@@ -391,7 +405,7 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     protected void doDeferredMovement() {
-        if (!attached || getCurrentSquare() == null || isDead()) {
+        if (!attached || getCurrentSquare() == null || isDead() || posture.isSuppressingDeferredMovement()) {
             discardRootMotion();
             return;
         }

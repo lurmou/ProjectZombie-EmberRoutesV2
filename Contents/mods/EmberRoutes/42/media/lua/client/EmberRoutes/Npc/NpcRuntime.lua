@@ -123,6 +123,31 @@ function NpcRuntime.getDebugLine(npcId)
     return EmberRoutesJava.getNpcDebugLine(npcId) or ""
 end
 
+function NpcRuntime.sitOnFurniture(npcId, obj)
+    if not EmberRoutesJava or not npcId or not obj then return false end
+    return EmberRoutesJava.sitNpcOnFurniture(npcId, obj) == true
+end
+
+function NpcRuntime.sleepOnBed(npcId, obj)
+    if not EmberRoutesJava or not npcId or not obj then return false end
+    return EmberRoutesJava.sleepNpcOnBed(npcId, obj) == true
+end
+
+function NpcRuntime.standUp(npcId, urgent)
+    if not EmberRoutesJava or not npcId then return false end
+    return EmberRoutesJava.standUpNpc(npcId, urgent == true) == true
+end
+
+function NpcRuntime.standUpAll(urgent)
+    if not EmberRoutesJava then return 0 end
+    return EmberRoutesJava.standUpAllNpcs(urgent == true)
+end
+
+function NpcRuntime.getPostureState(npcId)
+    if not EmberRoutesJava or not npcId then return "MISSING" end
+    return EmberRoutesJava.getNpcPostureState(npcId) or "MISSING"
+end
+
 Kernel.exposeApi("npc", NpcRuntime)
 Kernel.registerModule({
     id = "npc-runtime",
