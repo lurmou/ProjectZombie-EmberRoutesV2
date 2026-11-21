@@ -213,7 +213,10 @@ public final class TerritoryContour {
         return Arrays.copyOf(buf, count);
     }
 
-    private static boolean containsPoint(List<int[]> rects, int x, int y) {
+    public static boolean containsPoint(List<int[]> rects, int x, int y) {
+        if (rects == null) {
+            return false;
+        }
         for (int i = 0, n = rects.size(); i < n; i++) {
             int[] r = rects.get(i);
             if (x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3]) {

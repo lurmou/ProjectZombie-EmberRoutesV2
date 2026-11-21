@@ -311,6 +311,7 @@ public final class VerifyModule1 {
                 return 1;
             });
             javaBridge.rawset("tickNpcs", (JavaFunction) (cf, n) -> 0);
+            javaBridge.rawset("tickNpcBrains", (JavaFunction) (cf, n) -> 0);
             javaBridge.rawset("moveNpcTo", (JavaFunction) (cf, n) -> {
                 String npcId = (String) cf.get(0);
                 double seq = mockMoveSeq.incrementAndGet();

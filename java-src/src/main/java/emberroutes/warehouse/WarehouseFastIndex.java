@@ -591,6 +591,7 @@ public final class WarehouseFastIndex {
         AWAKE_QUEUE.clear();
         currentTick = 0L;
         TerritoryRenderer.reset();
+        SmartObjectRegistry.reset();
     }
 
     public static int getAwakeTickerCount() {
@@ -641,6 +642,7 @@ public final class WarehouseFastIndex {
                 }
             }
             TerritoryRenderer.removeSettlement(settlementId);
+            SmartObjectRegistry.invalidateSettlement(settlementId);
         }
     }
 
@@ -656,6 +658,36 @@ public final class WarehouseFastIndex {
     public static String findSettlementIdAt(int x, int y) {
         SettlementState s = findOwner(x, y);
         return s != null ? s.settlementId : null;
+    }
+
+    public static boolean containsPoint(String settlementId, int x, int y) {
+        if (settlementId == null) {
+            return false;
+        }
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        return s != null && s.contains2D(x, y);
+    }
+
+    /** 返回指定据点领地的代表锚点格坐标 {@code {x, y}}（取最大连通子矩形中心），若据点不存在或无领地返回 {@code null}。 */
+    public static int[] getSettlementAnchorTile(String settlementId) {
+        if (settlementId == null) {
+            return null;
+        }
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null || s.rects.isEmpty()) {
+            return null;
+        }
+        int[] best = s.rects.get(0);
+        long bestArea = (long) best[2] * best[3];
+        for (int i = 1, n = s.rects.size(); i < n; i++) {
+            int[] r = s.rects.get(i);
+            long area = (long) r[2] * r[3];
+            if (area > bestArea) {
+                bestArea = area;
+                best = r;
+            }
+        }
+        return new int[]{best[0] + best[2] / 2, best[1] + best[3] / 2};
     }
 
     public static double typeCount(String settlementId, String fullType) {
@@ -730,6 +762,7 @@ public final class WarehouseFastIndex {
         s.rects.addAll(TerritoryContour.normalizeDisjoint(rawRects));
         s.recomputeBounds();
         TerritoryRenderer.syncSettlement(settlementId, s.rects);
+        SmartObjectRegistry.trimOutsideRects(s.settlementId, s.rects);
 
         boolean changed = s.revision == 0;
 
@@ -917,6 +950,7 @@ public final class WarehouseFastIndex {
      * 将被回收的据点容器切换为 {@code OFFLINE_CACHED} 保留最后已知快照并停掉对应节拍器。
      */
     public static void onChunkUnloaded(IsoChunk chunk) {
+        SmartObjectRegistry.onChunkUnloaded(chunk);
         processChunkSquares(chunk, false);
     }
 
@@ -979,6 +1013,7 @@ public final class WarehouseFastIndex {
      * 区块卸载处理（僵毁专属修正：保留 {@code OFFLINE_CACHED} 最后已知快照而非清零，同时停掉该格轮询节拍器）。
      */
     static boolean markSquareUnloadedInternal(SettlementState s, int x, int y, int z) {
+        SmartObjectRegistry.unregisterSquare(s.settlementId, x, y, z);
         long sqKey = ContainerDirtyQueue.packCoord(x, y, z);
         sleepAndRemoveTracker(sqKey);
         Set<String> ids = s.squareIndex.get(sqKey);
@@ -1131,6 +1166,7 @@ public final class WarehouseFastIndex {
             s.squareIndex.put(sqKey, seenIds);
             registerOrWakeTracker(sqKey, s.settlementId, urgentWake);
         }
+        SmartObjectRegistry.onSquareScanned(s.settlementId, sq);
         return changed;
     }
 

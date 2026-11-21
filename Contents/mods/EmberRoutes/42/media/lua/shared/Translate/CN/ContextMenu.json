@@ -31,5 +31,19 @@
     "ContextMenu_ER_NpcInv_TakeToPlayer": "拿取到我的背包",
     "ContextMenu_ER_M3_SitHereFmt": "令最近 NPC 坐这里 [%1]",
     "ContextMenu_ER_M3_SleepBedFmt": "令最近 NPC 睡这张床 [%1]",
-    "ContextMenu_ER_M3_StandUpAll": "令全部 NPC 起身"
+    "ContextMenu_ER_M3_StandUpAll": "令全部 NPC 起身",
+    "ContextMenu_ER_M3_SetBrainSettlementFmt": "大脑切换为据点自治 (同时停随) [%1]",
+    "ContextMenu_ER_M3_AssignCurSettlementFmt": "指派到当前据点 [%1] 并切据点大脑 [%2]",
+    "ContextMenu_ER_M3_AssignSettlementSubFmt": "指派所属据点并切据点大脑 [%1]",
+    "ContextMenu_ER_M3_AssignSettlementItemFmt": "%1 (%2)",
+    "ContextMenu_ER_M3_UnassignSettlementFmt": "解除据点指派 [%1]",
+    "ContextMenu_ER_M3_SetBrainSquadFmt": "大脑切换为征召随从 (SQUAD) [%1]",
+    "ContextMenu_ER_M3_InspectBrainsAndSlots": "打印全部 NPC 状态树与床/椅 SmartSlot",
+    "ContextMenu_ER_M3_NeedsDebugFmt": "调试 NPC 生理状态 [%1]",
+    "ContextMenu_ER_M3_NeedKit": "发放生存补给 (苹果 + 满水瓶 + 绷带x2)",
+    "ContextMenu_ER_M3_NeedHunger": "设为饥饿 (Hunger = 0.70)",
+    "ContextMenu_ER_M3_NeedThirst": "设为口渴 (Thirst = 0.70)",
+    "ContextMenu_ER_M3_NeedFatigue": "设为极困 (Fatigue = 0.85)",
+    "ContextMenu_ER_M3_NeedBleeding": "左前臂划伤流血 (无感染)",
+    "ContextMenu_ER_M3_NeedRestore": "重置全部生理与健康状态"
 }

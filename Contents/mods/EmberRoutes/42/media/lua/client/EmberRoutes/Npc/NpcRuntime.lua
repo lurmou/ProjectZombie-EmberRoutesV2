@@ -8,6 +8,12 @@ local function tickNpcs()
     end
 end
 
+local function tickNpcBrains(frameTick, dtSim, simTime)
+    if EmberRoutesJava and EmberRoutesJava.tickNpcBrains then
+        EmberRoutesJava.tickNpcBrains(frameTick or 0, dtSim or 0.0, simTime or 0.0)
+    end
+end
+
 local function loadSavedNpcs()
     if EmberRoutesJava then
         return EmberRoutesJava.loadNpcsFromSave()
@@ -148,13 +154,53 @@ function NpcRuntime.getPostureState(npcId)
     return EmberRoutesJava.getNpcPostureState(npcId) or "MISSING"
 end
 
+function NpcRuntime.setBrainMode(npcId, modeName)
+    if not EmberRoutesJava or not EmberRoutesJava.setNpcBrainMode or not npcId or not modeName then return false end
+    return EmberRoutesJava.setNpcBrainMode(npcId, modeName) == true
+end
+
+function NpcRuntime.getBrainMode(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.getNpcBrainMode or not npcId then return "MISSING" end
+    return EmberRoutesJava.getNpcBrainMode(npcId) or "MISSING"
+end
+
+function NpcRuntime.getBrainStatePath(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.getNpcBrainStatePath or not npcId then return "MISSING" end
+    return EmberRoutesJava.getNpcBrainStatePath(npcId) or "MISSING"
+end
+
+function NpcRuntime.getSmartSlotSummary(settlementId)
+    if not EmberRoutesJava or not EmberRoutesJava.getSmartSlotSummary then return "none" end
+    return EmberRoutesJava.getSmartSlotSummary(settlementId) or "none"
+end
+
+function NpcRuntime.debugApplyNeed(npcId, needKind)
+    if not EmberRoutesJava or not EmberRoutesJava.debugApplyNpcNeed or not npcId or not needKind then
+        return "UNAVAILABLE"
+    end
+    return EmberRoutesJava.debugApplyNpcNeed(npcId, needKind) or "UNAVAILABLE"
+end
+
+function NpcRuntime.assignToSettlement(npcId, settlementId)
+    if not EmberRoutesJava or not EmberRoutesJava.assignNpcToSettlement or not npcId then return false end
+    return EmberRoutesJava.assignNpcToSettlement(npcId, settlementId) == true
+end
+
+function NpcRuntime.getAssignedSettlement(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.getNpcAssignedSettlement or not npcId then return "" end
+    return EmberRoutesJava.getNpcAssignedSettlement(npcId) or ""
+end
+
 Kernel.exposeApi("npc", NpcRuntime)
 Kernel.registerModule({
     id = "npc-runtime",
     onWorldReady = function()
         loadSavedNpcs()
     end,
-    tick = { stage = "PHYSICS_MOVE", fn = tickNpcs },
+    ticks = {
+        { stage = "PHYSICS_MOVE", fn = tickNpcs },
+        { stage = "AGENT_BRAIN", fn = tickNpcBrains },
+    },
 })
 
 return NpcRuntime

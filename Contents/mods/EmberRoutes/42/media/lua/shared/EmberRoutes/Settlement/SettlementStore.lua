@@ -198,6 +198,9 @@ function SettlementStore.deleteSettlement(settlementId)
 
     if EmberRoutesJava then
         EmberRoutesJava.invalidateSettlementWarehouse(s.id)
+        if EmberRoutesJava.clearSettlementNpcAssignments then
+            EmberRoutesJava.clearSettlementNpcAssignments(s.id)
+        end
     end
 
     root.settlements[settlementId] = nil

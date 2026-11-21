@@ -43,6 +43,14 @@ class ArchitectureBoundaryTest {
     }
 
     @Test
+    void warehouseDomainDoesNotDependOnNpcOrBridgeOrPatches() {
+	JavaClasses classes = new ClassFileImporter().importPath(Path.of(System.getProperty("emberroutes.mainClasses")));
+	noClasses().that().resideInAPackage("emberroutes.warehouse..")
+		.should().dependOnClassesThat().resideInAPackage("emberroutes.npc..")
+		.check(classes);
+    }
+
+    @Test
     void directKahluaDependencyIsDetected() {
 	JavaClasses classes = new ClassFileImporter().importClasses(
 		architecturefixture.Patch_ItemContainer.class,

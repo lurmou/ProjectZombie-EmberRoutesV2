@@ -29,7 +29,8 @@ description: 原版 B42 引擎全链路前置通读铁律：固化本地完整 J
   - *示例（角色每帧生命周期）*：`preupdate()` -> `update()` -> `updateInternal1()` -> `updateInternal2()`（输入冲刷、`MoveVars`、`AIComponent.postUpdatePlayer`）-> `IsoLivingCharacter.update()` -> `IsoGameCharacter.update()`（`updateMovementRates` / `calculateWalkSpeed` -> `applyDeltas` / `getTurnDelta` -> `updateAnimPlayer` -> `doDeferredMovement` / `getDeferredMovement`）-> `postupdate()`。
 - **未读完全链路不得下结论或动手写代码**：凡未核查原版同场景（如真玩家键鼠/右键“移动至”/原版 TimedAction）完整执行链的方案，一律视为准备不足。
 
-## 3. 原生过渡与引擎原语优先（严禁凭猜测覆写原版物理参数）
+## 3. 尊重原版玩法、复用原版链路与机制（严禁自作聪明抄近道）
 
-- 当需要实现角色转向过渡、步幅变化、动作衔接或碰撞推出时，**必须先在 `zombie反编译源码` 与 `media/AnimSets` 中查清真玩家是如何完成该过渡的**（例如步行态直接复用 `super.getTurnDelta() = 1.0f` 与 `AnimationPlayer.interpolateBodyAngle/Twist`，无级调速复用 `WalkSpeed` 2D 混合树）。
-- 严禁在未核对原版默认值与生效条件（如 `isRunning()` 门控）的情况下，凭主观感觉塞入魔法倍率覆盖原版参数，把用户当成多轮实机排错测试员。
+- **100% 复用原版链路与原版逻辑**：当需要实现角色转向过渡、步幅变化、动作衔接、吃喝医疗、手部模型挂载、物品掏取流转或碰撞推出时，**必须先在 `zombie反编译源码`、`media/lua`、`media/AnimSets` 以及 V1 / `ProjectRemnants` 参考实现中查清真玩家是如何完成该全流程的**，并直接利用原版机制（例如：步行态复用 `super.getTurnDelta() = 1.0f` 与 `AnimationPlayer.interpolateBodyAngle/Twist`；吃喝/包扎必须遵循原版“先从随身背包转移至主物品栏 -> 挂载原版 `CharacterTimedActions.BaseAction` 驱动 `ModelManager` 手模与音效 -> 剩余物品放回原背包”的完整原版玩法）。
+- **严禁自作聪明阉割原版步骤**：绝不允许为了省事跳过原版玩家必经的玩法约束或渲染挂载步骤，更不允许在未核对原版默认值与生效条件的情况下凭主观感觉塞入魔法倍率或假动作壳。
+- **探查无捷径时必须先详细讨论**：若已全面探查完原版所有可用类、方法与状态机分支，发现确实存在硬限制、无现成捷径可用（例如非玩家槽位在某处会触发硬编码越界，必须做定制绕行），**必须先停止编码，向用户详细列出探查过的原版代码位置与阻塞原因，与用户充分讨论并达成一致后，才允许落地定制方案**。

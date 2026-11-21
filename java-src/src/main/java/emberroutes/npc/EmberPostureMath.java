@@ -1,5 +1,6 @@
 package emberroutes.npc;
 
+import emberroutes.warehouse.FurnitureClassifier;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -20,31 +21,6 @@ public final class EmberPostureMath {
     public static final float BED_LYING_UNDERSIDE_WORLD_Y = 0.44F;
     public static final float SEATING_BASE_OFFSET_WORLD_Y = 0.35F;
     public static final float MAX_BED_RENDER_LIFT_Z = 0.45F;
-
-    private static final String[] SEATING_ONLY_TILESET_PREFIXES = {
-        "furniture_seating_",
-        "location_restaurant_",
-        "location_shop_mall_",
-        "location_community_church_",
-        "location_entertainment_theatre_",
-        "location_services_beauty_",
-        "location_community_park_",
-        "location_community_police_",
-        "fixtures_bathroom_"
-    };
-
-    private static final String[] SEATING_ONLY_CUSTOM_NAME_TOKENS = {
-        "chair", "stool", "bench", "couch", "sofa", "seat",
-        "pew", "booth", "toilet", "armchair", "loveseat", "ottoman", "recliner"
-    };
-
-    private static final String[] BED_FRIENDLY_TILESET_PREFIXES = {
-        "furniture_bedding_", "camping_"
-    };
-
-    private static final String[] BED_FRIENDLY_CUSTOM_NAME_TOKENS = {
-        "bed", "cot", "bunk", "mattress", "tent", "sleeping"
-    };
 
     public enum BedFacing {
         N(0, -1),
@@ -145,38 +121,8 @@ public final class EmberPostureMath {
      */
     public static boolean isRealBedObject(
             String spriteOrTileset, String customName, BedFacing facing, int gridW, int gridH) {
-        String tile = spriteOrTileset != null ? spriteOrTileset.trim().toLowerCase(Locale.ROOT) : "";
-        String cname = customName != null ? customName.trim().toLowerCase(Locale.ROOT) : "";
-
-        for (String prefix : SEATING_ONLY_TILESET_PREFIXES) {
-            if (tile.startsWith(prefix)) {
-                return false;
-            }
-        }
-        for (String token : SEATING_ONLY_CUSTOM_NAME_TOKENS) {
-            if (cname.contains(token)) {
-                return false;
-            }
-        }
-
-        int safeW = Math.max(1, gridW);
-        int safeH = Math.max(1, gridH);
-        boolean multiTile = safeW > 1 || safeH > 1;
-        boolean alignedWithFacing = !multiTile || facing == null
-                || ((facing == BedFacing.N || facing == BedFacing.S) ? safeH >= 2 : safeW >= 2);
-
-        for (String prefix : BED_FRIENDLY_TILESET_PREFIXES) {
-            if (tile.startsWith(prefix)) {
-                return alignedWithFacing;
-            }
-        }
-        for (String token : BED_FRIENDLY_CUSTOM_NAME_TOKENS) {
-            if (cname.contains(token)) {
-                return alignedWithFacing;
-            }
-        }
-
-        return multiTile && alignedWithFacing;
+        return FurnitureClassifier.isRealBedObject(
+                spriteOrTileset, customName, facing != null ? facing.name() : null, gridW, gridH);
     }
 
     /** 标准三次平滑步进（[0, 1] 钳位），用于上下床动画期间的温和补位。 */
@@ -423,5 +369,106 @@ public final class EmberPostureMath {
                     footAppX, footAppY, footAdjX, footAdjY, footTargetX, footTargetY,
                     beforeDir, lieDir, footOnBedDir, false));
         }
+    }
+
+    // ================= 座椅休闲阅读抬眼注视数学内核（零 zombie.* 依赖） =================
+
+    /** 触发检测最大水平距离（格）。 */
+    public static final float GLANCE_TRIGGER_MAX_DIST = 4.5F;
+    /** 触发检测最小水平距离（防重叠奇点）。 */
+    public static final float GLANCE_TRIGGER_MIN_DIST = 0.35F;
+    /** 保持在场状态的迟滞最大距离（格）。 */
+    public static final float GLANCE_PRESENCE_HYSTERESIS_DIST = 5.5F;
+    /** 座椅前方可视扇区最小点积（cos 75.5° ≈ 0.25，杜绝背后/正后侧触发）。 */
+    public static final float GLANCE_TRIGGER_MIN_DOT = 0.25F;
+    /** 保持在场状态的迟滞最小点积（cos 84° ≈ 0.10）。 */
+    public static final float GLANCE_PRESENCE_HYSTERESIS_DOT = 0.10F;
+
+    /** 样片阶段 1：抬眼转头时长（Frames 7..21 @ 24fps ≈ 0.60s）。 */
+    public static final double GLANCE_RAISE_DURATION_SEC = 0.60;
+    /** 样片阶段 2：停半拍注视时长（Frames 21..26 @ 24fps ≈ 0.25s）。 */
+    public static final double GLANCE_HOLD_DURATION_SEC = 0.25;
+    /** 样片阶段 3：低头收回时长（Frames 26..43 @ 24fps ≈ 0.70s）。 */
+    public static final double GLANCE_RETURN_DURATION_SEC = 0.70;
+    /** 单次抬眼总包络时长（1.55s）。 */
+    public static final double GLANCE_TOTAL_DURATION_SEC =
+            GLANCE_RAISE_DURATION_SEC + GLANCE_HOLD_DURATION_SEC + GLANCE_RETURN_DURATION_SEC;
+
+    /**
+     * 计算三段式注视包络权重 {@code [0.0, 1.0]}：
+     * <ul>
+     *   <li>{@code 0.00s ~ 0.60s}：smoothstep 抬眼升至 {@code 1.0}；</li>
+     *   <li>{@code 0.60s ~ 0.85s}：停半拍保持 {@code 1.0}；</li>
+     *   <li>{@code 0.85s ~ 1.55s}：smoothstep 收回降至 {@code 0.0}。</li>
+     * </ul>
+     */
+    public static float computeGlanceEnvelope(double elapsedSec) {
+        if (elapsedSec <= 0.0 || elapsedSec >= GLANCE_TOTAL_DURATION_SEC) {
+            return 0.0F;
+        }
+        if (elapsedSec < GLANCE_RAISE_DURATION_SEC) {
+            float u = (float) (elapsedSec / GLANCE_RAISE_DURATION_SEC);
+            return smoothstep01(u);
+        }
+        if (elapsedSec <= GLANCE_RAISE_DURATION_SEC + GLANCE_HOLD_DURATION_SEC) {
+            return 1.0F;
+        }
+        float u = (float) ((elapsedSec - GLANCE_RAISE_DURATION_SEC - GLANCE_HOLD_DURATION_SEC)
+                / GLANCE_RETURN_DURATION_SEC);
+        return 1.0F - smoothstep01(u);
+    }
+
+    /**
+     * 校验玩家是否处于同层、距离 {@code [minDist, maxDist]} 与座椅前方视野锥 {@code dot >= minDot} 内：
+     * <ul>
+     *   <li>若不满足任一条件，返回 {@link Float#NaN}；</li>
+     *   <li>若满足，返回带符号水平偏角（弧度）：<b>左侧为负（对应 {@code Bob_LookLeft} {@code -1.0}），右侧为正（对应 {@code Bob_LookRight} {@code +1.0}）</b>。</li>
+     * </ul>
+     */
+    public static float computeGlanceSignedAngleIfInFrontCone(
+            float npcX, float npcY, int npcLevel,
+            float forwardX, float forwardY,
+            float playerX, float playerY, int playerLevel,
+            float minDist, float maxDist, float minDot) {
+        if (npcLevel != playerLevel) {
+            return Float.NaN;
+        }
+        float fLen = (float) Math.hypot(forwardX, forwardY);
+        if (fLen < 1.0E-5F) {
+            return Float.NaN;
+        }
+        float fx = forwardX / fLen;
+        float fy = forwardY / fLen;
+
+        float dx = playerX - npcX;
+        float dy = playerY - npcY;
+        float dist = (float) Math.hypot(dx, dy);
+        if (dist < minDist || dist > maxDist) {
+            return Float.NaN;
+        }
+        float ux = dx / dist;
+        float uy = dy / dist;
+
+        float dot = fx * ux + fy * uy;
+        if (dot < minDot) {
+            return Float.NaN;
+        }
+
+        // PZ 等轴测屏幕坐标系（+X 向右下，+Y 向左下）：
+        // cross = fx * uy - fy * ux > 0 代表目标在角色朝向右侧（顺时针），< 0 代表在角色朝向左侧（逆时针）。
+        float cross = fx * uy - fy * ux;
+        return (float) Math.atan2(cross, dot);
+    }
+
+    /**
+     * 将带符号水平偏角映射为 {@code LookAround} 的 {@code lookHorizontal} 标量 {@code [-1.0, 1.0]}。
+     */
+    public static float computeGlanceNormalizedHorizontal(float signedAngleRad, float maxAngleRad) {
+        float denom = Math.max(0.20F, maxAngleRad > 0.0F ? maxAngleRad : 0.348F);
+        float raw = Math.max(-1.0F, Math.min(1.0F, signedAngleRad / denom));
+        if (Math.abs(raw) < 0.22F && Math.abs(signedAngleRad) > 0.02F) {
+            raw = Math.copySign(0.22F, signedAngleRad);
+        }
+        return raw;
     }
 }

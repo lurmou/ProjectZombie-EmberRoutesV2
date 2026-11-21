@@ -31,5 +31,19 @@
     "ContextMenu_ER_NpcInv_TakeToPlayer": "Take to My Inventory",
     "ContextMenu_ER_M3_SitHereFmt": "Make Nearest NPC Sit Here [%1]",
     "ContextMenu_ER_M3_SleepBedFmt": "Make Nearest NPC Sleep on Bed [%1]",
-    "ContextMenu_ER_M3_StandUpAll": "Make All NPCs Stand Up"
+    "ContextMenu_ER_M3_StandUpAll": "Make All NPCs Stand Up",
+    "ContextMenu_ER_M3_SetBrainSettlementFmt": "Switch Brain to SETTLEMENT (Stop Follow) [%1]",
+    "ContextMenu_ER_M3_AssignCurSettlementFmt": "Assign to [%1] & Switch to SETTLEMENT [%2]",
+    "ContextMenu_ER_M3_AssignSettlementSubFmt": "Assign Home Settlement & Switch Brain [%1]",
+    "ContextMenu_ER_M3_AssignSettlementItemFmt": "%1 (%2)",
+    "ContextMenu_ER_M3_UnassignSettlementFmt": "Clear Settlement Assignment [%1]",
+    "ContextMenu_ER_M3_SetBrainSquadFmt": "Switch Brain to SQUAD [%1]",
+    "ContextMenu_ER_M3_InspectBrainsAndSlots": "Inspect NPC StateTree Paths & SmartSlots",
+    "ContextMenu_ER_M3_NeedsDebugFmt": "Debug NPC Needs [%1]",
+    "ContextMenu_ER_M3_NeedKit": "Give Survival Kit (Apple + Water + Bandage x2)",
+    "ContextMenu_ER_M3_NeedHunger": "Set Hungry (Hunger = 0.70)",
+    "ContextMenu_ER_M3_NeedThirst": "Set Thirsty (Thirst = 0.70)",
+    "ContextMenu_ER_M3_NeedFatigue": "Set Exhausted (Fatigue = 0.85)",
+    "ContextMenu_ER_M3_NeedBleeding": "Add Bleeding Scratch (ForeArm_L, Safe)",
+    "ContextMenu_ER_M3_NeedRestore": "Restore All Needs & Full Health"
 }
