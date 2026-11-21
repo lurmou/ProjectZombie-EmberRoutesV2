@@ -3,6 +3,7 @@ package emberroutes.npc.brain;
 import emberroutes.npc.IsoNPC;
 import java.util.List;
 import java.util.function.Predicate;
+import zombie.characters.CharacterStat;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
 import zombie.inventory.types.InventoryContainer;
@@ -10,7 +11,7 @@ import zombie.inventory.types.InventoryContainer;
 /**
  * M3 纯 Java 确定性动作器基类（视觉壳 + 严格倍速对齐计时结算）：
  * <ul>
- *   <li>仅向引擎动画层写入 {@code PerformingAction} / {@code IsPerformingAnAction}（可选 {@code ReadType}），绝不构造原版 UI 读条或玩家槽 {@code TimedAction}；</li>
+ *   <li>仅向引擎动画层写入 {@code PerformingAction} / {@code IsPerformingAnAction}（可选 {@code FoodType / BandageType / ReadType}），绝不构造原版 UI 读条或玩家槽 {@code TimedAction}；</li>
  *   <li>打断时立即清除全部动作动画变量，并由所属 {@link StateScope} 自动清理其余租约/临时道具。</li>
  * </ul>
  */
@@ -27,8 +28,8 @@ public abstract class BaseAction {
 
     private final double durationSimSec;
     private final String performingActionAnim;
-    private final String extraVarKey;
-    private final String extraVarValue;
+    private String extraVarKey;
+    private String extraVarValue;
 
     private ActionStatus status = ActionStatus.IDLE;
     private double elapsedSimSec;
@@ -64,14 +65,25 @@ public abstract class BaseAction {
         return durationSimSec;
     }
 
+    public final float getProgress01() {
+        return (float) Math.min(1.0, Math.max(0.0, elapsedSimSec / durationSimSec));
+    }
+
+    protected final void setExtraAnimVar(String key, String value) {
+        this.extraVarKey = key;
+        this.extraVarValue = value;
+    }
+
     public final void start(BrainContext ctx) {
         this.elapsedSimSec = 0.0;
         this.status = ActionStatus.RUNNING;
         if (ctx != null) {
             ctx.activeAction = this;
-            applyAnimVars(ctx.npc);
         }
         onStart(ctx);
+        if (ctx != null && status == ActionStatus.RUNNING) {
+            applyAnimVars(ctx.npc);
+        }
     }
 
     public final void tick(BrainContext ctx, double dtSim) {
@@ -87,6 +99,7 @@ public abstract class BaseAction {
             } finally {
                 if (ctx != null) {
                     clearAnimVars(ctx.npc);
+                    refreshContextStats(ctx);
                     if (ctx.activeAction == this) {
                         ctx.activeAction = null;
                     }
@@ -100,14 +113,18 @@ public abstract class BaseAction {
         if (status != ActionStatus.RUNNING && status != ActionStatus.IDLE) {
             return;
         }
-        if (ctx != null) {
-            clearAnimVars(ctx.npc);
-            if (ctx.activeAction == this) {
-                ctx.activeAction = null;
+        try {
+            onInterrupt(ctx, reason);
+        } finally {
+            if (ctx != null) {
+                clearAnimVars(ctx.npc);
+                refreshContextStats(ctx);
+                if (ctx.activeAction == this) {
+                    ctx.activeAction = null;
+                }
             }
+            this.status = ActionStatus.INTERRUPTED;
         }
-        onInterrupt(ctx, reason);
-        this.status = ActionStatus.INTERRUPTED;
     }
 
     protected void onStart(BrainContext ctx) {}
@@ -117,6 +134,15 @@ public abstract class BaseAction {
     protected abstract boolean onComplete(BrainContext ctx);
 
     protected void onInterrupt(BrainContext ctx, String reason) {}
+
+    private static void refreshContextStats(BrainContext ctx) {
+        if (ctx != null && ctx.npc != null && ctx.npc.getStats() != null) {
+            ctx.hunger = ctx.npc.getStats().get(CharacterStat.HUNGER);
+            ctx.thirst = ctx.npc.getStats().get(CharacterStat.THIRST);
+            ctx.fatigue = ctx.npc.getStats().get(CharacterStat.FATIGUE);
+            ctx.endurance = ctx.npc.getStats().get(CharacterStat.ENDURANCE);
+        }
+    }
 
     private void applyAnimVars(IsoNPC npc) {
         if (npc == null || performingActionAnim == null || performingActionAnim.isEmpty()) {

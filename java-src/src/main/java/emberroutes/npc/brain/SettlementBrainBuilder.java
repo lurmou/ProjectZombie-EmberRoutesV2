@@ -214,7 +214,7 @@ public final class SettlementBrainBuilder {
             if (ctx.npc == null) {
                 return false;
             }
-            if (actionStarted && action != null && !action.isRunning()) {
+            if (actionStarted && action != null && action.getStatus() == BaseAction.ActionStatus.FAILED) {
                 return false;
             }
             return continueGuard.test(ctx);
@@ -254,6 +254,13 @@ public final class SettlementBrainBuilder {
             }
             if (action.isRunning()) {
                 action.tick(ctx, dtSim);
+            }
+            if (actionStarted
+                    && action != null
+                    && action.getStatus() == BaseAction.ActionStatus.COMPLETED
+                    && continueGuard.test(ctx)) {
+                this.action = factory.get();
+                this.action.start(ctx);
             }
         }
     }

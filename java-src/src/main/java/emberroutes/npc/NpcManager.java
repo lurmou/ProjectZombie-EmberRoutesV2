@@ -637,19 +637,20 @@ public final class NpcManager {
             case "SURVIVAL_KIT" -> {
                 ItemContainer inv = npc.getInventory();
                 if (inv != null) {
-                    InventoryItem apple = createFirstAvailable("Base.Apple", "Base.TinnedBeans");
-                    if (apple != null) inv.AddItem(apple);
-                    InventoryItem bottle = createFirstAvailable("Base.WaterBottle", "Base.PopBottle");
-                    if (bottle != null) {
-                        if (bottle.hasComponent(ComponentType.FluidContainer)) {
-                            FluidContainer fc = bottle.getFluidContainer();
-                            if (fc != null && fc.isEmpty()) {
-                                fc.addFluid(Fluid.Water, fc.getCapacity());
-                            }
-                        }
-                        inv.AddItem(bottle);
-                    }
                     for (int i = 0; i < 2; i++) {
+                        InventoryItem apple = createFirstAvailable("Base.Apple", "Base.TinnedBeans");
+                        if (apple != null) inv.AddItem(apple);
+                        InventoryItem bottle = createFirstAvailable("Base.WaterBottle", "Base.PopBottle");
+                        if (bottle != null) {
+                            if (bottle.hasComponent(ComponentType.FluidContainer)) {
+                                FluidContainer fc = bottle.getFluidContainer();
+                                if (fc != null) {
+                                    fc.Empty();
+                                    fc.addFluid(Fluid.Water, fc.getCapacity());
+                                }
+                            }
+                            inv.AddItem(bottle);
+                        }
                         InventoryItem bandage = createFirstAvailable("Base.Bandage", "Base.RippedSheets");
                         if (bandage != null) inv.AddItem(bandage);
                     }
