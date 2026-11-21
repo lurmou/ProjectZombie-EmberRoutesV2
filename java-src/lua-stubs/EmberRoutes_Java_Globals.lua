@@ -331,11 +331,81 @@ function EmberRoutesJava.autoConfigureContainer(obj) end
 ---@return string
 function EmberRoutesJava.submitDeliveryOrder(settlementId, playerIndex, fullType, count) end
 
+---@param settlementId string
+---@param playerIndex number
+---@param fullType string
+---@param count number
+---@param targetContainerId string
+---@return string
+function EmberRoutesJava.submitDeliveryOrderToBox(settlementId, playerIndex, fullType, count, targetContainerId) end
+
 ---@param orderId string
 ---@return boolean
 function EmberRoutesJava.cancelDeliveryOrder(orderId) end
 
 ---@param settlementId string
+---@return table
+function EmberRoutesJava.listDeliveryOrders(settlementId) end
+
+---@param settlementId string
 ---@return string
 function EmberRoutesJava.getLogisticsSummary(settlementId) end
+
+---@param settlementId string
+---@return table
+function EmberRoutesJava.listSettlementContainers(settlementId) end
+
+---@param obj any
+---@return string
+function EmberRoutesJava.resolveObjectContainerId(obj) end
+
+---@param obj any
+---@return table
+function EmberRoutesJava.getContainerRule(obj) end
+
+---@param obj any
+---@param ruleTable table
+---@return boolean
+function EmberRoutesJava.setContainerRule(obj, ruleTable) end
+
+---@param settlementId string
+---@param containerId string
+---@return table
+function EmberRoutesJava.getContainerRuleById(settlementId, containerId) end
+
+---@param settlementId string
+---@param containerId string
+---@param ruleTable table
+---@return boolean
+function EmberRoutesJava.setContainerRuleById(settlementId, containerId, ruleTable) end
+
+---@param settlementId string
+---@param containerId string
+---@param makePrivate boolean
+---@return boolean
+function EmberRoutesJava.setContainerPrivateById(settlementId, containerId, makePrivate) end
+
+---@param settlementId string
+---@param containerId string
+---@return string
+function EmberRoutesJava.autoConfigureContainerById(settlementId, containerId) end
+
+---@param obj any
+---@return table
+function EmberRoutesJava.getContainerSampleItems(obj) end
+
+---@param settlementId string
+---@param containerId string
+---@return table
+function EmberRoutesJava.getContainerSampleItemsById(settlementId, containerId) end
+
+---@param x number
+---@param y number
+---@param z number
+function EmberRoutesJava.setContainerHighlight(x, y, z) end
+
+function EmberRoutesJava.clearContainerHighlight() end
+
+---@return table
+function EmberRoutesJava.listNpcRoster() end
 

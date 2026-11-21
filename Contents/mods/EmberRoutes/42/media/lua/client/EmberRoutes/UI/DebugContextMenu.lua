@@ -5,7 +5,8 @@ local NpcRuntime = require "EmberRoutes/Npc/NpcRuntime"
 local NpcLocomotionPort = require "EmberRoutes/Npc/NpcLocomotionPort"
 local ZoneOverlay = require "EmberRoutes/UI/ZoneOverlay"
 local ZoneEditorPanel = require "EmberRoutes/UI/ZoneEditorPanel"
-local DebugWarehousePanel = require "EmberRoutes/UI/DebugWarehousePanel"
+local SettlementControlPanel = require "EmberRoutes/UI/SettlementControlPanel"
+local ContainerConfigWizard = require "EmberRoutes/UI/ContainerConfigWizard"
 
 local CONTAINER_ROLES = {
     { id = "STORAGE", key = "ContextMenu_ER_M3_Role_STORAGE" },
@@ -13,7 +14,7 @@ local CONTAINER_ROLES = {
     { id = "PICKUP_OUT", key = "ContextMenu_ER_M3_Role_PICKUP_OUT" },
 }
 
-local function appendSquareContainerPrivacyOptions(sub, context, actor, gx, gy, z)
+local function appendSquareContainerPrivacyOptions(sub, context, actor, gx, gy, z, settlementId)
     local cell = getCell and getCell()
     local sq = cell and cell:getGridSquare(gx, gy, z)
     if not sq then return end
@@ -49,6 +50,13 @@ local function appendSquareContainerPrivacyOptions(sub, context, actor, gx, gy, 
             local roleOpt = sub:addOption(
                 getText("ContextMenu_ER_M3_SmartZoneMenuFmt", labelName, curRole), nil, nil)
             context:addSubMenu(roleOpt, roleSub)
+
+            roleSub:addOption(getText("ContextMenu_ER_OpenContainerWizard"), actor, function()
+                ContainerConfigWizard.openForObject(targetObj, settlementId, function()
+                    local activeCtrl = SettlementControlPanel.getActive()
+                    if activeCtrl then activeCtrl:forceRefresh() end
+                end)
+            end)
 
             for ri = 1, #CONTAINER_ROLES do
                 local roleEntry = CONTAINER_ROLES[ri]
@@ -384,28 +392,28 @@ local function onFillWorldMenu(playerIndex, context, worldobjects, test)
     local rootOpt = context:addOption(getText("ContextMenu_ER_Root"), nil, nil)
     context:addSubMenu(rootOpt, sub)
 
+    local settlement = SettlementStore.findSettlementAt(gx, gy)
     sub:addOption(getText("ContextMenu_ER_OpenMonitor"), actor, function()
-        DebugWarehousePanel.open()
+        SettlementControlPanel.open(settlement and settlement.id or nil)
     end)
 
     sub:addOption(getText("ContextMenu_ER_NewSettlementEditor"), actor, function()
         ZoneEditorPanel.open(nil, function(saved)
-            DebugWarehousePanel.open(saved.id)
+            SettlementControlPanel.open(saved.id)
         end)
     end)
 
-    local settlement = SettlementStore.findSettlementAt(gx, gy)
     if settlement then
         sub:addOption(
             getText("ContextMenu_ER_EditSettlementFmt", settlement.name),
             actor,
             function()
                 ZoneEditorPanel.open(settlement, function(saved)
-                    DebugWarehousePanel.open(saved.id)
+                    SettlementControlPanel.open(saved.id)
                 end)
             end
         )
-        appendSquareContainerPrivacyOptions(sub, context, actor, gx, gy, z)
+        appendSquareContainerPrivacyOptions(sub, context, actor, gx, gy, z, settlement.id)
         if EmberRoutesJava.getLogisticsSummary then
             sub:addOption(getText("ContextMenu_ER_M3_InspectLogisticsFmt", settlement.name), actor, function()
                 print("[EmberRoutes][M3] Logistics " .. tostring(EmberRoutesJava.getLogisticsSummary(settlement.id)))

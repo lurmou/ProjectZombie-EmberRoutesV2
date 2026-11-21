@@ -106,6 +106,10 @@ public final class TerritoryRenderer {
     private static volatile RenderShape[] savedShapesSnapshot = new RenderShape[0];
     private static volatile boolean overlayVisible = true;
     private static volatile EditorSnapshot activeEditor = null;
+    private static volatile boolean hasContainerHighlight = false;
+    private static volatile int highlightX = 0;
+    private static volatile int highlightY = 0;
+    private static volatile int highlightZ = 0;
 
     // SpriteRenderer 最多三缓冲并发，4 槽环形 Drawer 完全无锁且零每帧对象分配
     private static final GroundFillDrawer[] DRAWER_RING = new GroundFillDrawer[]{
@@ -121,6 +125,18 @@ public final class TerritoryRenderer {
         savedShapesSnapshot = new RenderShape[0];
         activeEditor = null;
         overlayVisible = true;
+        clearContainerHighlight();
+    }
+
+    public static void setContainerHighlight(int x, int y, int z) {
+        highlightX = x;
+        highlightY = y;
+        highlightZ = z;
+        hasContainerHighlight = true;
+    }
+
+    public static void clearContainerHighlight() {
+        hasContainerHighlight = false;
     }
 
     public static void setOverlayVisible(boolean visible) {
@@ -197,7 +213,8 @@ public final class TerritoryRenderer {
 
     public static void renderGroundFills() {
         EditorSnapshot editor = activeEditor;
-        if (editor == null) return;
+        boolean showHighlight = hasContainerHighlight;
+        if (editor == null && !showHighlight) return;
         if (IsoWorld.instance == null || IsoWorld.instance.currentCell == null || SpriteRenderer.instance == null) return;
 
         int playerIndex = IsoCamera.frameState.playerIndex;
@@ -216,32 +233,39 @@ public final class TerritoryRenderer {
         GroundFillDrawer drawer = DRAWER_RING[(drawerCursor++) & 3];
         drawer.reset(pz);
 
-        // 其他已存据点淡金色底色提示（防止误重叠）
-        RenderShape[] saved = savedShapesSnapshot;
-        for (int i = 0; i < saved.length; i++) {
-            RenderShape s = saved[i];
-            if (s.settlementId.equals(editor.editingSettlementId)) continue;
-            if (!s.intersectsChunkMap(minX, minY, maxX, maxY)) continue;
-            drawer.appendShape(s.fillQuads, minX, minY, maxX, maxY, 0.95f, 0.72f, 0.22f, 0.12f);
-        }
-
-        // 当前不规则领地实时布尔预览底色（翠绿半透明，无任何内部分割缝）
-        if (editor.previewShape.intersectsChunkMap(minX, minY, maxX, maxY)) {
-            drawer.appendShape(editor.previewShape.fillQuads, minX, minY, maxX, maxY, 0.18f, 0.85f, 0.54f, 0.22f);
-        }
-
-        // 擦除模式下额外给橡皮擦拉框铺淡珊瑚红提示；悬停时高亮鼠标下 1x1 单格
-        if (editor.hasDrag && editor.mode == 1) {
-            drawer.appendClampedQuad(editor.dragX1, editor.dragY1, editor.dragX2, editor.dragY2,
-                    minX, minY, maxX, maxY, 0.96f, 0.26f, 0.26f, 0.22f);
-        } else if (!editor.hasDrag && editor.hasCursor) {
-            if (editor.mode == 1) {
-                drawer.appendClampedQuad(editor.cursorX, editor.cursorY, editor.cursorX + 1, editor.cursorY + 1,
-                        minX, minY, maxX, maxY, 0.96f, 0.32f, 0.32f, 0.22f);
-            } else {
-                drawer.appendClampedQuad(editor.cursorX, editor.cursorY, editor.cursorX + 1, editor.cursorY + 1,
-                        minX, minY, maxX, maxY, 0.38f, 0.88f, 1.00f, 0.20f);
+        if (editor != null) {
+            // 其他已存据点淡金色底色提示（防止误重叠）
+            RenderShape[] saved = savedShapesSnapshot;
+            for (int i = 0; i < saved.length; i++) {
+                RenderShape s = saved[i];
+                if (s.settlementId.equals(editor.editingSettlementId)) continue;
+                if (!s.intersectsChunkMap(minX, minY, maxX, maxY)) continue;
+                drawer.appendShape(s.fillQuads, minX, minY, maxX, maxY, 0.95f, 0.72f, 0.22f, 0.12f);
             }
+
+            // 当前不规则领地实时布尔预览底色（翠绿半透明，无任何内部分割缝）
+            if (editor.previewShape.intersectsChunkMap(minX, minY, maxX, maxY)) {
+                drawer.appendShape(editor.previewShape.fillQuads, minX, minY, maxX, maxY, 0.18f, 0.85f, 0.54f, 0.22f);
+            }
+
+            // 擦除模式下额外给橡皮擦拉框铺淡珊瑚红提示；悬停时高亮鼠标下 1x1 单格
+            if (editor.hasDrag && editor.mode == 1) {
+                drawer.appendClampedQuad(editor.dragX1, editor.dragY1, editor.dragX2, editor.dragY2,
+                        minX, minY, maxX, maxY, 0.96f, 0.26f, 0.26f, 0.22f);
+            } else if (!editor.hasDrag && editor.hasCursor) {
+                if (editor.mode == 1) {
+                    drawer.appendClampedQuad(editor.cursorX, editor.cursorY, editor.cursorX + 1, editor.cursorY + 1,
+                            minX, minY, maxX, maxY, 0.96f, 0.32f, 0.32f, 0.22f);
+                } else {
+                    drawer.appendClampedQuad(editor.cursorX, editor.cursorY, editor.cursorX + 1, editor.cursorY + 1,
+                            minX, minY, maxX, maxY, 0.38f, 0.88f, 1.00f, 0.20f);
+                }
+            }
+        }
+
+        if (showHighlight && highlightZ == pz) {
+            drawer.appendClampedQuad(highlightX, highlightY, highlightX + 1, highlightY + 1,
+                    minX, minY, maxX, maxY, 0.22f, 0.90f, 0.98f, 0.34f);
         }
 
         if (drawer.quadCount > 0) {
@@ -253,7 +277,8 @@ public final class TerritoryRenderer {
 
     public static void renderOutlines() {
         EditorSnapshot editor = activeEditor;
-        if (!overlayVisible && editor == null) return;
+        boolean showHighlight = hasContainerHighlight;
+        if (!overlayVisible && editor == null && !showHighlight) return;
         if (IsoWorld.instance == null || IsoWorld.instance.currentCell == null) return;
 
         int playerIndex = IsoCamera.frameState.playerIndex;
@@ -269,13 +294,15 @@ public final class TerritoryRenderer {
         int maxY = cm.getWorldYMaxTiles();
         float fz = PZMath.fastfloor(player.getZ());
 
-        RenderShape[] saved = savedShapesSnapshot;
-        float savedAlpha = editor != null ? 0.50f : 0.85f;
-        for (int i = 0; i < saved.length; i++) {
-            RenderShape s = saved[i];
-            if (editor != null && s.settlementId.equals(editor.editingSettlementId)) continue;
-            if (!s.intersectsChunkMap(minX, minY, maxX, maxY)) continue;
-            drawSegments(s.outlineSegments, fz, 0.95f, 0.72f, 0.22f, savedAlpha, 2);
+        if (overlayVisible || editor != null) {
+            RenderShape[] saved = savedShapesSnapshot;
+            float savedAlpha = editor != null ? 0.50f : 0.85f;
+            for (int i = 0; i < saved.length; i++) {
+                RenderShape s = saved[i];
+                if (editor != null && s.settlementId.equals(editor.editingSettlementId)) continue;
+                if (!s.intersectsChunkMap(minX, minY, maxX, maxY)) continue;
+                drawSegments(s.outlineSegments, fz, 0.95f, 0.72f, 0.22f, savedAlpha, 2);
+            }
         }
 
         if (editor != null) {
@@ -295,6 +322,12 @@ public final class TerritoryRenderer {
                     drawRectBox(editor.cursorX, editor.cursorY, editor.cursorX + 1, editor.cursorY + 1, fz, 0.45f, 0.90f, 1.00f, 0.88f, 1);
                 }
             }
+        }
+
+        if (showHighlight) {
+            float hz = (float) highlightZ;
+            drawRectBox(highlightX, highlightY, highlightX + 1, highlightY + 1, hz, 0.25f, 0.96f, 1.00f, 0.98f, 2);
+            drawRectBox(highlightX + 0.08f, highlightY + 0.08f, highlightX + 0.92f, highlightY + 0.92f, hz, 0.85f, 1.00f, 1.00f, 0.82f, 1);
         }
     }
 

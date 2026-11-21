@@ -10,6 +10,8 @@ import emberroutes.warehouse.SmartItemPicker;
 import emberroutes.warehouse.SmartItemPicker.EquippedBagSpec;
 import emberroutes.warehouse.SmartItemPicker.PlannedLoadAssignment;
 import emberroutes.warehouse.SmartObjectRegistry;
+import emberroutes.warehouse.SmartSlot;
+import emberroutes.warehouse.SmartZoningPolicy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -193,5 +195,24 @@ class SettlementTaskAuctioneerTest {
         DeliveryOrderManager.recordDeliveredBatch(orderId, "npc_2", 2, false);
         assertEquals(DeliveryOrderManager.OrderStatus.COMPLETED, ord.status);
         assertEquals(0, ord.getRemainingCount());
+
+        // 6. 指定 PICKUP_OUT 提货箱派单与最近订单列表查询
+        String pickupBoxId = "12:10:0#crate:crate:0#0";
+        SmartZoningPolicy.ContainerFilterRule pickupRule = new SmartZoningPolicy.ContainerFilterRule();
+        pickupRule.role = emberroutes.warehouse.ContainerRole.PICKUP_OUT;
+        SmartSlot boxSlot = SmartObjectRegistry.registerContainerSlot(
+                "s1", pickupBoxId, 12, 10, 0, 1L, 0b11111111, pickupRule, 0, 50.0, 5.0, 1.0);
+        assertNotNull(boxSlot);
+        assertNotNull(DeliveryOrderManager.findPickupOutSlotById("s1", pickupBoxId, 10.0, 10.0));
+
+        String boxOrderId = DeliveryOrderManager.submitOrder("s1", 0, "Base.Bandage", 3, 12.0, pickupBoxId);
+        assertNotNull(boxOrderId);
+        DeliveryOrderManager.DeliveryOrder boxOrder = DeliveryOrderManager.getOrder(boxOrderId);
+        assertEquals(pickupBoxId, boxOrder.targetPickupOutContainerId);
+
+        List<DeliveryOrderManager.DeliveryOrder> recent = DeliveryOrderManager.listOrders("s1");
+        assertEquals(2, recent.size());
+        assertEquals(boxOrderId, recent.get(0).orderId);
+        assertEquals(orderId, recent.get(1).orderId);
     }
 }

@@ -94,6 +94,8 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
         final String orderId;
         final String settlementId;
         final int playerIndex;
+        final String targetPickupOutContainerId;
+        final boolean directToPickupOut;
         final List<DeliveryPickupGroup> pickupGroups;
         final List<InventoryItem> carriedItems = new ArrayList<>();
         final Map<InventoryItem, ItemContainer> loadTargetsByItem = new IdentityHashMap<>();
@@ -104,12 +106,15 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                 String orderId,
                 String settlementId,
                 int playerIndex,
+                String targetPickupOutContainerId,
                 List<DeliveryPickupGroup> pickupGroups,
                 double totalWeight,
                 TourAnchor terminalAnchor) {
             this.orderId = orderId;
             this.settlementId = settlementId;
             this.playerIndex = playerIndex;
+            this.targetPickupOutContainerId = targetPickupOutContainerId;
+            this.directToPickupOut = targetPickupOutContainerId != null && !targetPickupOutContainerId.isBlank();
             this.pickupGroups = pickupGroups;
             this.totalWeight = totalWeight;
             this.terminalAnchor = terminalAnchor;
@@ -571,20 +576,37 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                     e.getKey(), cx, cy, cz, stand[0], stand[1], stand[2], e.getValue()));
         }
 
-        IsoPlayer player = resolvePlayer(order.playerIndex);
-        TourAnchor anchor;
-        if (player != null && !player.isDead()) {
-            IsoGridSquare pSq = player.getCurrentSquare();
-            anchor = new TourAnchor(
-                    (int) Math.floor(player.getX()),
-                    (int) Math.floor(player.getY()),
-                    EmberTargetProjector.levelOf(player.getZ()),
-                    pSq != null ? pSq.getRoomID() : RoomConnectivityIndex.UNKNOWN_ROOM_ID);
-        } else {
-            DeliveryPickupGroup last = groups.get(groups.size() - 1);
-            anchor = new TourAnchor(last.standX, last.standY, last.z, RoomConnectivityIndex.UNKNOWN_ROOM_ID);
+        TourAnchor anchor = null;
+        if (order.targetPickupOutContainerId != null && !order.targetPickupOutContainerId.isBlank()) {
+            SmartSlot targetSlot = SmartObjectRegistry.getContainerSlot(
+                    task.settlementId, order.targetPickupOutContainerId);
+            if (targetSlot != null) {
+                anchor = new TourAnchor(
+                        targetSlot.originX, targetSlot.originY, targetSlot.originZ, targetSlot.getRoomId());
+            }
         }
-        DeliveryPlan plan = new DeliveryPlan(order.orderId, task.settlementId, order.playerIndex, groups, totalWeight, anchor);
+        if (anchor == null) {
+            IsoPlayer player = resolvePlayer(order.playerIndex);
+            if (player != null && !player.isDead()) {
+                IsoGridSquare pSq = player.getCurrentSquare();
+                anchor = new TourAnchor(
+                        (int) Math.floor(player.getX()),
+                        (int) Math.floor(player.getY()),
+                        EmberTargetProjector.levelOf(player.getZ()),
+                        pSq != null ? pSq.getRoomID() : RoomConnectivityIndex.UNKNOWN_ROOM_ID);
+            } else {
+                DeliveryPickupGroup last = groups.get(groups.size() - 1);
+                anchor = new TourAnchor(last.standX, last.standY, last.z, RoomConnectivityIndex.UNKNOWN_ROOM_ID);
+            }
+        }
+        DeliveryPlan plan = new DeliveryPlan(
+                order.orderId,
+                task.settlementId,
+                order.playerIndex,
+                order.targetPickupOutContainerId,
+                groups,
+                totalWeight,
+                anchor);
         plan.loadTargetsByItem.putAll(loadTargets);
         return plan;
     }
@@ -859,6 +881,30 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
 
     // ==================== 2. 机械动力式实体提货配送状态机 ====================
 
+    private static void enterDeliveryDestinationPhase(BrainContext ctx, NpcWorkState st, DeliveryPlan plan) {
+        if (plan.directToPickupOut) {
+            double remWeight = computeCarriedWeight(plan.carriedItems);
+            SmartSlot pickupOut = DeliveryOrderManager.findPickupOutSlotById(
+                    plan.settlementId, plan.targetPickupOutContainerId, remWeight, ctx.simTime);
+            if (pickupOut == null) {
+                pickupOut = DeliveryOrderManager.findBestPickupOutSlot(
+                        plan.settlementId, remWeight, ctx.npc.getX(), ctx.npc.getY(),
+                        EmberTargetProjector.levelOf(ctx.npc.getZ()), ctx.simTime);
+            }
+            if (pickupOut != null) {
+                st.fallbackPickupOutSlot = pickupOut;
+                st.phase = WorkPhase.FALLBACK_PICKUP_OUT;
+                st.moveIssued = false;
+                return;
+            }
+            DeliveryPickupGroup first = plan.pickupGroups.get(0);
+            enterReturnToSource(st, first.containerId, first.standX, first.standY, first.z, plan.carriedItems);
+            return;
+        }
+        st.phase = WorkPhase.MOVING_TO_PLAYER;
+        st.moveIssued = false;
+    }
+
     private static void tickDeliveryPlan(BrainContext ctx, NpcWorkState st, StateScope scope, double dtSim) {
         DeliveryPlan plan = st.deliveryPlan;
         switch (st.phase) {
@@ -868,8 +914,7 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                         DeliveryOrderManager.markCompleted(plan.orderId);
                         finishOrChainNext(ctx, st);
                     } else {
-                        st.phase = WorkPhase.MOVING_TO_PLAYER;
-                        st.moveIssued = false;
+                        enterDeliveryDestinationPhase(ctx, st, plan);
                     }
                     return;
                 }
@@ -882,7 +927,7 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
             }
             case LOADING -> {
                 if (st.activeTransfer == null) {
-                    st.phase = WorkPhase.MOVING_TO_PLAYER;
+                    enterDeliveryDestinationPhase(ctx, st, plan);
                     return;
                 }
                 st.activeTransfer.tick(ctx, dtSim);
@@ -899,8 +944,7 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                     DeliveryOrderManager.markCompleted(plan.orderId);
                     finishOrChainNext(ctx, st);
                 } else {
-                    st.phase = WorkPhase.MOVING_TO_PLAYER;
-                    st.moveIssued = false;
+                    enterDeliveryDestinationPhase(ctx, st, plan);
                 }
             }
             case MOVING_TO_PLAYER -> {
@@ -989,7 +1033,7 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                     st.fallbackPickupOutSlot = null;
                     if (deliveredNow > 0) {
                         DeliveryOrderManager.recordDeliveredBatch(
-                                plan.orderId, ctx.npcId, deliveredNow, leftover.isEmpty());
+                                plan.orderId, ctx.npcId, deliveredNow, !plan.directToPickupOut && leftover.isEmpty());
                     }
                     if (!leftover.isEmpty()) {
                         SmartObjectRegistry.markFullCooldown(

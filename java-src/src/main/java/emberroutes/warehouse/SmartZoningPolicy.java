@@ -172,6 +172,14 @@ public final class SmartZoningPolicy {
         if (!(raw instanceof KahluaTable tbl)) {
             return rule;
         }
+        return kahluaTableToRule(tbl);
+    }
+
+    public static ContainerFilterRule kahluaTableToRule(KahluaTable tbl) {
+        ContainerFilterRule rule = new ContainerFilterRule();
+        if (tbl == null) {
+            return rule;
+        }
         Object rObj = tbl.rawget("role");
         if (rObj instanceof String s) {
             rule.role = ContainerRole.fromString(s);
@@ -184,11 +192,39 @@ public final class SmartZoningPolicy {
         if (eObj instanceof Boolean b) {
             rule.enabled = b.booleanValue();
         }
-        parseCsvInto(tbl.rawget("allowGroups"), rule.allowGroups, true);
-        parseCsvInto(tbl.rawget("denyGroups"), rule.denyGroups, true);
-        parseCsvInto(tbl.rawget("allowTypes"), rule.allowTypes, true);
-        parseCsvInto(tbl.rawget("denyTypes"), rule.denyTypes, true);
+        parseFilterListOrCsv(tbl.rawget("allowGroups"), rule.allowGroups);
+        parseFilterListOrCsv(tbl.rawget("denyGroups"), rule.denyGroups);
+        parseFilterListOrCsv(tbl.rawget("allowTypes"), rule.allowTypes);
+        parseFilterListOrCsv(tbl.rawget("denyTypes"), rule.denyTypes);
         return rule;
+    }
+
+    public static KahluaTable ruleToKahluaTable(ContainerFilterRule rule, boolean isPrivate) {
+        ContainerFilterRule src = rule != null ? rule : new ContainerFilterRule();
+        KahluaTable tbl = J2SEPlatform.getInstance().newTable();
+        tbl.rawset("role", src.role.name());
+        tbl.rawset("priority", Double.valueOf(clampPriority(src.priority)));
+        tbl.rawset("enabled", Boolean.valueOf(src.enabled));
+        tbl.rawset("isPrivate", Boolean.valueOf(isPrivate));
+        tbl.rawset("allowGroups", joinCsv(src.allowGroups));
+        tbl.rawset("denyGroups", joinCsv(src.denyGroups));
+        tbl.rawset("allowTypes", joinCsv(src.allowTypes));
+        tbl.rawset("denyTypes", joinCsv(src.denyTypes));
+        return tbl;
+    }
+
+    private static void parseFilterListOrCsv(Object raw, Set<String> out) {
+        if (raw instanceof String) {
+            parseCsvInto(raw, out, true);
+        } else if (raw instanceof KahluaTable listTbl) {
+            se.krka.kahlua.vm.KahluaTableIterator it = listTbl.iterator();
+            while (it.advance()) {
+                Object val = it.getValue();
+                if (val instanceof String s && !s.isBlank()) {
+                    out.add(s.trim().toLowerCase(Locale.ROOT));
+                }
+            }
+        }
     }
 
     /** 将过滤规则与角色写入世界容器对象自身 {@code ModData.ER_SmartZone}，并置热存盘与脏队列。 */
