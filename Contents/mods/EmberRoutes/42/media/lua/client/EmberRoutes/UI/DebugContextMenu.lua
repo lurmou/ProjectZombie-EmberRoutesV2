@@ -7,7 +7,13 @@ local ZoneOverlay = require "EmberRoutes/UI/ZoneOverlay"
 local ZoneEditorPanel = require "EmberRoutes/UI/ZoneEditorPanel"
 local DebugWarehousePanel = require "EmberRoutes/UI/DebugWarehousePanel"
 
-local function appendSquareContainerPrivacyOptions(sub, actor, gx, gy, z)
+local CONTAINER_ROLES = {
+    { id = "STORAGE", key = "ContextMenu_ER_M3_Role_STORAGE" },
+    { id = "BUFFER_IN", key = "ContextMenu_ER_M3_Role_BUFFER_IN" },
+    { id = "PICKUP_OUT", key = "ContextMenu_ER_M3_Role_PICKUP_OUT" },
+}
+
+local function appendSquareContainerPrivacyOptions(sub, context, actor, gx, gy, z)
     local cell = getCell and getCell()
     local sq = cell and cell:getGridSquare(gx, gy, z)
     if not sq then return end
@@ -36,6 +42,36 @@ local function appendSquareContainerPrivacyOptions(sub, actor, gx, gy, z)
             EmberRoutesJava.setContainerObjectPrivate(targetObj, not isPriv)
             EmberRoutesJava.flushDirtyContainers()
         end)
+
+        if EmberRoutesJava.getContainerRole and EmberRoutesJava.setContainerRole then
+            local curRole = EmberRoutesJava.getContainerRole(targetObj) or "STORAGE"
+            local roleSub = ISContextMenu:getNew(context)
+            local roleOpt = sub:addOption(
+                getText("ContextMenu_ER_M3_SmartZoneMenuFmt", labelName, curRole), nil, nil)
+            context:addSubMenu(roleOpt, roleSub)
+
+            for ri = 1, #CONTAINER_ROLES do
+                local roleEntry = CONTAINER_ROLES[ri]
+                local roleId = roleEntry.id
+                local roleLabel = getText(roleEntry.key)
+                if roleId == curRole then
+                    roleLabel = "* " .. roleLabel
+                end
+                roleSub:addOption(roleLabel, actor, function()
+                    local applied = EmberRoutesJava.setContainerRole(targetObj, roleId)
+                    EmberRoutesJava.flushDirtyContainers()
+                    print("[EmberRoutes][M3] SetContainerRole " .. tostring(labelName) .. " -> " .. tostring(applied))
+                end)
+            end
+
+            if EmberRoutesJava.autoConfigureContainer then
+                roleSub:addOption(getText("ContextMenu_ER_M3_AutoSmartZone"), actor, function()
+                    local res = EmberRoutesJava.autoConfigureContainer(targetObj)
+                    EmberRoutesJava.flushDirtyContainers()
+                    print("[EmberRoutes][M3] AutoSmartZone " .. tostring(labelName) .. " -> " .. tostring(res))
+                end)
+            end
+        end
     end
 end
 
@@ -369,7 +405,18 @@ local function onFillWorldMenu(playerIndex, context, worldobjects, test)
                 end)
             end
         )
-        appendSquareContainerPrivacyOptions(sub, actor, gx, gy, z)
+        appendSquareContainerPrivacyOptions(sub, context, actor, gx, gy, z)
+        if EmberRoutesJava.getLogisticsSummary then
+            sub:addOption(getText("ContextMenu_ER_M3_InspectLogisticsFmt", settlement.name), actor, function()
+                print("[EmberRoutes][M3] Logistics " .. tostring(EmberRoutesJava.getLogisticsSummary(settlement.id)))
+            end)
+        end
+        if EmberRoutesJava.submitDeliveryOrder then
+            sub:addOption(getText("ContextMenu_ER_M3_TestDeliverAppleFmt", settlement.name), actor, function()
+                local oid = EmberRoutesJava.submitDeliveryOrder(settlement.id, playerIndex, "Base.Apple", 1)
+                print("[EmberRoutes][M3] SubmitDelivery Base.Apple x1 -> " .. tostring(oid))
+            end)
+        end
         sub:addOption(
             getText("ContextMenu_ER_DeleteSettlementFmt", settlement.name),
             actor,
