@@ -10,7 +10,6 @@ local DebugWarehousePanel = require "EmberRoutes/UI/DebugWarehousePanel"
 local CONTAINER_ROLES = {
     { id = "STORAGE", key = "ContextMenu_ER_M3_Role_STORAGE" },
     { id = "BUFFER_IN", key = "ContextMenu_ER_M3_Role_BUFFER_IN" },
-    { id = "WORKSTATION_IO", key = "ContextMenu_ER_M3_Role_WORKSTATION_IO" },
     { id = "PICKUP_OUT", key = "ContextMenu_ER_M3_Role_PICKUP_OUT" },
 }
 

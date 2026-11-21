@@ -3,18 +3,16 @@ package emberroutes.warehouse;
 import java.util.Locale;
 
 /**
- * 据点容器四大物流角色（M3-② 智能分拣与物流底座）：
+ * 据点容器三大物流角色（M3-② 智能分拣与物流底座）：
  * <ul>
- *   <li>{@link #STORAGE} — 常规主仓储容器（按 {@code SmartZoning} 规则接纳理货入库与供货）；</li>
+ *   <li>{@link #STORAGE} — 常规分类储物仓（按 {@code SmartZoning} 规则接纳理货入库与供货，含高优先级工坊备料架）；</li>
  *   <li>{@link #BUFFER_IN} — 卸货缓冲箱（内有未加锁可用物品时 $O(1)$ 自动加入 {@code advertisedHaulOutSlots} 触发理货拍卖）；</li>
- *   <li>{@link #WORKSTATION_IO} — 工位料架（同层 Chebyshev ≤ 3 格与 {@code WORKSTATION} 双向对称绑定）；</li>
  *   <li>{@link #PICKUP_OUT} — 提货交接箱（免自动理货吸回，兼作提货单降级投放点）。</li>
  * </ul>
  */
 public enum ContainerRole {
     STORAGE,
     BUFFER_IN,
-    WORKSTATION_IO,
     PICKUP_OUT;
 
     public static ContainerRole fromString(String raw) {

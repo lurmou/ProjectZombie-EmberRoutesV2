@@ -35,7 +35,7 @@ import zombie.util.list.PZArrayList;
  * <ul>
  *   <li>直接寄生 {@link WarehouseFastIndex} 的区块/方块扫描与卸载链路；</li>
  *   <li>多格家具（{@code IsoSpriteGrid != null}）以网格原点 {@code (0,0)} 为唯一键，跨 Chunk 全子格齐备才激活、任一子格卸载即下架；</li>
- *   <li>容器与工位支持 8 邻格 {@code standDirMask} 预计算（30s 局部退避换侧）、{@code WORKSTATION_IO} 3 格双向对称绑定、
+ *   <li>容器与工位支持 8 邻格 {@code standDirMask} 预计算（30s 局部退避换侧）、
  *       以及 {@code BUFFER_IN} $O(1)$ 侵入式逆向广播表 {@code advertisedHaulOutSlots}。</li>
  * </ul>
  */
@@ -45,7 +45,6 @@ public final class SmartObjectRegistry {
     public static final double STAND_DIR_BACKOFF_SEC = 30.0;
     public static final double WITHDRAWN_PROTECTION_SEC = 60.0;
     public static final double FULL_CONTAINER_COOLDOWN_SEC = 60.0;
-    public static final int WORKSTATION_BIND_CHEBYSHEV_RADIUS = 3;
 
     private record TileRef(String settlementId, String slotId, SlotKind kind, int x, int y, int z, long bitMask) {}
 
@@ -547,9 +546,6 @@ public final class SmartObjectRegistry {
         if (!slot.active && (slot.loadedMask & slot.fullMask) == slot.fullMask) {
             slot.active = true;
             ss.activeByKind.get(kind).add(slot);
-            if (kind == SlotKind.WORKSTATION) {
-                syncWorkstationBindings(ss, slot);
-            }
         }
         return slot;
     }
@@ -620,13 +616,11 @@ public final class SmartObjectRegistry {
         }
         SettlementSlots ss = SETTLEMENTS.computeIfAbsent(settlementId, k -> new SettlementSlots());
         SmartSlot slot = ss.byId.get(containerId);
-        boolean isNew = false;
         if (slot == null) {
             slot = new SmartSlot(containerId, settlementId, SlotKind.CONTAINER, x, y, z, 1, 1);
             slot.containerId = containerId;
             ss.byId.put(containerId, slot);
             ss.containersById.put(containerId, slot);
-            isNew = true;
         }
 
         if ((slot.loadedMask & 1L) == 0L) {
@@ -638,7 +632,6 @@ public final class SmartObjectRegistry {
             REFS_BY_CHUNK.computeIfAbsent(chunkKey, k -> new ArrayList<>(4)).add(ref);
         }
 
-        boolean wasActive = slot.active;
         if (!slot.active) {
             slot.active = true;
             ss.activeByKind.get(SlotKind.CONTAINER).add(slot);
@@ -659,10 +652,6 @@ public final class SmartObjectRegistry {
         slot.availableItemCount = Math.max(0, availableItemCount);
         slot.capacity = Math.max(0.0, capacity);
         slot.usedWeight = Math.max(0.0, usedWeight);
-
-        if (isNew || !wasActive || prevRole != slot.containerRole) {
-            syncWorkstationBindings(ss, slot);
-        }
 
         updateHaulOutAdvertisement(ss, slot, simTime);
         if (slot.advertisedHaulOutListIdx >= 0
@@ -701,7 +690,7 @@ public final class SmartObjectRegistry {
         }
     }
 
-    /** 注册工位插槽并自动完成同层 Chebyshev ≤ 3 格 {@code WORKSTATION_IO} 双向对称绑定。 */
+    /** 注册工位插槽并写入同格 {@code roomId} 与 8 方位可达站位掩码。 */
     public static synchronized SmartSlot registerWorkstationSlot(
             String settlementId, int x, int y, int z, long roomId, int standDirMask) {
         if (settlementId == null) {
@@ -713,72 +702,7 @@ public final class SmartObjectRegistry {
         }
         slot.roomId = roomId;
         slot.standDirMask = standDirMask;
-        SettlementSlots ss = SETTLEMENTS.get(settlementId);
-        if (ss != null) {
-            syncWorkstationBindings(ss, slot);
-        }
         return slot;
-    }
-
-    private static void syncWorkstationBindings(SettlementSlots ss, SmartSlot slot) {
-        unbindWorkstationLinks(ss, slot);
-        if (slot == null || !slot.active) {
-            return;
-        }
-        if (slot.kind == SlotKind.WORKSTATION) {
-            List<SmartSlot> containers = ss.activeByKind.get(SlotKind.CONTAINER);
-            for (int i = 0, n = containers.size(); i < n; i++) {
-                SmartSlot c = containers.get(i);
-                if (c.active
-                        && c.containerRole == ContainerRole.WORKSTATION_IO
-                        && isWithinWorkstationRadius(slot, c)) {
-                    slot.boundWorkstationIoIds.add(c.slotId);
-                    c.boundWorkstationIds.add(slot.slotId);
-                }
-            }
-        } else if (slot.kind == SlotKind.CONTAINER && slot.containerRole == ContainerRole.WORKSTATION_IO) {
-            List<SmartSlot> stations = ss.activeByKind.get(SlotKind.WORKSTATION);
-            for (int i = 0, n = stations.size(); i < n; i++) {
-                SmartSlot w = stations.get(i);
-                if (w.active && isWithinWorkstationRadius(slot, w)) {
-                    slot.boundWorkstationIds.add(w.slotId);
-                    w.boundWorkstationIoIds.add(slot.slotId);
-                }
-            }
-        }
-    }
-
-    private static boolean isWithinWorkstationRadius(SmartSlot a, SmartSlot b) {
-        if (a.originZ != b.originZ) {
-            return false;
-        }
-        int dx = Math.abs(a.originX - b.originX);
-        int dy = Math.abs(a.originY - b.originY);
-        return Math.max(dx, dy) <= WORKSTATION_BIND_CHEBYSHEV_RADIUS;
-    }
-
-    private static void unbindWorkstationLinks(SettlementSlots ss, SmartSlot slot) {
-        if (slot == null) {
-            return;
-        }
-        if (!slot.boundWorkstationIds.isEmpty()) {
-            for (String wid : slot.boundWorkstationIds) {
-                SmartSlot w = ss.byId.get(wid);
-                if (w != null) {
-                    w.boundWorkstationIoIds.remove(slot.slotId);
-                }
-            }
-            slot.boundWorkstationIds.clear();
-        }
-        if (!slot.boundWorkstationIoIds.isEmpty()) {
-            for (String cid : slot.boundWorkstationIoIds) {
-                SmartSlot c = ss.byId.get(cid);
-                if (c != null) {
-                    c.boundWorkstationIds.remove(slot.slotId);
-                }
-            }
-            slot.boundWorkstationIoIds.clear();
-        }
     }
 
     /** $O(1)$ 侵入式维护 {@code BUFFER_IN} 逆向广播表 {@code advertisedHaulOutSlots}。 */
@@ -1095,7 +1019,6 @@ public final class SmartObjectRegistry {
             slot.active = false;
             removeSlotFromActiveList(ss, slot);
             removeFromAdvertisedHaulOut(ss, slot);
-            unbindWorkstationLinks(ss, slot);
             invalidateActiveLease(slot);
         }
         if (slot.loadedMask == 0L) {

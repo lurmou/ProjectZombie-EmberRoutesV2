@@ -49,7 +49,6 @@
     "ContextMenu_ER_M3_SmartZoneMenuFmt": "Container Role & SmartZoning [%1 | %2]",
     "ContextMenu_ER_M3_Role_STORAGE": "Set Role: Main Storage (STORAGE)",
     "ContextMenu_ER_M3_Role_BUFFER_IN": "Set Role: Unload Buffer (BUFFER_IN)",
-    "ContextMenu_ER_M3_Role_WORKSTATION_IO": "Set Role: Workstation Rack (WORKSTATION_IO)",
     "ContextMenu_ER_M3_Role_PICKUP_OUT": "Set Role: Pickup Box (PICKUP_OUT)",
     "ContextMenu_ER_M3_AutoSmartZone": "Auto-Configure SmartZoning",
     "ContextMenu_ER_M3_InspectLogisticsFmt": "Inspect Logistics & Delivery Queue [%1]",

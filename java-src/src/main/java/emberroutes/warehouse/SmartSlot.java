@@ -1,10 +1,7 @@
 package emberroutes.warehouse;
 
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * UE5 SmartObject 逆向广播插槽模型与租约句柄：
@@ -183,8 +180,6 @@ public final class SmartSlot {
     int advertisedHaulOutListIdx = -1;
     SmartZoningPolicy.ContainerFilterRule filterRule = new SmartZoningPolicy.ContainerFilterRule();
     final List<ContainerLease> containerLeases = new ArrayList<>(2);
-    final Set<String> boundWorkstationIds = new HashSet<>(2);
-    final Set<String> boundWorkstationIoIds = new HashSet<>(4);
 
     SmartSlot(
             String slotId,
@@ -337,14 +332,6 @@ public final class SmartSlot {
 
     public SmartZoningPolicy.ContainerFilterRule getFilterRule() {
         return filterRule;
-    }
-
-    public Set<String> getBoundWorkstationIds() {
-        return Collections.unmodifiableSet(boundWorkstationIds);
-    }
-
-    public Set<String> getBoundWorkstationIoIds() {
-        return Collections.unmodifiableSet(boundWorkstationIoIds);
     }
 
     public boolean isStandDirBackedOff(int dirIdx, double simTime) {

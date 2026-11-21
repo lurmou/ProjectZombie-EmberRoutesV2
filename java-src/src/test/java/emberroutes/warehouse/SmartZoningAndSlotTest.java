@@ -28,7 +28,7 @@ class SmartZoningAndSlotTest {
     }
 
     @Test
-    void fakeWeaponsDoNotClassifyDesksAsArmoryAndFourRolesFilterCorrectly() {
+    void fakeWeaponsDoNotClassifyDesksAsArmoryAndThreeRolesFilterCorrectly() {
         assertTrue(SmartZoningPolicy.isFakeWeapon("Base.Pen"));
         assertTrue(SmartZoningPolicy.isFakeWeapon("Base.Fork"));
         assertFalse(SmartZoningPolicy.isFakeWeapon("Base.Pistol"));
@@ -54,11 +54,13 @@ class SmartZoningAndSlotTest {
         ContainerFilterRule pickupRule = SmartZoningPolicy.buildRuleFromPreset("food", ContainerRole.PICKUP_OUT);
         assertFalse(SmartZoningPolicy.matchesItemNode(pickupRule, "Base.Apple", "food.perishable"));
 
-        // 智能自动分区仅赋予 STORAGE，WORKSTATION_IO 只能由玩家显式指定
+        // 工坊旁备料架直接使用高优先级 STORAGE 规则，无需独立封闭料架角色
         ContainerFilterRule workshopCounter = SmartZoningPolicy.evaluateHardwareOrContext(
                 "crate", "carpentry_01_00", "workshop", Map.of("materials", 4.0), 4);
         assertEquals(ContainerRole.STORAGE, workshopCounter.role);
-        assertNotEquals(ContainerRole.WORKSTATION_IO, workshopCounter.role);
+        workshopCounter.priority = SmartZoningPolicy.clampPriority(5);
+        assertEquals(5, workshopCounter.priority);
+        assertTrue(SmartZoningPolicy.matchesItemNode(workshopCounter, "Base.Plank", "materials"));
     }
 
     @Test
@@ -103,24 +105,18 @@ class SmartZoningAndSlotTest {
     }
 
     @Test
-    void workstationIoSymmetricBindingStandDirBackoffAndRoomDoors() {
-        ContainerFilterRule ioRule = SmartZoningPolicy.buildRuleFromPreset("materials", ContainerRole.WORKSTATION_IO);
-        // 先加载 WORKSTATION_IO（10, 10），再加载 3 格内 WORKSTATION（13, 12）与 4 格之外 WORKSTATION（14, 10）
+    void workstationSlotStandDirBackoffAndRoomDoors() {
+        ContainerFilterRule prepRule = SmartZoningPolicy.buildRuleFromPreset("materials", ContainerRole.STORAGE);
+        prepRule.priority = 5;
         SmartSlot rack = SmartObjectRegistry.registerContainerSlot(
-                "s1", "10:10:0#shelf:shelf:0#0", 10, 10, 0, 10L, 0b00000101, ioRule, 5, 50.0, 5.0, 1.0);
-        SmartSlot benchNear = SmartObjectRegistry.registerWorkstationSlot("s1", 13, 12, 0, 10L, 0b11111111);
-        SmartSlot benchFar = SmartObjectRegistry.registerWorkstationSlot("s1", 14, 10, 0, 10L, 0b11111111);
+                "s1", "10:10:0#shelf:shelf:0#0", 10, 10, 0, 10L, 0b00000101, prepRule, 5, 50.0, 5.0, 1.0);
+        SmartSlot bench = SmartObjectRegistry.registerWorkstationSlot("s1", 12, 11, 0, 10L, 0b11111111);
 
-        assertTrue(rack.getBoundWorkstationIds().contains(benchNear.slotId));
-        assertTrue(benchNear.getBoundWorkstationIoIds().contains(rack.slotId));
-        assertFalse(rack.getBoundWorkstationIds().contains(benchFar.slotId));
-
-        // 反向顺序：先加载 WORKSTATION（20, 20），再加载 WORKSTATION_IO（22, 21）
-        SmartSlot bench2 = SmartObjectRegistry.registerWorkstationSlot("s1", 20, 20, 0, 10L, 0b11111111);
-        SmartSlot rack2 = SmartObjectRegistry.registerContainerSlot(
-                "s1", "22:21:0#shelf:shelf:0#0", 22, 21, 0, 10L, 0b11111111, ioRule, 1, 50.0, 1.0, 1.0);
-        assertTrue(bench2.getBoundWorkstationIoIds().contains(rack2.slotId));
-        assertTrue(rack2.getBoundWorkstationIds().contains(bench2.slotId));
+        assertTrue(rack.isActive());
+        assertEquals(ContainerRole.STORAGE, rack.getContainerRole());
+        assertEquals(5, rack.getPriority());
+        assertTrue(bench.isActive());
+        assertEquals(1, SmartObjectRegistry.getActiveCount("s1", SmartSlot.SlotKind.WORKSTATION));
 
         // 8 方位站位挑选与 30s 局部失败退避换侧
         int[] firstStand = SmartObjectRegistry.pickBestStandTile(rack, 10.5F, 8.0F, 5.0);

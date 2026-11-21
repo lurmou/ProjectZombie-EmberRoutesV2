@@ -49,7 +49,6 @@
     "ContextMenu_ER_M3_SmartZoneMenuFmt": "容器物流角色与智能分区 [%1 | %2]",
     "ContextMenu_ER_M3_Role_STORAGE": "设为主仓储箱 (STORAGE)",
     "ContextMenu_ER_M3_Role_BUFFER_IN": "设为卸货缓冲箱 (BUFFER_IN 自动理货)",
-    "ContextMenu_ER_M3_Role_WORKSTATION_IO": "设为工位料架 (WORKSTATION_IO)",
     "ContextMenu_ER_M3_Role_PICKUP_OUT": "设为提货交接箱 (PICKUP_OUT)",
     "ContextMenu_ER_M3_AutoSmartZone": "一键智能自动分区 (SmartZoning)",
     "ContextMenu_ER_M3_InspectLogisticsFmt": "打印据点物流广播与提货单状态 [%1]",
