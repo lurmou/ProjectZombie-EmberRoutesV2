@@ -592,6 +592,7 @@ public final class WarehouseFastIndex {
         currentTick = 0L;
         TerritoryRenderer.reset();
         SmartObjectRegistry.reset();
+        SmartItemPicker.reset();
     }
 
     public static int getAwakeTickerCount() {
@@ -643,6 +644,7 @@ public final class WarehouseFastIndex {
             }
             TerritoryRenderer.removeSettlement(settlementId);
             SmartObjectRegistry.invalidateSettlement(settlementId);
+            SmartItemPicker.clearSettlement(settlementId);
         }
     }
 
@@ -688,6 +690,148 @@ public final class WarehouseFastIndex {
             }
         }
         return new int[]{best[0] + best[2] / 2, best[1] + best[3] / 2};
+    }
+
+    /** 计算世界 2D 坐标点到据点领地最近矩形边界的距离（在领地内返回 {@code 0.0}，无据点返回 {@code Double.MAX_VALUE}）。 */
+    public static double distanceToSettlement2D(String settlementId, double x, double y) {
+        if (settlementId == null) {
+            return Double.MAX_VALUE;
+        }
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null || s.rects.isEmpty()) {
+            return Double.MAX_VALUE;
+        }
+        double minDistSq = Double.MAX_VALUE;
+        for (int i = 0, n = s.rects.size(); i < n; i++) {
+            int[] r = s.rects.get(i);
+            double x0 = r[0];
+            double y0 = r[1];
+            double x1 = r[0] + r[2];
+            double y1 = r[1] + r[3];
+            double dx = x < x0 ? (x0 - x) : (x > x1 ? (x - x1) : 0.0);
+            double dy = y < y0 ? (y0 - y) : (y > y1 ? (y - y1) : 0.0);
+            double dSq = dx * dx + dy * dy;
+            if (dSq == 0.0) {
+                return 0.0;
+            }
+            if (dSq < minDistSq) {
+                minDistSq = dSq;
+            }
+        }
+        return Math.sqrt(minDistSq);
+    }
+
+    public record LoadedSource(String containerId, int x, int y, int z, int count, String kind, String customName) {}
+
+    public record LiveContainerRef(IsoObject object, ItemContainer container, IsoGridSquare square, String containerId) {}
+
+    /** 查询指定据点当前已加载在场的所有 {@code fullType} 真实容器来源列表。 */
+    public static List<LoadedSource> getLoadedSourcesByType(String settlementId, String fullType) {
+        if (settlementId == null || fullType == null) {
+            return Collections.emptyList();
+        }
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null) {
+            return Collections.emptyList();
+        }
+        List<Source> raw = s.aggregate.sourcesByType.get(fullType);
+        if (raw == null || raw.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<LoadedSource> out = new ArrayList<>(raw.size());
+        for (int i = 0, n = raw.size(); i < n; i++) {
+            Source src = raw.get(i);
+            if (src.loaded && src.count > 0) {
+                out.add(new LoadedSource(src.id, src.x, src.y, src.z, src.count, src.kind, src.customName));
+            }
+        }
+        return out;
+    }
+
+    /** 根据稳定 {@code containerId}（{@code x:y:z#sprite:kind:ci#ord}）解析实时世界对象与容器。 */
+    public static LiveContainerRef resolveLiveContainer(String containerId) {
+        if (containerId == null || containerId.isEmpty() || IsoWorld.instance == null) {
+            return null;
+        }
+        IsoCell cell = IsoWorld.instance.currentCell;
+        if (cell == null) {
+            return null;
+        }
+        int firstHash = containerId.indexOf('#');
+        int secondHash = firstHash > 0 ? containerId.indexOf('#', firstHash + 1) : -1;
+        if (firstHash <= 0 || secondHash <= firstHash + 1) {
+            return null;
+        }
+        String[] xyz = containerId.substring(0, firstHash).split(":");
+        if (xyz.length < 3) {
+            return null;
+        }
+        int x, y, z, targetOrd;
+        try {
+            x = Integer.parseInt(xyz[0]);
+            y = Integer.parseInt(xyz[1]);
+            z = Integer.parseInt(xyz[2]);
+            targetOrd = Integer.parseInt(containerId.substring(secondHash + 1));
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+        String targetSig = containerId.substring(firstHash + 1, secondHash);
+
+        IsoGridSquare sq = cell.getGridSquare(x, y, z);
+        if (sq == null) {
+            return null;
+        }
+        PZArrayList<IsoObject> objects = sq.getObjects();
+        if (objects == null) {
+            return null;
+        }
+        int matchedOrd = 0;
+        for (int oi = 0, objSize = objects.size(); oi < objSize; oi++) {
+            IsoObject obj = objects.get(oi);
+            if (!isEligibleStorageObject(obj) || isObjectPrivate(obj)) {
+                continue;
+            }
+            String spriteName = resolveSpriteName(obj);
+            int contCount = resolveContainerCount(obj);
+            for (int ci = 0; ci < contCount; ci++) {
+                ItemContainer ic = resolveEligibleContainerAt(obj, ci);
+                if (ic == null) {
+                    continue;
+                }
+                String kind = resolveContainerKind(ic);
+                String sig = spriteName + ":" + kind + ":" + ci;
+                if (targetSig.equals(sig)) {
+                    if (matchedOrd == targetOrd) {
+                        return new LiveContainerRef(obj, ic, sq, containerId);
+                    }
+                    matchedOrd++;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String resolveSpriteName(IsoObject obj) {
+        String spriteName = obj.getSpriteName();
+        return (spriteName == null || spriteName.isEmpty()) ? "nosprite" : spriteName;
+    }
+
+    private static int resolveContainerCount(IsoObject obj) {
+        int cnt = obj.getContainerCount();
+        return (cnt <= 0 && obj.getContainer() != null) ? 1 : cnt;
+    }
+
+    private static ItemContainer resolveEligibleContainerAt(IsoObject obj, int ci) {
+        ItemContainer ic = obj.getContainerByIndex(ci);
+        if (ic == null && ci == 0) {
+            ic = obj.getContainer();
+        }
+        return isEligibleContainerType(ic) ? ic : null;
+    }
+
+    private static String resolveContainerKind(ItemContainer ic) {
+        String kind = ic.getType();
+        return (kind == null || kind.isEmpty()) ? "container" : kind;
     }
 
     public static double typeCount(String settlementId, String fullType) {
@@ -778,6 +922,7 @@ public final class WarehouseFastIndex {
                     ContainerContribution removed = s.containers.remove(cid);
                     if (removed != null) {
                         s.aggregate.subtract(removed);
+                        SmartObjectRegistry.onContainerRemoved(s.settlementId, cid);
                         changed = true;
                     }
                 }
@@ -1064,24 +1209,16 @@ public final class WarehouseFastIndex {
                     continue;
                 }
 
-                String spriteName = obj.getSpriteName();
-                if (spriteName == null || spriteName.isEmpty()) spriteName = "nosprite";
+                String spriteName = resolveSpriteName(obj);
                 String customName = resolveCustomName(obj);
                 boolean markedPrivate = isObjectPrivate(obj);
 
-                int contCount = obj.getContainerCount();
-                if (contCount <= 0 && obj.getContainer() != null) {
-                    contCount = 1;
-                }
-
+                int contCount = resolveContainerCount(obj);
                 for (int ci = 0; ci < contCount; ci++) {
-                    ItemContainer ic = obj.getContainerByIndex(ci);
-                    if (ic == null && ci == 0) ic = obj.getContainer();
-                    if (!isEligibleContainerType(ic)) continue;
+                    ItemContainer ic = resolveEligibleContainerAt(obj, ci);
+                    if (ic == null) continue;
 
-                    String kind = ic.getType();
-                    if (kind == null || kind.isEmpty()) kind = "container";
-
+                    String kind = resolveContainerKind(ic);
                     String sig = spriteName + ":" + kind + ":" + ci;
                     int ord = stackOrdinals.getOrDefault(sig, 0);
                     stackOrdinals.put(sig, ord + 1);
@@ -1091,6 +1228,7 @@ public final class WarehouseFastIndex {
 
                     ContainerContribution existing = s.containers.get(cid);
                     if (markedPrivate) {
+                        SmartObjectRegistry.onContainerRemoved(s.settlementId, cid);
                         if (existing != null && STATUS_PRIVATE.equals(existing.status)) {
                             continue;
                         }
@@ -1118,6 +1256,7 @@ public final class WarehouseFastIndex {
                         continue;
                     }
 
+                    SmartZoningPolicy.ContainerFilterRule zoneRule = SmartZoningPolicy.readRule(obj);
                     double cap = ic.getCapacity();
                     if (existing != null
                             && STATUS_LOADED.equals(existing.status)
@@ -1126,6 +1265,11 @@ public final class WarehouseFastIndex {
                             && Objects.equals(existing.kind, kind)
                             && Objects.equals(existing.customName, customName)
                             && existing.fingerprint.matchesContainer(ic)) {
+                        if (hasSmartZoneRuleChanged(s.settlementId, cid, zoneRule)) {
+                            SmartObjectRegistry.onContainerScanned(
+                                    s.settlementId, cid, sq, zoneRule, existing.count, cap, existing.usedWeight);
+                            changed = true;
+                        }
                         continue;
                     }
 
@@ -1141,6 +1285,8 @@ public final class WarehouseFastIndex {
 
                     populateLoadedContribution(existing, ic, fp, cap, used, kind, customName);
                     s.aggregate.add(existing);
+                    SmartObjectRegistry.onContainerScanned(
+                            s.settlementId, cid, sq, zoneRule, existing.count, cap, used);
                     changed = true;
                 }
             }
@@ -1153,6 +1299,7 @@ public final class WarehouseFastIndex {
                     ContainerContribution old = s.containers.remove(oldId);
                     if (old != null) {
                         s.aggregate.subtract(old);
+                        SmartObjectRegistry.onContainerRemoved(s.settlementId, oldId);
                         changed = true;
                     }
                 }
@@ -1168,6 +1315,25 @@ public final class WarehouseFastIndex {
         }
         SmartObjectRegistry.onSquareScanned(s.settlementId, sq);
         return changed;
+    }
+
+    private static boolean hasSmartZoneRuleChanged(
+            String settlementId, String containerId, SmartZoningPolicy.ContainerFilterRule rule) {
+        SmartSlot slot = SmartObjectRegistry.getContainerSlot(settlementId, containerId);
+        if (slot == null) {
+            return true;
+        }
+        SmartZoningPolicy.ContainerFilterRule cur = slot.getFilterRule();
+        if (cur == null) {
+            return true;
+        }
+        return cur.role != rule.role
+                || cur.priority != rule.priority
+                || cur.enabled != rule.enabled
+                || !cur.allowGroups.equals(rule.allowGroups)
+                || !cur.denyGroups.equals(rule.denyGroups)
+                || !cur.allowTypes.equals(rule.allowTypes)
+                || !cur.denyTypes.equals(rule.denyTypes);
     }
 
     private static void populateLoadedContribution(
@@ -1273,6 +1439,14 @@ public final class WarehouseFastIndex {
             contEntry.rawset("count", Double.valueOf(c.count));
             contEntry.rawset("loaded", Boolean.valueOf(isLoaded));
             contEntry.rawset("status", c.status);
+            SmartSlot slot = SmartObjectRegistry.getContainerSlot(s.settlementId, c.containerId);
+            if (slot != null) {
+                contEntry.rawset("role", slot.getContainerRole().name());
+                contEntry.rawset("priority", Double.valueOf(slot.getPriority()));
+            } else {
+                contEntry.rawset("role", ContainerRole.STORAGE.name());
+                contEntry.rawset("priority", Double.valueOf(SmartZoningPolicy.DEFAULT_PRIORITY));
+            }
             containersTable.rawset(Double.valueOf(contIndex++), contEntry);
         }
 

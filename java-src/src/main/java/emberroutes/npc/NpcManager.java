@@ -2,6 +2,7 @@ package emberroutes.npc;
 
 import emberroutes.npc.brain.BrainContext;
 import emberroutes.npc.brain.BrainMode;
+import emberroutes.npc.brain.LogisticsWorkDutyProvider;
 import emberroutes.npc.brain.SettlementDangerField;
 import emberroutes.npc.brain.TempPropHelper;
 import emberroutes.warehouse.WarehouseFastIndex;
@@ -166,6 +167,7 @@ public final class NpcManager {
         pendingMoveEvents.clear();
         EmberLeaderTrail.resetAll();
         SettlementDangerField.reset();
+        LogisticsWorkDutyProvider.reset();
         owningCell = null;
         nextIdSeq = 1;
         tickCounter = 0;
@@ -488,6 +490,7 @@ public final class NpcManager {
         brainSimTimeSec += stepDt;
 
         List<NpcRecord> snapshot = new ArrayList<>(records.values());
+        List<IsoNPC> activeNpcs = new ArrayList<>(snapshot.size());
         for (int i = 0, n = snapshot.size(); i < n; i++) {
             NpcRecord rec = snapshot.get(i);
             if (!rec.phasedIn || rec.deadRetired || rec.liveNpc == null || rec.liveNpc.isDead()) {
@@ -506,11 +509,19 @@ public final class NpcManager {
                     ? homeId
                     : WarehouseFastIndex.findSettlementIdAt(
                             (int) Math.floor(npc.getX()), (int) Math.floor(npc.getY()));
+            activeNpcs.add(npc);
+        }
+
+        LogisticsWorkDutyProvider.tickSettlementAuctions(activeNpcs, brainSimTimeSec);
+
+        for (int i = 0, n = activeNpcs.size(); i < n; i++) {
+            IsoNPC npc = activeNpcs.get(i);
+            BrainContext ctx = npc.getBrainContext();
             try {
                 npc.getPerception().tick(npc, brainSimTimeSec, stepDt);
                 npc.getBrain().tick(ctx);
             } catch (Throwable t) {
-                DebugLog.log("[EmberRoutes] Brain tick failed for " + rec.npcId + ": " + t.getMessage());
+                DebugLog.log("[EmberRoutes] Brain tick failed for " + npc.getNpcId() + ": " + t.getMessage());
             }
         }
     }

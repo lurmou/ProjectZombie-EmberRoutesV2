@@ -25,6 +25,44 @@ public final class EmberFormationMatcher {
     /** 保持上一次已分配阵位时的粘滞代价奖励（负值表示偏好保留原阵位）。 */
     static final float STICKY_BONUS = -0.65F;
 
+    /** 矩形匈牙利算法中虚拟填充行/列与不可达边使用的统一高成本哨兵值。 */
+    public static final double DUMMY_COST = 1.0e6;
+
+    /** 0-GC 矩形匈牙利算法预分配工作区（稳态下复用全部数组零堆分配）。 */
+    public static final class RectangularHungarianWorkspace {
+        private int capacity;
+        private double[][] paddedCost;
+        private double[] u;
+        private double[] v;
+        private double[] minv;
+        private int[] p;
+        private int[] way;
+        private boolean[] used;
+
+        public RectangularHungarianWorkspace() {
+            this(16);
+        }
+
+        public RectangularHungarianWorkspace(int initialCapacity) {
+            ensureCapacity(Math.max(4, initialCapacity));
+        }
+
+        void ensureCapacity(int dim) {
+            if (dim <= capacity && paddedCost != null) {
+                return;
+            }
+            int nextCap = Math.max(dim, capacity == 0 ? 16 : capacity * 2);
+            this.capacity = nextCap;
+            this.paddedCost = new double[nextCap + 1][nextCap + 1];
+            this.u = new double[nextCap + 1];
+            this.v = new double[nextCap + 1];
+            this.minv = new double[nextCap + 1];
+            this.p = new int[nextCap + 1];
+            this.way = new int[nextCap + 1];
+            this.used = new boolean[nextCap + 1];
+        }
+    }
+
     private EmberFormationMatcher() {}
 
     /**
@@ -124,6 +162,69 @@ public final class EmberFormationMatcher {
     }
 
     /**
+     * 0-GC 矩形匈牙利最小权匹配求解器（自动以 {@link #DUMMY_COST} 补齐虚拟行/列并剔除不可达配对）：
+     * <ul>
+     *   <li>{@code outRowToCol[r]} 写入第 {@code r} 行匹配到的真实列号 {@code 0..cols-1}，未匹配或被不可达哨兵剔除则为 {@code -1}；</li>
+     *   <li>传入可复用的 {@link RectangularHungarianWorkspace} 时稳态 0 堆分配。</li>
+     * </ul>
+     */
+    public static void solveRectangularHungarian(
+            int rows,
+            int cols,
+            double[][] costMatrix,
+            int[] outRowToCol,
+            RectangularHungarianWorkspace workspace) {
+        if (rows <= 0) {
+            return;
+        }
+        if (outRowToCol != null) {
+            Arrays.fill(outRowToCol, 0, Math.min(rows, outRowToCol.length), -1);
+        }
+        if (cols <= 0 || costMatrix == null || outRowToCol == null) {
+            return;
+        }
+
+        int dim = Math.max(rows, cols);
+        RectangularHungarianWorkspace ws = workspace != null ? workspace : new RectangularHungarianWorkspace(dim);
+        ws.ensureCapacity(dim);
+
+        double threshold = DUMMY_COST * 0.5;
+        for (int r = 0; r < dim; r++) {
+            double[] srcRow = (r < rows && r < costMatrix.length) ? costMatrix[r] : null;
+            double[] dstRow = ws.paddedCost[r + 1];
+            for (int c = 0; c < dim; c++) {
+                double val = DUMMY_COST;
+                if (srcRow != null && c < cols && c < srcRow.length) {
+                    double raw = srcRow[c];
+                    if (Double.isFinite(raw) && raw < threshold) {
+                        val = raw;
+                    }
+                }
+                dstRow[c + 1] = val;
+            }
+        }
+
+        Arrays.fill(ws.u, 0, dim + 1, 0.0);
+        Arrays.fill(ws.v, 0, dim + 1, 0.0);
+        Arrays.fill(ws.p, 0, dim + 1, 0);
+        Arrays.fill(ws.way, 0, dim + 1, 0);
+
+        runHungarianCore(dim, ws.paddedCost, ws.u, ws.v, ws.p, ws.way, ws.used, ws.minv);
+
+        for (int j = 1; j <= dim; j++) {
+            int r = ws.p[j] - 1;
+            int c = j - 1;
+            if (r >= 0 && r < rows && r < outRowToCol.length) {
+                if (c >= 0 && c < cols && ws.paddedCost[r + 1][c + 1] < threshold) {
+                    outRowToCol[r] = c;
+                } else {
+                    outRowToCol[r] = -1;
+                }
+            }
+        }
+    }
+
+    /**
      * 标准 1-indexed \(O(N^3)\) Kuhn-Munkres / 匈牙利最小权完备匹配求解器。
      */
     private static int[] solveHungarian1Indexed(int n, double[][] cost) {
@@ -134,11 +235,31 @@ public final class EmberFormationMatcher {
         double[] minv = new double[n + 1];
         boolean[] used = new boolean[n + 1];
 
+        runHungarianCore(n, cost, u, v, p, way, used, minv);
+
+        int[] rowToCol0Indexed = new int[n];
+        for (int j = 1; j <= n; j++) {
+            if (p[j] >= 1 && p[j] <= n) {
+                rowToCol0Indexed[p[j] - 1] = j - 1;
+            }
+        }
+        return rowToCol0Indexed;
+    }
+
+    private static void runHungarianCore(
+            int n,
+            double[][] cost,
+            double[] u,
+            double[] v,
+            int[] p,
+            int[] way,
+            boolean[] used,
+            double[] minv) {
         for (int i = 1; i <= n; i++) {
             p[0] = i;
             int j0 = 0;
-            Arrays.fill(minv, Double.POSITIVE_INFINITY);
-            Arrays.fill(used, false);
+            Arrays.fill(minv, 0, n + 1, Double.POSITIVE_INFINITY);
+            Arrays.fill(used, 0, n + 1, false);
             do {
                 used[j0] = true;
                 int i0 = p[j0];
@@ -175,13 +296,5 @@ public final class EmberFormationMatcher {
                 j0 = j1;
             } while (j0 != 0);
         }
-
-        int[] rowToCol0Indexed = new int[n];
-        for (int j = 1; j <= n; j++) {
-            if (p[j] >= 1 && p[j] <= n) {
-                rowToCol0Indexed[p[j] - 1] = j - 1;
-            }
-        }
-        return rowToCol0Indexed;
     }
 }

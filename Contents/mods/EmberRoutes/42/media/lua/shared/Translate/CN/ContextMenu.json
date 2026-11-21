@@ -45,5 +45,13 @@
     "ContextMenu_ER_M3_NeedThirst": "设为口渴 (Thirst = 0.70)",
     "ContextMenu_ER_M3_NeedFatigue": "设为极困 (Fatigue = 0.85)",
     "ContextMenu_ER_M3_NeedBleeding": "左前臂划伤流血 (无感染)",
-    "ContextMenu_ER_M3_NeedRestore": "重置全部生理与健康状态"
+    "ContextMenu_ER_M3_NeedRestore": "重置全部生理与健康状态",
+    "ContextMenu_ER_M3_SmartZoneMenuFmt": "容器物流角色与智能分区 [%1 | %2]",
+    "ContextMenu_ER_M3_Role_STORAGE": "设为主仓储箱 (STORAGE)",
+    "ContextMenu_ER_M3_Role_BUFFER_IN": "设为卸货缓冲箱 (BUFFER_IN 自动理货)",
+    "ContextMenu_ER_M3_Role_WORKSTATION_IO": "设为工位料架 (WORKSTATION_IO)",
+    "ContextMenu_ER_M3_Role_PICKUP_OUT": "设为提货交接箱 (PICKUP_OUT)",
+    "ContextMenu_ER_M3_AutoSmartZone": "一键智能自动分区 (SmartZoning)",
+    "ContextMenu_ER_M3_InspectLogisticsFmt": "打印据点物流广播与提货单状态 [%1]",
+    "ContextMenu_ER_M3_TestDeliverAppleFmt": "测试实体配送订单: 苹果 x1 [%1]"
 }

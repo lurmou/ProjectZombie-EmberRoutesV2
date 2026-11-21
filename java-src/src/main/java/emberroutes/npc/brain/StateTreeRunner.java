@@ -49,6 +49,16 @@ public final class StateTreeRunner {
         return chainedNextScope;
     }
 
+    /** 查询当前叶子是否仍处于防抖最小驻留保护窗内（用于拍卖器避开刚坐下休息的 NPC）。 */
+    public boolean isMinDwellActive(double simTime) {
+        if (activeDepth <= 0) {
+            return false;
+        }
+        StateNode leaf = activeStack[activeDepth - 1];
+        double minDwell = leaf.getMinDwellSimSeconds();
+        return minDwell > 0.0 && (simTime - enteredSimTime[activeDepth - 1]) < minDwell;
+    }
+
     /** 返回当前激活路径拼接字符串（如 {@code ROOT/SURVIVAL_CRITICAL/EAT}），无 Heap 浪费。 */
     public String getActivePathString() {
         if (activeDepth <= 0) {

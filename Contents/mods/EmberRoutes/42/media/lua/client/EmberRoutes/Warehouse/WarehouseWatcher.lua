@@ -1,5 +1,6 @@
 local Kernel = require "EmberRoutes/Kernel"
 local SettlementStore = require "EmberRoutes/Settlement/SettlementStore"
+local SmartZoningPresets = require "EmberRoutes/Warehouse/SmartZoningPresets"
 
 local WarehouseWatcher = {}
 
@@ -20,6 +21,7 @@ end
 Kernel.registerModule({
     id = "warehouse",
     onWorldReady = function()
+        SmartZoningPresets.syncAllToJava()
         SettlementStore.reconcileAndMountAll()
     end,
     tick = { stage = "WORLD_SYNC", fn = tickWarehouse },

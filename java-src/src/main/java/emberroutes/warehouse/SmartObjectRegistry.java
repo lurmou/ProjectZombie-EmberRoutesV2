@@ -1,9 +1,12 @@
 package emberroutes.warehouse;
 
+import emberroutes.warehouse.SmartSlot.ContainerLease;
+import emberroutes.warehouse.SmartSlot.LeaseDirection;
 import emberroutes.warehouse.SmartSlot.LeaseStatus;
 import emberroutes.warehouse.SmartSlot.SlotKind;
 import emberroutes.warehouse.SmartSlot.SmartSlotLease;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -11,6 +14,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoChunk;
@@ -27,16 +31,27 @@ import zombie.util.list.PZArrayList;
  * <ul>
  *   <li>直接寄生 {@link WarehouseFastIndex} 的区块/方块扫描与卸载链路；</li>
  *   <li>多格家具（{@code IsoSpriteGrid != null}）以网格原点 {@code (0,0)} 为唯一键，跨 Chunk 全子格齐备才激活、任一子格卸载即下架；</li>
- *   <li>支持脱机无引擎纯数据单元测试与在场物理占座门控 {@code extraFilter}。</li>
+ *   <li>容器与工位支持 8 邻格 {@code standDirMask} 预计算（30s 局部退避换侧）、{@code WORKSTATION_IO} 3 格双向对称绑定、
+ *       以及 {@code BUFFER_IN} $O(1)$ 侵入式逆向广播表 {@code advertisedHaulOutSlots}。</li>
  * </ul>
  */
 public final class SmartObjectRegistry {
-    private record TileRef(String settlementId, String slotId, int x, int y, int z, long bitMask) {}
+    public static final int[] DIR_DX = {0, 1, 1, 1, 0, -1, -1, -1};
+    public static final int[] DIR_DY = {-1, -1, 0, 1, 1, 1, 0, -1};
+    public static final double STAND_DIR_BACKOFF_SEC = 30.0;
+    public static final double WITHDRAWN_PROTECTION_SEC = 60.0;
+    public static final double FULL_CONTAINER_COOLDOWN_SEC = 60.0;
+    public static final int WORKSTATION_BIND_CHEBYSHEV_RADIUS = 3;
+
+    private record TileRef(String settlementId, String slotId, SlotKind kind, int x, int y, int z, long bitMask) {}
 
     private static final class SettlementSlots {
         final Map<String, SmartSlot> byId = new HashMap<>();
+        final Map<String, SmartSlot> containersById = new HashMap<>();
         final EnumMap<SlotKind, List<SmartSlot>> activeByKind = new EnumMap<>(SlotKind.class);
+        final List<SmartSlot> advertisedHaulOutSlots = new ArrayList<>();
         final Map<Long, List<TileRef>> refsBySquare = new HashMap<>();
+        boolean auctionDirty;
 
         SettlementSlots() {
             for (SlotKind kind : SlotKind.values()) {
@@ -48,25 +63,41 @@ public final class SmartObjectRegistry {
     private static final Map<String, SettlementSlots> SETTLEMENTS = new HashMap<>();
     private static final Map<Long, List<TileRef>> REFS_BY_CHUNK = new HashMap<>();
     private static long nextLeaseToken = 1L;
+    private static volatile double currentSimTime = 0.0;
 
     private SmartObjectRegistry() {}
+
+    public static void setCurrentSimTime(double simTime) {
+        currentSimTime = Math.max(0.0, simTime);
+    }
+
+    public static double getCurrentSimTime() {
+        return currentSimTime;
+    }
 
     public static synchronized void reset() {
         for (SettlementSlots ss : SETTLEMENTS.values()) {
             for (SmartSlot slot : ss.byId.values()) {
                 invalidateActiveLease(slot);
                 slot.active = false;
+                slot.advertisedHaulOutListIdx = -1;
             }
+            ss.advertisedHaulOutSlots.clear();
+            ss.containersById.clear();
+            ss.auctionDirty = false;
         }
         SETTLEMENTS.clear();
         REFS_BY_CHUNK.clear();
+        RoomConnectivityIndex.reset();
         nextLeaseToken = 1L;
+        currentSimTime = 0.0;
     }
 
     public static synchronized void invalidateSettlement(String settlementId) {
         if (settlementId == null) {
             return;
         }
+        RoomConnectivityIndex.invalidateSettlement(settlementId);
         SettlementSlots ss = SETTLEMENTS.remove(settlementId);
         if (ss == null) {
             return;
@@ -74,7 +105,10 @@ public final class SmartObjectRegistry {
         for (SmartSlot slot : ss.byId.values()) {
             invalidateActiveLease(slot);
             slot.active = false;
+            slot.advertisedHaulOutListIdx = -1;
         }
+        ss.advertisedHaulOutSlots.clear();
+        ss.containersById.clear();
         for (Iterator<Map.Entry<Long, List<TileRef>>> it = REFS_BY_CHUNK.entrySet().iterator(); it.hasNext(); ) {
             List<TileRef> refs = it.next().getValue();
             refs.removeIf(r -> settlementId.equals(r.settlementId()));
@@ -212,23 +246,157 @@ public final class SmartObjectRegistry {
             }
         }
 
-        // 剔除该格原先存在但本次重扫已消失的家具位掩码（如大锤拆床/拆椅）
+        RoomConnectivityIndex.scanSquareDoors(settlementId, sq);
+
+        // 剔除该格原先存在但本次重扫已消失的床/椅家具位掩码（CONTAINER 与 WORKSTATION 由各自扫描/移除入口维护）
         SettlementSlots ss = SETTLEMENTS.get(settlementId);
         if (ss == null) {
             return;
         }
         List<TileRef> existing = ss.refsBySquare.get(sqKey);
-        if (existing == null || existing.isEmpty()) {
-            return;
-        }
-        for (int i = existing.size() - 1; i >= 0; i--) {
-            TileRef ref = existing.get(i);
-            if (seenSlotIds == null || !seenSlotIds.contains(ref.slotId())) {
-                detachTileRef(ss, existing, i, sqKey);
+        if (existing != null && !existing.isEmpty()) {
+            for (int i = existing.size() - 1; i >= 0; i--) {
+                TileRef ref = existing.get(i);
+                if (ref.kind() != SlotKind.BED && ref.kind() != SlotKind.SEAT) {
+                    continue;
+                }
+                if (seenSlotIds == null || !seenSlotIds.contains(ref.slotId())) {
+                    detachTileRef(ss, existing, i, sqKey);
+                }
+            }
+            if (existing.isEmpty()) {
+                ss.refsBySquare.remove(sqKey);
             }
         }
-        if (existing.isEmpty()) {
-            ss.refsBySquare.remove(sqKey);
+
+        // O(1) 刷新本格及 8 邻格上已加载容器/工位插槽的可达站位掩码 standDirMask
+        refreshStandDirMasksAround(ss, sq);
+    }
+
+    private static void refreshStandDirMasksAround(SettlementSlots ss, IsoGridSquare sq) {
+        IsoCell cell = sq.getCell();
+        if (cell == null || ss.refsBySquare.isEmpty()) {
+            return;
+        }
+        int cx = sq.getX();
+        int cy = sq.getY();
+        int cz = sq.getZ();
+        refreshStandDirMaskAtSquare(ss, sq);
+        for (int d = 0; d < 8; d++) {
+            int nx = cx + DIR_DX[d];
+            int ny = cy + DIR_DY[d];
+            long nbKey = ContainerDirtyQueue.packCoord(nx, ny, cz);
+            if (!ss.refsBySquare.containsKey(nbKey)) {
+                continue;
+            }
+            IsoGridSquare nbSq = cell.getGridSquare(nx, ny, cz);
+            if (nbSq != null) {
+                refreshStandDirMaskAtSquare(ss, nbSq);
+            }
+        }
+    }
+
+    private static void refreshStandDirMaskAtSquare(SettlementSlots ss, IsoGridSquare sq) {
+        long sqKey = ContainerDirtyQueue.packCoord(sq.getX(), sq.getY(), sq.getZ());
+        List<TileRef> refs = ss.refsBySquare.get(sqKey);
+        if (refs == null || refs.isEmpty()) {
+            return;
+        }
+        int computedMask = -1;
+        long roomId = sq.getRoomID();
+        for (int i = 0, n = refs.size(); i < n; i++) {
+            TileRef ref = refs.get(i);
+            if (ref.kind() != SlotKind.CONTAINER && ref.kind() != SlotKind.WORKSTATION) {
+                continue;
+            }
+            SmartSlot slot = ss.byId.get(ref.slotId());
+            if (slot != null) {
+                if (computedMask < 0) {
+                    computedMask = computeStandDirMask(sq);
+                }
+                slot.standDirMask = computedMask;
+                slot.roomId = roomId;
+            }
+        }
+    }
+
+    /** 预计算世界格 8 邻格可达站位掩码（位 {@code d = 0..7} 对应 {@link #DIR_DX}/{@link #DIR_DY}）。 */
+    public static int computeStandDirMask(IsoGridSquare sq) {
+        if (sq == null) {
+            return 0;
+        }
+        IsoCell cell = sq.getCell();
+        if (cell == null) {
+            return 0;
+        }
+        int x = sq.getX();
+        int y = sq.getY();
+        int z = sq.getZ();
+        int mask = 0;
+        for (int d = 0; d < 8; d++) {
+            int nx = x + DIR_DX[d];
+            int ny = y + DIR_DY[d];
+            IsoGridSquare nb = cell.getGridSquare(nx, ny, z);
+            if (nb == null || !nb.TreatAsSolidFloor() || nb.isSolid() || nb.isSolidTrans()) {
+                continue;
+            }
+            if ((d & 1) == 0) {
+                if (!sq.isBlockedTo(nb)) {
+                    mask |= (1 << d);
+                }
+            } else {
+                IsoGridSquare c1 = cell.getGridSquare(nx, y, z);
+                IsoGridSquare c2 = cell.getGridSquare(x, ny, z);
+                boolean via1 = c1 != null && !sq.isBlockedTo(c1) && !c1.isBlockedTo(nb);
+                boolean via2 = c2 != null && !sq.isBlockedTo(c2) && !c2.isBlockedTo(nb);
+                if (via1 || via2) {
+                    mask |= (1 << d);
+                }
+            }
+        }
+        return mask;
+    }
+
+    /** 选出距发起点最近的非退避可达站位，返回 {@code {standX, standY, dirIdx}}（若无侧位则回退原点）。 */
+    public static int[] pickBestStandTile(SmartSlot slot, float fromX, float fromY, double simTime) {
+        if (slot == null) {
+            return new int[]{0, 0, -1};
+        }
+        int bestDir = -1;
+        double bestDistSq = Double.MAX_VALUE;
+        int fallbackDir = -1;
+        double fallbackDistSq = Double.MAX_VALUE;
+
+        for (int d = 0; d < 8; d++) {
+            if ((slot.standDirMask & (1 << d)) == 0) {
+                continue;
+            }
+            int sx = slot.originX + DIR_DX[d];
+            int sy = slot.originY + DIR_DY[d];
+            double dx = (sx + 0.5) - fromX;
+            double dy = (sy + 0.5) - fromY;
+            double dSq = dx * dx + dy * dy;
+            if (dSq < fallbackDistSq) {
+                fallbackDistSq = dSq;
+                fallbackDir = d;
+            }
+            if (!slot.isStandDirBackedOff(d, simTime) && dSq < bestDistSq) {
+                bestDistSq = dSq;
+                bestDir = d;
+            }
+        }
+
+        int chosen = bestDir >= 0 ? bestDir : fallbackDir;
+        if (chosen < 0) {
+            return new int[]{slot.originX, slot.originY, -1};
+        }
+        return new int[]{slot.originX + DIR_DX[chosen], slot.originY + DIR_DY[chosen], chosen};
+    }
+
+    /** 寻路遇到特定方位 {@code NO_PATH / STUCK} 时记 30s 局部退避，驱动下次自动换侧。 */
+    public static synchronized void markStandDirFailed(SmartSlot slot, int dirIdx, double simTime) {
+        if (slot != null && dirIdx >= 0 && dirIdx < 8) {
+            slot.standDirBackoffUntil[dirIdx] = simTime + STAND_DIR_BACKOFF_SEC;
         }
     }
 
@@ -333,7 +501,7 @@ public final class SmartObjectRegistry {
         long bitMask = 1L << bitIdx;
         if ((slot.loadedMask & bitMask) == 0L) {
             slot.loadedMask |= bitMask;
-            TileRef ref = new TileRef(settlementId, slotId, tileX, tileY, z, bitMask);
+            TileRef ref = new TileRef(settlementId, slotId, kind, tileX, tileY, z, bitMask);
             long sqKey = ContainerDirtyQueue.packCoord(tileX, tileY, z);
             ss.refsBySquare.computeIfAbsent(sqKey, k -> new ArrayList<>(2)).add(ref);
             long chunkKey = packChunkCoord(Math.floorDiv(tileX, 8), Math.floorDiv(tileY, 8));
@@ -345,6 +513,469 @@ public final class SmartObjectRegistry {
             ss.activeByKind.get(kind).add(slot);
         }
         return slot;
+    }
+
+    /** 注册/刷新一个容器物流插槽（寄生 {@link WarehouseFastIndex}，实机扫格直入）。 */
+    public static synchronized SmartSlot onContainerScanned(
+            String settlementId,
+            String containerId,
+            IsoGridSquare sq,
+            SmartZoningPolicy.ContainerFilterRule rule,
+            int availableItemCount,
+            double capacity,
+            double usedWeight) {
+        if (sq == null) {
+            return null;
+        }
+        int mask = computeStandDirMask(sq);
+        long roomId = sq.getRoomID();
+        return registerContainerSlotInternal(
+                settlementId,
+                containerId,
+                sq.getX(),
+                sq.getY(),
+                sq.getZ(),
+                roomId,
+                mask,
+                rule,
+                availableItemCount,
+                capacity,
+                usedWeight,
+                currentSimTime);
+    }
+
+    /** 纯数据容器插槽注册入口（脱机 JUnit 与运行时共享统一逻辑）。 */
+    public static synchronized SmartSlot registerContainerSlot(
+            String settlementId,
+            String containerId,
+            int x,
+            int y,
+            int z,
+            long roomId,
+            int standDirMask,
+            SmartZoningPolicy.ContainerFilterRule rule,
+            int availableItemCount,
+            double capacity,
+            double usedWeight,
+            double simTime) {
+        return registerContainerSlotInternal(
+                settlementId, containerId, x, y, z, roomId, standDirMask, rule,
+                availableItemCount, capacity, usedWeight, simTime);
+    }
+
+    private static SmartSlot registerContainerSlotInternal(
+            String settlementId,
+            String containerId,
+            int x,
+            int y,
+            int z,
+            long roomId,
+            int standDirMask,
+            SmartZoningPolicy.ContainerFilterRule rule,
+            int availableItemCount,
+            double capacity,
+            double usedWeight,
+            double simTime) {
+        if (settlementId == null || containerId == null || containerId.isEmpty()) {
+            return null;
+        }
+        SettlementSlots ss = SETTLEMENTS.computeIfAbsent(settlementId, k -> new SettlementSlots());
+        SmartSlot slot = ss.byId.get(containerId);
+        boolean isNew = false;
+        if (slot == null) {
+            slot = new SmartSlot(containerId, settlementId, SlotKind.CONTAINER, x, y, z, 1, 1);
+            slot.containerId = containerId;
+            ss.byId.put(containerId, slot);
+            ss.containersById.put(containerId, slot);
+            isNew = true;
+        }
+
+        if ((slot.loadedMask & 1L) == 0L) {
+            slot.loadedMask = 1L;
+            TileRef ref = new TileRef(settlementId, containerId, SlotKind.CONTAINER, x, y, z, 1L);
+            long sqKey = ContainerDirtyQueue.packCoord(x, y, z);
+            ss.refsBySquare.computeIfAbsent(sqKey, k -> new ArrayList<>(2)).add(ref);
+            long chunkKey = packChunkCoord(Math.floorDiv(x, 8), Math.floorDiv(y, 8));
+            REFS_BY_CHUNK.computeIfAbsent(chunkKey, k -> new ArrayList<>(4)).add(ref);
+        }
+
+        boolean wasActive = slot.active;
+        if (!slot.active) {
+            slot.active = true;
+            ss.activeByKind.get(SlotKind.CONTAINER).add(slot);
+        }
+
+        ContainerRole prevRole = slot.containerRole;
+        int prevAvailable = slot.availableItemCount;
+        SmartZoningPolicy.ContainerFilterRule safeRule = rule != null
+                ? rule.copy()
+                : new SmartZoningPolicy.ContainerFilterRule();
+
+        slot.standDirMask = standDirMask;
+        slot.roomId = roomId;
+        slot.filterRule = safeRule;
+        slot.containerRole = safeRule.role;
+        slot.priority = safeRule.priority;
+        slot.filterEnabled = safeRule.enabled;
+        slot.availableItemCount = Math.max(0, availableItemCount);
+        slot.capacity = Math.max(0.0, capacity);
+        slot.usedWeight = Math.max(0.0, usedWeight);
+
+        if (isNew || !wasActive || prevRole != slot.containerRole) {
+            syncWorkstationBindings(ss, slot);
+        }
+
+        updateHaulOutAdvertisement(ss, slot, simTime);
+        if (slot.advertisedHaulOutListIdx >= 0
+                && (slot.availableItemCount > prevAvailable || prevRole != slot.containerRole)) {
+            ss.auctionDirty = true;
+        }
+        return slot;
+    }
+
+    /** 容器被拆毁或设为私密时即时撤出广播、解绑工位并失效关联租约。 */
+    public static synchronized void onContainerRemoved(String settlementId, String containerId) {
+        if (settlementId == null || containerId == null) {
+            return;
+        }
+        SettlementSlots ss = SETTLEMENTS.get(settlementId);
+        if (ss == null) {
+            return;
+        }
+        SmartSlot slot = ss.containersById.remove(containerId);
+        if (slot == null) {
+            return;
+        }
+        long sqKey = ContainerDirtyQueue.packCoord(slot.originX, slot.originY, slot.originZ);
+        List<TileRef> sqRefs = ss.refsBySquare.get(sqKey);
+        if (sqRefs != null) {
+            for (int i = sqRefs.size() - 1; i >= 0; i--) {
+                if (containerId.equals(sqRefs.get(i).slotId())) {
+                    detachTileRef(ss, sqRefs, i, sqKey);
+                }
+            }
+            if (sqRefs.isEmpty()) {
+                ss.refsBySquare.remove(sqKey);
+            }
+        } else {
+            applyBitClear(ss, containerId, 1L);
+        }
+    }
+
+    /** 注册工位插槽并自动完成同层 Chebyshev ≤ 3 格 {@code WORKSTATION_IO} 双向对称绑定。 */
+    public static synchronized SmartSlot registerWorkstationSlot(
+            String settlementId, int x, int y, int z, long roomId, int standDirMask) {
+        if (settlementId == null) {
+            return null;
+        }
+        SmartSlot slot = registerTileInternal(settlementId, SlotKind.WORKSTATION, x, y, z, 0, 0, 1, 1);
+        if (slot == null) {
+            return null;
+        }
+        slot.roomId = roomId;
+        slot.standDirMask = standDirMask;
+        SettlementSlots ss = SETTLEMENTS.get(settlementId);
+        if (ss != null) {
+            syncWorkstationBindings(ss, slot);
+        }
+        return slot;
+    }
+
+    private static void syncWorkstationBindings(SettlementSlots ss, SmartSlot slot) {
+        unbindWorkstationLinks(ss, slot);
+        if (slot == null || !slot.active) {
+            return;
+        }
+        if (slot.kind == SlotKind.WORKSTATION) {
+            List<SmartSlot> containers = ss.activeByKind.get(SlotKind.CONTAINER);
+            for (int i = 0, n = containers.size(); i < n; i++) {
+                SmartSlot c = containers.get(i);
+                if (c.active
+                        && c.containerRole == ContainerRole.WORKSTATION_IO
+                        && isWithinWorkstationRadius(slot, c)) {
+                    slot.boundWorkstationIoIds.add(c.slotId);
+                    c.boundWorkstationIds.add(slot.slotId);
+                }
+            }
+        } else if (slot.kind == SlotKind.CONTAINER && slot.containerRole == ContainerRole.WORKSTATION_IO) {
+            List<SmartSlot> stations = ss.activeByKind.get(SlotKind.WORKSTATION);
+            for (int i = 0, n = stations.size(); i < n; i++) {
+                SmartSlot w = stations.get(i);
+                if (w.active && isWithinWorkstationRadius(slot, w)) {
+                    slot.boundWorkstationIds.add(w.slotId);
+                    w.boundWorkstationIoIds.add(slot.slotId);
+                }
+            }
+        }
+    }
+
+    private static boolean isWithinWorkstationRadius(SmartSlot a, SmartSlot b) {
+        if (a.originZ != b.originZ) {
+            return false;
+        }
+        int dx = Math.abs(a.originX - b.originX);
+        int dy = Math.abs(a.originY - b.originY);
+        return Math.max(dx, dy) <= WORKSTATION_BIND_CHEBYSHEV_RADIUS;
+    }
+
+    private static void unbindWorkstationLinks(SettlementSlots ss, SmartSlot slot) {
+        if (slot == null) {
+            return;
+        }
+        if (!slot.boundWorkstationIds.isEmpty()) {
+            for (String wid : slot.boundWorkstationIds) {
+                SmartSlot w = ss.byId.get(wid);
+                if (w != null) {
+                    w.boundWorkstationIoIds.remove(slot.slotId);
+                }
+            }
+            slot.boundWorkstationIds.clear();
+        }
+        if (!slot.boundWorkstationIoIds.isEmpty()) {
+            for (String cid : slot.boundWorkstationIoIds) {
+                SmartSlot c = ss.byId.get(cid);
+                if (c != null) {
+                    c.boundWorkstationIds.remove(slot.slotId);
+                }
+            }
+            slot.boundWorkstationIoIds.clear();
+        }
+    }
+
+    /** $O(1)$ 侵入式维护 {@code BUFFER_IN} 逆向广播表 {@code advertisedHaulOutSlots}。 */
+    private static void updateHaulOutAdvertisement(SettlementSlots ss, SmartSlot slot, double simTime) {
+        boolean shouldAdvertise = slot.active
+                && slot.kind == SlotKind.CONTAINER
+                && slot.containerRole == ContainerRole.BUFFER_IN
+                && slot.filterEnabled
+                && slot.getUnreservedOutItemCount() > 0
+                && !slot.isWithdrawnAt(simTime);
+        if (shouldAdvertise) {
+            if (slot.advertisedHaulOutListIdx < 0) {
+                slot.advertisedHaulOutListIdx = ss.advertisedHaulOutSlots.size();
+                ss.advertisedHaulOutSlots.add(slot);
+                ss.auctionDirty = true;
+            }
+        } else {
+            removeFromAdvertisedHaulOut(ss, slot);
+        }
+    }
+
+    private static void removeFromAdvertisedHaulOut(SettlementSlots ss, SmartSlot slot) {
+        int idx = slot.advertisedHaulOutListIdx;
+        if (idx < 0) {
+            return;
+        }
+        int lastIdx = ss.advertisedHaulOutSlots.size() - 1;
+        if (idx <= lastIdx && ss.advertisedHaulOutSlots.get(idx) == slot) {
+            if (idx != lastIdx) {
+                SmartSlot tail = ss.advertisedHaulOutSlots.get(lastIdx);
+                ss.advertisedHaulOutSlots.set(idx, tail);
+                tail.advertisedHaulOutListIdx = idx;
+            }
+            ss.advertisedHaulOutSlots.remove(lastIdx);
+        }
+        slot.advertisedHaulOutListIdx = -1;
+    }
+
+    /**
+     * 申请容器出库软预约租约（绑定进 NPC 状态树 {@code StateScope}）；
+     * 余量归零时 $O(1)$ swap-and-pop 自动从 {@code advertisedHaulOutSlots} 撤下广播。
+     */
+    public static synchronized ContainerLease acquireContainerOutLease(
+            String settlementId,
+            String slotId,
+            String npcId,
+            int itemCount,
+            double simTime,
+            double ttlSec,
+            Consumer<Runnable> scopeRegistrar) {
+        return acquireContainerLeaseInternal(
+                settlementId, slotId, npcId, LeaseDirection.OUTBOUND, itemCount, 0.0, simTime, ttlSec, scopeRegistrar);
+    }
+
+    /** 申请容器入库预留负重租约（绑定进 NPC 状态树 {@code StateScope}）。 */
+    public static synchronized ContainerLease acquireContainerInLease(
+            String settlementId,
+            String slotId,
+            String npcId,
+            double weight,
+            double simTime,
+            double ttlSec,
+            Consumer<Runnable> scopeRegistrar) {
+        return acquireContainerLeaseInternal(
+                settlementId, slotId, npcId, LeaseDirection.INBOUND, 0, weight, simTime, ttlSec, scopeRegistrar);
+    }
+
+    private static ContainerLease acquireContainerLeaseInternal(
+            String settlementId,
+            String slotId,
+            String npcId,
+            LeaseDirection direction,
+            int itemCount,
+            double weight,
+            double simTime,
+            double ttlSec,
+            Consumer<Runnable> scopeRegistrar) {
+        if (settlementId == null || slotId == null || npcId == null) {
+            return null;
+        }
+        SettlementSlots ss = SETTLEMENTS.get(settlementId);
+        if (ss == null) {
+            return null;
+        }
+        SmartSlot slot = ss.byId.get(slotId);
+        if (slot == null || !slot.active || slot.kind != SlotKind.CONTAINER) {
+            return null;
+        }
+
+        int reservedItems = 0;
+        double reservedWeight = 0.0;
+        if (direction == LeaseDirection.OUTBOUND) {
+            if (itemCount <= 0 || slot.isWithdrawnAt(simTime)) {
+                return null;
+            }
+            int avail = slot.getUnreservedOutItemCount();
+            if (avail <= 0) {
+                return null;
+            }
+            reservedItems = Math.min(itemCount, avail);
+            slot.reservedOutItemCount += reservedItems;
+        } else {
+            if (weight <= 0.0 || slot.isFullCooldownAt(simTime) || slot.getFreeInWeight() + 1.0E-4 < weight) {
+                return null;
+            }
+            reservedWeight = weight;
+            slot.reservedInWeight += reservedWeight;
+        }
+
+        double expires = ttlSec > 0.0 ? (simTime + ttlSec) : 0.0;
+        ContainerLease lease = new ContainerLease(
+                slot, nextLeaseToken++, npcId, direction, reservedItems, reservedWeight, expires);
+        slot.containerLeases.add(lease);
+        if (direction == LeaseDirection.OUTBOUND) {
+            updateHaulOutAdvertisement(ss, slot, simTime);
+        }
+        if (scopeRegistrar != null) {
+            scopeRegistrar.accept(() -> releaseContainerLease(lease));
+        }
+        return lease;
+    }
+
+    /** 幂等释放容器物流软租约（通常由 {@code StateScope.close()} 自动触发），若有余量自动恢复广播。 */
+    public static synchronized void releaseContainerLease(ContainerLease lease) {
+        if (lease == null || lease.getStatus() != LeaseStatus.ACTIVE) {
+            return;
+        }
+        SmartSlot slot = lease.getSlot();
+        slot.containerLeases.remove(lease);
+        if (lease.getDirection() == LeaseDirection.OUTBOUND) {
+            slot.reservedOutItemCount = Math.max(0, slot.reservedOutItemCount - lease.getReservedItems());
+        } else {
+            slot.reservedInWeight = Math.max(0.0, slot.reservedInWeight - lease.getReservedWeight());
+        }
+        lease.setStatus(slot.active ? LeaseStatus.RELEASED : LeaseStatus.INVALIDATED);
+        SettlementSlots ss = SETTLEMENTS.get(slot.settlementId);
+        if (ss != null) {
+            updateHaulOutAdvertisement(ss, slot, currentSimTime);
+        }
+    }
+
+    /** 清理超时物流软租约并刷新 60s 提货保护窗到期后的 {@code BUFFER_IN} 广播。 */
+    public static synchronized void refreshTimeBasedStates(String settlementId, double simTime) {
+        currentSimTime = Math.max(currentSimTime, simTime);
+        if (settlementId == null) {
+            return;
+        }
+        SettlementSlots ss = SETTLEMENTS.get(settlementId);
+        if (ss == null) {
+            return;
+        }
+        List<SmartSlot> containers = ss.activeByKind.get(SlotKind.CONTAINER);
+        for (int i = 0, n = containers.size(); i < n; i++) {
+            SmartSlot slot = containers.get(i);
+            if (!slot.containerLeases.isEmpty()) {
+                for (int li = slot.containerLeases.size() - 1; li >= 0; li--) {
+                    ContainerLease lease = slot.containerLeases.get(li);
+                    if (lease.isExpiredAt(simTime)) {
+                        releaseContainerLease(lease);
+                    }
+                }
+            }
+            if (slot.containerRole == ContainerRole.BUFFER_IN) {
+                updateHaulOutAdvertisement(ss, slot, simTime);
+            }
+        }
+    }
+
+    public static synchronized void markWithdrawnWindow(String settlementId, String containerId, double untilSimTime) {
+        SmartSlot slot = getContainerSlot(settlementId, containerId);
+        if (slot == null) {
+            return;
+        }
+        slot.withdrawnUntilSimTime = Math.max(slot.withdrawnUntilSimTime, untilSimTime);
+        SettlementSlots ss = SETTLEMENTS.get(settlementId);
+        if (ss != null) {
+            updateHaulOutAdvertisement(ss, slot, currentSimTime);
+        }
+    }
+
+    public static synchronized void markFullCooldown(String settlementId, String containerId, double untilSimTime) {
+        SmartSlot slot = getContainerSlot(settlementId, containerId);
+        if (slot != null) {
+            slot.fullCooldownUntilSimTime = Math.max(slot.fullCooldownUntilSimTime, untilSimTime);
+        }
+    }
+
+    public static synchronized boolean isAuctionDirty(String settlementId) {
+        SettlementSlots ss = settlementId != null ? SETTLEMENTS.get(settlementId) : null;
+        return ss != null && ss.auctionDirty;
+    }
+
+    public static synchronized boolean consumeAuctionDirty(String settlementId) {
+        SettlementSlots ss = settlementId != null ? SETTLEMENTS.get(settlementId) : null;
+        if (ss == null || !ss.auctionDirty) {
+            return false;
+        }
+        ss.auctionDirty = false;
+        return true;
+    }
+
+    public static synchronized void markAuctionDirty(String settlementId) {
+        SettlementSlots ss = settlementId != null ? SETTLEMENTS.get(settlementId) : null;
+        if (ss != null) {
+            ss.auctionDirty = true;
+        }
+    }
+
+    public static synchronized List<SmartSlot> getAdvertisedHaulOutSlots(String settlementId) {
+        SettlementSlots ss = settlementId != null ? SETTLEMENTS.get(settlementId) : null;
+        if (ss == null || ss.advertisedHaulOutSlots.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return new ArrayList<>(ss.advertisedHaulOutSlots);
+    }
+
+    public static synchronized List<SmartSlot> getActiveContainerSlots(String settlementId) {
+        SettlementSlots ss = settlementId != null ? SETTLEMENTS.get(settlementId) : null;
+        if (ss == null) {
+            return Collections.emptyList();
+        }
+        List<SmartSlot> list = ss.activeByKind.get(SlotKind.CONTAINER);
+        return list == null || list.isEmpty() ? Collections.emptyList() : new ArrayList<>(list);
+    }
+
+    public static synchronized SmartSlot getContainerSlot(String settlementId, String containerId) {
+        if (settlementId == null || containerId == null) {
+            return null;
+        }
+        SettlementSlots ss = SETTLEMENTS.get(settlementId);
+        return ss != null ? ss.containersById.get(containerId) : null;
+    }
+
+    public static RoomConnectivityIndex.RoomTransition classifyRoomTransition(
+            String settlementId, int zA, long roomA, int zB, long roomB) {
+        return RoomConnectivityIndex.classify(settlementId, zA, roomA, zB, roomB);
     }
 
     /** 区块/单格卸载下架：任一子格卸载立即令 {@link SmartSlot} 下架并置当前持有租约 {@code INVALIDATED}。 */
@@ -424,10 +1055,15 @@ public final class SmartObjectRegistry {
         if (slot.active && (slot.loadedMask & slot.fullMask) != slot.fullMask) {
             slot.active = false;
             removeSlotFromActiveList(ss, slot);
+            removeFromAdvertisedHaulOut(ss, slot);
+            unbindWorkstationLinks(ss, slot);
             invalidateActiveLease(slot);
         }
         if (slot.loadedMask == 0L) {
             ss.byId.remove(slotId);
+            if (slot.containerId != null) {
+                ss.containersById.remove(slot.containerId);
+            }
         }
     }
 
@@ -454,6 +1090,15 @@ public final class SmartObjectRegistry {
             slot.activeLease.setStatus(LeaseStatus.INVALIDATED);
             slot.activeLease = null;
         }
+        if (!slot.containerLeases.isEmpty()) {
+            for (int i = 0, n = slot.containerLeases.size(); i < n; i++) {
+                ContainerLease cl = slot.containerLeases.get(i);
+                cl.setStatus(LeaseStatus.INVALIDATED);
+            }
+            slot.containerLeases.clear();
+        }
+        slot.reservedOutItemCount = 0;
+        slot.reservedInWeight = 0.0;
     }
 
     /** 查询指定据点当前是否存在满足物理门控的空闲 {@link SmartSlot}（零副作用预览）。 */
@@ -605,13 +1250,17 @@ public final class SmartObjectRegistry {
     public static synchronized String getSummary(String settlementId) {
         SettlementSlots ss = settlementId != null ? SETTLEMENTS.get(settlementId) : null;
         if (ss == null) {
-            return "none(beds=0,seats=0)";
+            return "none(beds=0,seats=0,containers=0,haulOut=0)";
         }
         int beds = ss.activeByKind.get(SlotKind.BED).size();
         int bedsOccupied = countOccupied(ss.activeByKind.get(SlotKind.BED));
         int seats = ss.activeByKind.get(SlotKind.SEAT).size();
         int seatsOccupied = countOccupied(ss.activeByKind.get(SlotKind.SEAT));
-        return String.format("%s(beds=%d/%d,seats=%d/%d)", settlementId, bedsOccupied, beds, seatsOccupied, seats);
+        int containers = ss.activeByKind.get(SlotKind.CONTAINER).size();
+        int haulOut = ss.advertisedHaulOutSlots.size();
+        return String.format(
+                "%s(beds=%d/%d,seats=%d/%d,containers=%d,haulOut=%d)",
+                settlementId, bedsOccupied, beds, seatsOccupied, seats, containers, haulOut);
     }
 
     private static int countOccupied(List<SmartSlot> list) {

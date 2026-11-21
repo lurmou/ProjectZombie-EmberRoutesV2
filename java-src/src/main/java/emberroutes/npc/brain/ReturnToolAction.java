@@ -20,6 +20,15 @@ public final class ReturnToolAction {
 
     private ReturnToolAction() {}
 
+    /** 为借用的真实工具原件写入 {@code ModData.ER_BorrowedFrom} 来源容器坐标戳，供空闲时自愈归还。 */
+    public static boolean markBorrowed(InventoryItem tool, String sourceContainerId) {
+        if (tool == null || sourceContainerId == null || sourceContainerId.isBlank()) {
+            return false;
+        }
+        tool.getModData().rawset(MODDATA_BORROWED_FROM_KEY, sourceContainerId);
+        return true;
+    }
+
     public static BaseAction.ItemLocation findBorrowedTool(IsoNPC npc) {
         if (npc == null || npc.getInventory() == null) {
             return null;
