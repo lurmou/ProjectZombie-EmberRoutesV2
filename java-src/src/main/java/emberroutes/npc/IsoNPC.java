@@ -2,8 +2,8 @@ package emberroutes.npc;
 
 import emberroutes.npc.brain.BrainContext;
 import emberroutes.npc.brain.BrainRouter;
-import emberroutes.npc.brain.SeatedReadingGlanceController;
 import emberroutes.npc.brain.TempPropHelper;
+import emberroutes.npc.perception.NpcPerception;
 import java.util.List;
 import zombie.Lua.LuaEventManager;
 import zombie.UpdateSchedulerSimulationLevel;
@@ -34,6 +34,8 @@ public final class IsoNPC extends IsoPlayer {
     private final EmberLocomotionController locomotion = new EmberLocomotionController();
     private final EmberFollowController follow = new EmberFollowController();
     private final NpcPostureController posture = new NpcPostureController();
+    private final EmberGazeController gaze = new EmberGazeController();
+    private final NpcPerception perception;
     private final BrainRouter brain = new BrainRouter();
     private final BrainContext brainContext;
 
@@ -59,15 +61,10 @@ public final class IsoNPC extends IsoPlayer {
     private int manualMovementClampZ;
     private boolean manualMovementClampIsFinalGoal;
 
-    private boolean seatedReadingGlanceActive;
-    private float seatedReadingGlanceHorizontal;
-    private float seatedReadingGlanceVertical;
-    private float seatedReadingGlanceEnvelope;
-    private boolean seatedReadingMaskDirty;
-
     public IsoNPC(String npcId, IsoCell cell, SurvivorDesc desc, int x, int y, int z) {
         super(cell, desc, 0, 0, 0);
         this.npcId = npcId;
+        this.perception = new NpcPerception(npcId);
         this.brainContext = new BrainContext(npcId);
         this.brainContext.npc = this;
         setNpc(true);
@@ -95,6 +92,14 @@ public final class IsoNPC extends IsoPlayer {
 
     public NpcPostureController getPosture() {
         return posture;
+    }
+
+    public EmberGazeController getGaze() {
+        return gaze;
+    }
+
+    public NpcPerception getPerception() {
+        return perception;
     }
 
     public BrainRouter getBrain() {
@@ -282,13 +287,7 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public float getTurnDelta() {
-        if (seatedReadingGlanceActive || seatedReadingMaskDirty) {
-            SeatedReadingGlanceController.applyReadingHeadMaskRelease(
-                    this, seatedReadingGlanceActive ? seatedReadingGlanceEnvelope : 0.0F);
-            if (!seatedReadingGlanceActive) {
-                seatedReadingMaskDirty = false;
-            }
-        }
+        gaze.applyBoneMaskIfNeeded(this);
         if (emberControlActive && emberMoving && isRunning()
                 && Math.abs(emberTurnDelta - 0.80F) > 0.01F) {
             return emberTurnDelta;
@@ -296,39 +295,14 @@ public final class IsoNPC extends IsoPlayer {
         return super.getTurnDelta();
     }
 
-    public boolean isSeatedReadingGlanceActive() {
-        return seatedReadingGlanceActive;
-    }
-
-    public void setSeatedReadingGlance(float horizontal, float vertical, float envelope01) {
-        this.seatedReadingGlanceActive = true;
-        this.seatedReadingGlanceHorizontal = horizontal;
-        this.seatedReadingGlanceVertical = vertical;
-        this.seatedReadingGlanceEnvelope = envelope01;
-        this.seatedReadingMaskDirty = true;
-        super.setHeadLookAroundDirection(horizontal, vertical);
-    }
-
-    public void clearSeatedReadingGlance() {
-        boolean wasActive = this.seatedReadingGlanceActive;
-        this.seatedReadingGlanceActive = false;
-        this.seatedReadingGlanceHorizontal = 0.0F;
-        this.seatedReadingGlanceVertical = 0.0F;
-        this.seatedReadingGlanceEnvelope = 0.0F;
-        if (wasActive || this.seatedReadingMaskDirty) {
-            this.seatedReadingMaskDirty = true;
-            super.setHeadLookAroundDirection(0.0F, 0.0F);
-            SeatedReadingGlanceController.applyReadingHeadMaskRelease(this, 0.0F);
-        }
+    /** 仅限 {@link EmberGazeController} 调用的唯一原生头部混合写入出口。 */
+    void applyGazeHeadLookDirect(float lookHorizontal, float lookVertical) {
+        super.setHeadLookAroundDirection(lookHorizontal, lookVertical);
     }
 
     @Override
     public void setHeadLookAroundDirection(float lookHorizontal, float lookVertical) {
-        if (seatedReadingGlanceActive) {
-            super.setHeadLookAroundDirection(seatedReadingGlanceHorizontal, seatedReadingGlanceVertical);
-            return;
-        }
-        super.setHeadLookAroundDirection(lookHorizontal, lookVertical);
+        gaze.interceptEngineHeadLookWrite(this, lookHorizontal, lookVertical);
     }
 
     @Override
@@ -414,6 +388,8 @@ public final class IsoNPC extends IsoPlayer {
         applyEmberTrackSpeedScale();
         brain.shutdown(brainContext);
         TempPropHelper.cleanupAllTempProps(this);
+        gaze.forceReset(this);
+        perception.reset();
         posture.forceImmediateReset(this, "DEATH", true);
         follow.stop(this, "DEATH");
         locomotion.interrupt(this, "DEATH");
@@ -447,6 +423,7 @@ public final class IsoNPC extends IsoPlayer {
         try {
             if (!isDead()) {
                 posture.beforeUpdate(this);
+                gaze.beforeUpdate(this);
                 if (!posture.isBlockingLocomotion()) {
                     follow.beforeLocomotion(this);
                 }
