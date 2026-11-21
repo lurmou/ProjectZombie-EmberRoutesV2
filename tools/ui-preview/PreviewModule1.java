@@ -247,28 +247,79 @@ public final class PreviewModule1 {
             enc.rawset("playerBuilt", Boolean.TRUE);
             return cf.push(enc);
         });
+        boolean isCnLang = "CN".equals(lang);
+        Map<String, String[]> itemCatalog = new LinkedHashMap<>();
+        itemCatalog.put("Base.Axe", new String[]{ isCnLang ? "消防斧" : "Fire Axe", "Axe" });
+        itemCatalog.put("Base.Plank", new String[]{ isCnLang ? "木板" : "Plank", "Plank" });
+        itemCatalog.put("Base.Apple", new String[]{ isCnLang ? "蘋果" : "Apple", "Apple" });
+        itemCatalog.put("Base.TinnedBeans", new String[]{ isCnLang ? "罐頭豆子" : "Canned Beans", "Beans" });
+        itemCatalog.put("Base.Bandage", new String[]{ isCnLang ? "急救繃帶" : "Bandage", "Bandage" });
+        itemCatalog.put("Base.Antibiotics", new String[]{ isCnLang ? "抗生素" : "Antibiotics", "Antibiotics" });
+        itemCatalog.put("Base.Bullets9mm", new String[]{ isCnLang ? "9mm子彈" : "9mm Rounds", "PistolAmmo" });
+        itemCatalog.put("Base.Pistol", new String[]{ isCnLang ? "M9手槍" : "M9 Pistol", "HandGun3" });
+        itemCatalog.put("Base.Bag_BigHikingBag", new String[]{ isCnLang ? "大登山包" : "Hiking Bag", "BigHiking_Blue" });
+        itemCatalog.put("Base.Hammer", new String[]{ isCnLang ? "鐵錘" : "Hammer", "Hammer" });
+        itemCatalog.put("Base.Saw", new String[]{ isCnLang ? "鋼鋸" : "Hacksaw", "Hacksaw" });
+        itemCatalog.put("Base.Nails", new String[]{ isCnLang ? "鐵釘" : "Nails", "Nails" });
+        itemCatalog.put("Base.WaterBottle", new String[]{ isCnLang ? "飲用水瓶" : "Water Bottle", "WaterBottle" });
+        itemCatalog.put("Base.FirstAidKit", new String[]{ isCnLang ? "急救箱" : "First Aid Kit", "FirstAid" });
+        itemCatalog.put("Base.Battery", new String[]{ isCnLang ? "乾電池" : "Battery", "Battery" });
+        itemCatalog.put("Base.Book", new String[]{ isCnLang ? "技能書" : "Skill Book", "Book" });
+        itemCatalog.put("Base.Crowbar", new String[]{ isCnLang ? "撬棍" : "Crowbar", "Crowbar" });
+        itemCatalog.put("Base.Scalpel", new String[]{ isCnLang ? "手術刀" : "Scalpel", "Scalpel" });
+        itemCatalog.put("Base.RottenApple", new String[]{ isCnLang ? "腐爛蘋果" : "Rotten Apple", "AppleRotten" });
+
+        Map<String, KahluaTable> mockScriptItems = new HashMap<>();
+        for (Map.Entry<String, String[]> entry : itemCatalog.entrySet()) {
+            String dName = entry.getValue()[0];
+            String icon = entry.getValue()[1];
+            Texture tex = Texture.trygetTexture("Item_" + icon);
+            if (tex == null) tex = Texture.getSharedTexture("Item_" + icon);
+            final Texture fTex = tex;
+            KahluaTable si = LuaManager.platform.newTable();
+            si.rawset("getDisplayName", (JavaFunction) (cf, n) -> cf.push(dName));
+            si.rawset("getNormalTexture", (JavaFunction) (cf, n) -> cf.push(fTex));
+            si.rawset("getIcon", (JavaFunction) (cf, n) -> cf.push(icon));
+            mockScriptItems.put(entry.getKey(), si);
+        }
+        KahluaTable mockSm = LuaManager.platform.newTable();
+        mockSm.rawset("FindItem", (JavaFunction) (cf, n) -> {
+            String ft = n >= 2 ? String.valueOf(cf.get(1)) : String.valueOf(cf.get(0));
+            return cf.push(mockScriptItems.get(ft));
+        });
+        LuaManager.env.rawset("getScriptManager", (JavaFunction) (cf, n) -> cf.push(mockSm));
+
         jb.rawset("getWarehouseSnapshot", (JavaFunction) (cf, n) -> {
             KahluaTable snap = LuaManager.platform.newTable();
             KahluaTable counts = LuaManager.platform.newTable();
             counts.rawset("loaded", Double.valueOf(8));
             counts.rawset("unloaded", Double.valueOf(2));
             counts.rawset("privateCount", Double.valueOf(1));
-            counts.rawset("items", Double.valueOf(128));
+            counts.rawset("items", Double.valueOf(345));
             counts.rawset("usedWeight", Double.valueOf(184.6));
             counts.rawset("totalCapacity", Double.valueOf(480.0));
             snap.rawset("counts", counts);
 
             KahluaTable rows = LuaManager.platform.newTable();
             String[][] sampleRows = {
-                {"tools", "Base.Axe", "3", "3", "0", "2"},
+                {"materials", "Base.Nails", "120", "120", "0", "2"},
+                {"weapons.ammo", "Base.Bullets9mm", "64", "64", "0", "1"},
                 {"materials", "Base.Plank", "48", "48", "0", "3"},
                 {"food.perishable", "Base.Apple", "24", "18", "6", "2"},
                 {"food.stable", "Base.TinnedBeans", "24", "24", "0", "2"},
                 {"medical.bandages", "Base.Bandage", "15", "15", "0", "1"},
                 {"medical.pills", "Base.Antibiotics", "8", "8", "0", "1"},
-                {"weapons.ammo", "Base.Bullets9mm", "64", "64", "0", "1"},
+                {"fluids", "Base.WaterBottle", "6", "6", "0", "1"},
+                {"materials", "Base.Battery", "6", "4", "2", "1"},
+                {"literature", "Base.Book", "4", "4", "0", "1"},
+                {"tools", "Base.Axe", "3", "3", "0", "2"},
+                {"tools", "Base.Hammer", "3", "3", "0", "1"},
+                {"tools", "Base.Saw", "2", "2", "0", "1"},
                 {"weapons.guns", "Base.Pistol", "2", "2", "0", "1"},
-                {"apparel.bags", "Base.Bag_BigHikingBag", "2", "2", "0", "1"}
+                {"apparel.bags", "Base.Bag_BigHikingBag", "2", "2", "0", "1"},
+                {"medical.bandages", "Base.FirstAidKit", "2", "2", "0", "1"},
+                {"tools", "Base.Crowbar", "1", "1", "0", "1"},
+                {"medical.bandages", "Base.Scalpel", "1", "1", "0", "1"}
             };
             for (int i = 0; i < sampleRows.length; i++) {
                 KahluaTable r = LuaManager.platform.newTable();
@@ -286,7 +337,6 @@ public final class PreviewModule1 {
             snap.rawset("rows", rows);
             return cf.push(snap);
         });
-        boolean isCnLang = "CN".equals(lang);
         Map<String, KahluaTable> mockRules = new LinkedHashMap<>();
         String[][] containerSpecs = {
             {"108:104:0#crate:crate:0#0", isCnLang ? "提货交接箱" : "Pickup Box", "PICKUP_OUT", "5", "true", "false", "", "", "4.2", "50", "108", "104", "0"},
@@ -454,8 +504,14 @@ public final class PreviewModule1 {
             win:setX(460)
             win:setY(30)
             local wTab = win.tabPanels and win.tabPanels.warehouse
-            if wTab and wTab.ctrl then
-                wTab.ctrl:onAddToBasket()
+            if wTab and wTab.ctrl and wTab.ctrl.filteredItems then
+                if wTab.ctrl.filteredItems[1] then
+                    wTab.ctrl:adjustBasketItem(wTab.ctrl.filteredItems[1], 10)
+                end
+                if wTab.ctrl.filteredItems[6] then
+                    wTab.ctrl:adjustBasketItem(wTab.ctrl.filteredItems[6], 4)
+                    wTab.ctrl:selectStorageItem(wTab.ctrl.filteredItems[6])
+                end
             end
             local ed = Editor.open(s)
             ed:setX(18)
@@ -752,7 +808,8 @@ public final class PreviewModule1 {
         Map.entry('体', '體'), Map.entry('专', '專'), Map.entry('门', '門'), Map.entry('进', '進'),
         Map.entry('还', '還'), Map.entry('运', '運'), Map.entry('过', '過'), Map.entry('达', '達'),
         Map.entry('给', '給'), Map.entry('级', '級'), Map.entry('组', '組'), Map.entry('织', '織'),
-        Map.entry('统', '統'), Map.entry('维', '維'), Map.entry('网', '網'), Map.entry('络', '絡')
+        Map.entry('统', '統'), Map.entry('维', '維'), Map.entry('网', '網'), Map.entry('络', '絡'),
+        Map.entry('称', '稱'), Map.entry('钉', '釘'), Map.entry('锯', '鋸'), Map.entry('锤', '錘')
     );
 
     private static float isoX(float gx, float gy) {

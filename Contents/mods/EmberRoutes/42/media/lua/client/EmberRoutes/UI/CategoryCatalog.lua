@@ -155,6 +155,8 @@ function CategoryCatalog.getOrderBadgeKey(status)
     return ORDER_BADGES[status] or "INFO"
 end
 
+local TEX_CACHE = {}
+
 function CategoryCatalog.resolveItemName(fullType)
     if type(fullType) ~= "string" or fullType == "" then
         return ""
@@ -168,6 +170,42 @@ function CategoryCatalog.resolveItemName(fullType)
         end
     end
     return fullType
+end
+
+function CategoryCatalog.resolveItemTexture(fullType)
+    if type(fullType) ~= "string" or fullType == "" then
+        return nil
+    end
+    local cached = TEX_CACHE[fullType]
+    if cached ~= nil then
+        return cached or nil
+    end
+    local tex = nil
+    local sm = getScriptManager and getScriptManager()
+    local scriptItem = sm and sm:FindItem(fullType)
+    if scriptItem then
+        if scriptItem.getNormalTexture then
+            tex = scriptItem:getNormalTexture()
+        end
+        if not tex and scriptItem.getIcon and type(getTexture) == "function" then
+            local icon = scriptItem:getIcon()
+            if icon and icon ~= "" then
+                tex = getTexture("Item_" .. tostring(icon))
+            end
+        end
+    end
+    TEX_CACHE[fullType] = tex or false
+    return tex
+end
+
+function CategoryCatalog.formatCompactCount(n)
+    local v = math.floor(tonumber(n) or 0)
+    if v < 1000 then
+        return tostring(v)
+    elseif v < 10000 then
+        return string.format("%.1fk", v / 1000)
+    end
+    return string.format("%dk", math.floor(v / 1000))
 end
 
 function CategoryCatalog.parseCsvSet(csvStr)
