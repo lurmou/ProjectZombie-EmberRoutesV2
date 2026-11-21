@@ -10,10 +10,12 @@ import emberroutes.npc.perception.PerceptionSignificance;
 import emberroutes.npc.perception.StimulusSlot;
 import java.lang.reflect.Field;
 import java.util.List;
+import java.util.Locale;
 import zombie.GameTime;
 import zombie.core.skinnedmodel.animation.AnimationMultiTrack;
 import zombie.core.skinnedmodel.animation.AnimationPlayer;
 import zombie.core.skinnedmodel.animation.AnimationTrack;
+import zombie.debug.DebugLog;
 import zombie.util.PooledFloatArrayObject;
 
 /**
@@ -335,6 +337,10 @@ public final class EmberGazeController {
                     maskDirty = true;
                     pendingRestoreTrackKeyword = activeProfile.releaseTrackKeyword;
                 }
+                DebugLog.log(String.format(
+                        Locale.US,
+                        "[EmberRoutes][GAZE_DIAG] GLANCE_END npc=%s profile=%s",
+                        npc.getNpcId(), activeProfile));
             } else {
                 float env = AttentionSelector.computeThreePhaseEnvelope(
                         briefGlanceElapsedSec,
@@ -373,6 +379,15 @@ public final class EmberGazeController {
                 maskDirty = true;
                 pendingRestoreTrackKeyword = activeProfile.releaseTrackKeyword;
             }
+            DebugLog.log(String.format(
+                    Locale.US,
+                    "[EmberRoutes][GAZE_DIAG] GLANCE_START npc=%s profile=%s angleDeg=%.1f targetH=%.2f dist=%.2f headLook=%s",
+                    npc.getNpcId(),
+                    activeProfile,
+                    Math.toDegrees(ambientTarget.signedAngleRad),
+                    briefTargetHorizontal,
+                    Math.sqrt(Math.max(0.0F, ambientTarget.distSq)),
+                    npc.isHeadLookAround()));
         }
     }
 
@@ -447,6 +462,10 @@ public final class EmberGazeController {
             this.appliedVertical = 0.0F;
             npc.applyGazeHeadLookDirect(0.0F, 0.0F);
         }
+        DebugLog.log(String.format(
+                Locale.US,
+                "[EmberRoutes][GAZE_DIAG] PROFILE npc=%s %s->%s headLook=%s",
+                npc.getNpcId(), prev, next, npc.isHeadLookAround()));
     }
 
     private GazeRequestSlot selectHighestPriorityRequest() {

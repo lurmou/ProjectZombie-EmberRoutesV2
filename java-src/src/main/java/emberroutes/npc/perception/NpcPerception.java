@@ -4,27 +4,31 @@ import emberroutes.npc.EmberPostureMath;
 import emberroutes.npc.EmberTargetProjector;
 import emberroutes.npc.IsoNPC;
 import emberroutes.npc.perception.StimulusSlot.StimulusKind;
+import java.util.Locale;
 import zombie.characters.IsoPlayer;
+import zombie.debug.DebugLog;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoDirections;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.LosUtil;
 
 /**
- * 单个 {@link IsoNPC} 的统一轻量环境感知器（0-GC、错相位分帧、引擎原生可见性剪枝）：
- * <ul>
- *   <li><b>重要度分档（Significance LOD）</b>：直读 B42 引擎光照线程已算好的
- *       {@link IsoGridSquare#isCouldSee(int)} 360° 几何视线位；不可见时直接落入 {@code HIDDEN}，
- *       装饰性感知 0 射线、0 堆分配；</li>
- *   <li><b>O(1) 缓存视线校验</b>：仅对 {@code NEAR}（≤ 8 格）且位于前方扇区内的刺激，查
- *       {@link LosUtil#lineClearCached} 缓存表以额外剔除 {@code ClearThroughClosedDoor}（不隔闭门抬眼）；</li>
- *   <li><b>共享刺激记忆槽</b>：所有微反应与注视控制器共享同一份 {@link StimulusSlot}，
- *       不随动作数量线性增加采样开销。</li>
- * </ul>
+ * 单个 {@link IsoNPC} 的统一轻量环境感知器（0-GC、错相位分帧、四级漏斗剪枝）：
+ * <ol>
+ *   <li><b>纯浮点距离剪枝</b>：先判 {@code distSq <= 64}（8 格），远处 NPC 仅 2 次浮点乘法即短路，零 JNI 开销；</li>
+ *   <li><b>引擎原生可见性剪枝</b>：仅对 8 格内 NPC 查 {@link IsoGridSquare#isCouldSee(int)} 360° 几何视线位，
+ *       隔墙/别屋直接落入 {@code HIDDEN}；</li>
+ *   <li><b>0.12s 错相位 + 前方视野锥</b>：按 {@code npcId} 哈希错开相位，过滤背后与 4.5 格以外；</li>
+ *   <li><b>无状态视线精检</b>：仅对同屋、≤ 4.5 格且位于前方锥内的 1~2 个 NPC 调无状态
+ *       {@link LosUtil#lineClear}（避免 B42 {@code LightingJNI} 管线下 {@code lineClearCached} 永不清零导致的永久脏读）
+ *       以剔除 {@code Blocked / ClearThroughClosedDoor}。</li>
+ * </ol>
  */
 public final class NpcPerception {
     /** 近景焦点区距离平方阈值（8 格）。 */
     public static final float NEAR_DIST_SQ = 64.0F;
+    /** 诊断日志关注距离平方阈值（6 格，仅用于边缘触发状态变化日志）。 */
+    private static final float DIAG_DIST_SQ = 36.0F;
     /** 触发检测最大水平距离（格）。 */
     public static final float TRIGGER_MAX_DIST = EmberPostureMath.GLANCE_TRIGGER_MAX_DIST;
     /** 触发检测最小水平距离（防重叠奇点）。 */
@@ -46,6 +50,7 @@ public final class NpcPerception {
     private double pollAccumSec;
     private float forwardX = 0.0F;
     private float forwardY = 1.0F;
+    private String lastDiagGate = "INIT";
 
     public NpcPerception(String npcId) {
         int hash = npcId != null ? npcId.hashCode() : 0;
@@ -65,6 +70,7 @@ public final class NpcPerception {
         this.significance = PerceptionSignificance.HIDDEN;
         this.playerSlot.reset();
         this.pollAccumSec = this.phaseOffsetBucket * (SENSOR_POLL_INTERVAL_SEC * 0.25);
+        this.lastDiagGate = "INIT";
     }
 
     /**
@@ -72,6 +78,7 @@ public final class NpcPerception {
      */
     public void tick(IsoNPC npc, double simTime, double dtSim) {
         double step = Math.max(0.0, Math.min(0.25, dtSim));
+        boolean wasHabituated = playerSlot.habituated;
         if (npc == null || npc.isDead()) {
             this.significance = PerceptionSignificance.HIDDEN;
             AttentionSelector.advanceAbsence(playerSlot, step, REARM_ABSENCE_SEC);
@@ -81,32 +88,52 @@ public final class NpcPerception {
         }
 
         IsoPlayer player = resolveLocalVisiblePlayer(npc);
-        IsoGridSquare npcSq = npc.getCurrentSquare();
-        if (player == null || npcSq == null || !npcSq.isCouldSee(0)) {
+        if (player == null) {
             this.significance = PerceptionSignificance.HIDDEN;
             AttentionSelector.updateStimulusMemory(
                     playerSlot, false, 0.0F, 0.0F, 0.0F, 0, Float.POSITIVE_INFINITY, Float.NaN,
                     simTime, step, REARM_ABSENCE_SEC);
+            logRearmedIfChanged(npc, wasHabituated);
             return;
         }
 
+        // 第 1 级漏斗：纯浮点距离平方（2 次乘法，0 JNI）
         float dx = player.getX() - npc.getX();
         float dy = player.getY() - npc.getY();
         float distSq = dx * dx + dy * dy;
-        this.significance = (distSq <= NEAR_DIST_SQ) ? PerceptionSignificance.NEAR : PerceptionSignificance.FAR;
-
-        if (this.significance != PerceptionSignificance.NEAR) {
+        if (distSq > NEAR_DIST_SQ) {
+            this.significance = PerceptionSignificance.FAR;
+            this.lastDiagGate = "FAR";
             AttentionSelector.updateStimulusMemory(
                     playerSlot, false, player.getX(), player.getY(), player.getZ(),
                     EmberTargetProjector.levelOf(player.getZ()), distSq, Float.NaN,
                     simTime, step, REARM_ABSENCE_SEC);
+            logRearmedIfChanged(npc, wasHabituated);
             return;
         }
 
-        // 错相位轮询：非采样帧仅推进离场倒计时，避免多 NPC 同帧尖峰
+        // 第 2 级漏斗：引擎光照线程已算好的 360° 几何视线位
+        IsoGridSquare npcSq = npc.getCurrentSquare();
+        if (npcSq == null || !npcSq.isCouldSee(0)) {
+            this.significance = PerceptionSignificance.HIDDEN;
+            if (distSq <= DIAG_DIST_SQ) {
+                logGateChange(npc, "COULDSEE_FALSE", distSq, Float.NaN, "N/A");
+            }
+            AttentionSelector.updateStimulusMemory(
+                    playerSlot, false, player.getX(), player.getY(), player.getZ(),
+                    EmberTargetProjector.levelOf(player.getZ()), distSq, Float.NaN,
+                    simTime, step, REARM_ABSENCE_SEC);
+            logRearmedIfChanged(npc, wasHabituated);
+            return;
+        }
+
+        this.significance = PerceptionSignificance.NEAR;
+
+        // 第 3 级漏斗：0.12s 错相位轮询（非采样帧仅推进离场倒计时）
         pollAccumSec += step;
         if (pollAccumSec < SENSOR_POLL_INTERVAL_SEC) {
             AttentionSelector.advanceAbsence(playerSlot, step, REARM_ABSENCE_SEC);
+            logRearmedIfChanged(npc, wasHabituated);
             return;
         }
         double pollDt = pollAccumSec;
@@ -124,12 +151,27 @@ public final class NpcPerception {
                 player.getX(), player.getY(), playerLevel,
                 TRIGGER_MIN_DIST, maxDist, minDot);
 
-        boolean visibleNow = !Float.isNaN(angleRad) && hasClearCachedLineOfSight(npc, player);
+        // 第 4 级漏斗：无状态 LosUtil.lineClear 剔除墙体与闭门
+        boolean visibleNow = false;
+        if (Float.isNaN(angleRad)) {
+            if (distSq <= DIAG_DIST_SQ) {
+                logGateChange(npc, "OUT_OF_CONE", distSq, Float.NaN, "SKIP");
+            }
+        } else {
+            LosUtil.TestResults los = testStatelessLineOfSight(npc, player);
+            visibleNow = (los != LosUtil.TestResults.Blocked
+                    && los != LosUtil.TestResults.ClearThroughClosedDoor);
+            if (distSq <= DIAG_DIST_SQ) {
+                logGateChange(npc, visibleNow ? "VISIBLE" : ("LOS_" + los.name()), distSq, angleRad, los.name());
+            }
+        }
+
         AttentionSelector.updateStimulusMemory(
                 playerSlot, visibleNow,
                 player.getX(), player.getY(), player.getZ(), playerLevel,
                 distSq, visibleNow ? angleRad : Float.NaN,
                 simTime, pollDt, REARM_ABSENCE_SEC);
+        logRearmedIfChanged(npc, wasHabituated);
     }
 
     /**
@@ -205,14 +247,15 @@ public final class NpcPerception {
     }
 
     /**
-     * O(1) 查表校验无墙体且不隔闭门：复用引擎光照阶段已填充的 {@code LosUtil.cachedresults[0]}。
+     * 无状态视线校验：直接调用 {@link LosUtil#lineClear}（不触碰单人模式下永不清零的 {@code cachedresults}），
+     * 用于精准区分 {@code Blocked} 与 {@code ClearThroughClosedDoor}。
      */
-    private static boolean hasClearCachedLineOfSight(IsoNPC npc, IsoPlayer player) {
+    private static LosUtil.TestResults testStatelessLineOfSight(IsoNPC npc, IsoPlayer player) {
         IsoCell cell = npc.getCell();
         if (cell == null) {
-            return false;
+            return LosUtil.TestResults.Blocked;
         }
-        LosUtil.TestResults res = LosUtil.lineClearCached(
+        return LosUtil.lineClear(
                 cell,
                 (int) Math.floor(npc.getX()),
                 (int) Math.floor(npc.getY()),
@@ -220,9 +263,28 @@ public final class NpcPerception {
                 (int) Math.floor(player.getX()),
                 (int) Math.floor(player.getY()),
                 (int) Math.floor(player.getZ()),
-                false,
-                0);
-        return res != LosUtil.TestResults.Blocked
-                && res != LosUtil.TestResults.ClearThroughClosedDoor;
+                false);
+    }
+
+    private void logGateChange(IsoNPC npc, String gate, float distSq, float angleRad, String losName) {
+        if (gate.equals(lastDiagGate)) {
+            return;
+        }
+        lastDiagGate = gate;
+        float dist = (float) Math.sqrt(Math.max(0.0F, distSq));
+        float deg = Float.isNaN(angleRad) ? Float.NaN : (float) Math.toDegrees(angleRad);
+        DebugLog.log(String.format(
+                Locale.US,
+                "[EmberRoutes][GAZE_DIAG] SENSE_GATE npc=%s gate=%s dist=%.2f angleDeg=%.1f los=%s hab=%s fwd=(%.2f,%.2f)",
+                npc.getNpcId(), gate, dist, deg, losName, playerSlot.habituated, forwardX, forwardY));
+    }
+
+    private void logRearmedIfChanged(IsoNPC npc, boolean wasHabituated) {
+        if (wasHabituated && !playerSlot.habituated) {
+            DebugLog.log(String.format(
+                    Locale.US,
+                    "[EmberRoutes][GAZE_DIAG] REARMED npc=%s sig=%s",
+                    npc.getNpcId(), significance));
+        }
     }
 }
