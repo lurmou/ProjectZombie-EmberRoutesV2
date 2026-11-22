@@ -5,6 +5,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
 import org.json.JSONObject;
 import org.lwjgl.opengl.GL11;
@@ -144,11 +146,7 @@ public final class PreviewModule1 {
         LuaManager.env.rawset("getText", (JavaFunction) (frame, count) -> {
             String key = String.valueOf(frame.get(0));
             if (dict.has(key)) {
-                String v = dict.getString(key);
-                for (int i = 1; i < count; i++) {
-                    v = v.replace("%" + i, String.valueOf(frame.get(i)));
-                }
-                return frame.push("CN".equals(lang) ? previewS2T(v) : v);
+                return frame.push(formatPreviewText(dict.getString(key), lang, frame, count));
             }
             Object[] a = new Object[count];
             for (int i = 0; i < count; i++) a[i] = frame.get(i);
@@ -160,11 +158,7 @@ public final class PreviewModule1 {
         LuaManager.env.rawset("getTextOrNull", (JavaFunction) (frame, count) -> {
             String key = String.valueOf(frame.get(0));
             if (dict.has(key)) {
-                String v = dict.getString(key);
-                for (int i = 1; i < count; i++) {
-                    v = v.replace("%" + i, String.valueOf(frame.get(i)));
-                }
-                return frame.push("CN".equals(lang) ? previewS2T(v) : v);
+                return frame.push(formatPreviewText(dict.getString(key), lang, frame, count));
             }
             return frame.push(null);
         });
@@ -499,10 +493,8 @@ public final class PreviewModule1 {
             Store.trimTerritory(s.id, 104, 104, 108, 108)
             s = Store.get(s.id)
             local win = Panel.open(s.id, "warehouse")
-            win.win:setWidth(800)
-            win.win:setHeight(580)
-            win:setX(460)
-            win:setY(30)
+            win:setX(422)
+            win:setY(50)
             local wTab = win.tabPanels and win.tabPanels.warehouse
             if wTab and wTab.ctrl and wTab.ctrl.filteredItems then
                 if wTab.ctrl.filteredItems[1] then
@@ -528,6 +520,15 @@ public final class PreviewModule1 {
         waitForAssets();
 
         renderPreviewFrames(outDir.resolve("preview-" + lang + ".png"), true);
+
+        pcallLua("""
+            local win = _G.__previewWin
+            assert(win.win.contentHost.errorStage == false, "SettlementControlPanel root layout must solve cleanly: " .. tostring(win.win.contentHost.errorStage))
+            local wTab = win.tabPanels and win.tabPanels.warehouse
+            assert(wTab and wTab.errorStage == false, "Warehouse tab must solve cleanly")
+            assert(wTab.ctrl.split.firstPane.errorStage == false, "AE2 left pane must solve at default 840x540")
+            assert(wTab.ctrl.split.secondPane.errorStage == false, "AE2 right pane must solve cleanly at default 840x540")
+            """);
 
         pcallLua("""
             local Kernel = require "EmberRoutes/Kernel"
@@ -849,6 +850,27 @@ public final class PreviewModule1 {
                 0.25f, 0.95f, 0.58f, 0.96f, 2
             );
         }
+    }
+
+    private static final Pattern PREVIEW_FMT_TOKEN = Pattern.compile("%%|%([1-9])");
+
+    private static String formatPreviewText(String raw, String lang, se.krka.kahlua.vm.LuaCallFrame frame, int count) {
+        if (raw == null) return "";
+        Matcher m = PREVIEW_FMT_TOKEN.matcher(raw);
+        StringBuilder sb = new StringBuilder(raw.length());
+        while (m.find()) {
+            String g = m.group(1);
+            if (g == null) {
+                m.appendReplacement(sb, "%");
+            } else {
+                int idx = Integer.parseInt(g);
+                String repl = idx < count ? String.valueOf(frame.get(idx)) : m.group(0);
+                m.appendReplacement(sb, Matcher.quoteReplacement(repl));
+            }
+        }
+        m.appendTail(sb);
+        String out = sb.toString();
+        return "CN".equals(lang) ? previewS2T(out) : out;
     }
 
     private static String previewS2T(String s) {

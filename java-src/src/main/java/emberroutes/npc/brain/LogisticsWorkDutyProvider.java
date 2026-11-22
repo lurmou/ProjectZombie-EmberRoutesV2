@@ -3,6 +3,7 @@ package emberroutes.npc.brain;
 import emberroutes.npc.EmberLocomotionController;
 import emberroutes.npc.EmberTargetProjector;
 import emberroutes.npc.IsoNPC;
+import emberroutes.npc.NpcPostureController.PostureState;
 import emberroutes.npc.brain.BatchContainerTransferAction.TransferMode;
 import emberroutes.npc.brain.BatchTourBuilder.TourAnchor;
 import emberroutes.npc.brain.BatchTourBuilder.TourPlan;
@@ -282,13 +283,15 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
         for (int i = 0, n = npcs.size(); i < n; i++) {
             IsoNPC npc = npcs.get(i);
             BrainContext ctx = npc.getBrainContext();
+            PostureState posture = npc.getPosture().getState();
             if (ctx.threatDetected
                     || ctx.urgentNeed != UrgentNeed.NONE
                     || ctx.hasBorrowedTool
-                    || npc.getPosture().isActive()) {
+                    || posture == null
+                    || !SettlementTaskAuctioneer.isBidderPostureEligible(posture.name())) {
                 continue;
             }
-            if (npc.getBrain().getActiveRunner().isMinDwellActive(simTime)) {
+            if (!hasPendingOrders && npc.getBrain().getActiveRunner().isMinDwellActive(simTime)) {
                 continue;
             }
             NpcWorkState st = stateOf(npc.getNpcId());
@@ -348,6 +351,10 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
             if (asg.bidder().lookahead) {
                 mountChainedWinner(winner, st, asg.task(), simTime);
             } else {
+                if (asg.task().kind != TaskKind.DELIVERY_ORDER
+                        && winner.getBrain().getActiveRunner().isMinDwellActive(simTime)) {
+                    continue;
+                }
                 mountImmediateWinner(winner, st, asg.task(), simTime);
             }
         }
@@ -631,6 +638,15 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
     }
 
     // ==================== WorkDutyProvider 状态机挂接实现 ====================
+
+    @Override
+    public boolean isUrgentWork(BrainContext ctx) {
+        if (ctx == null || ctx.npcId == null) {
+            return false;
+        }
+        NpcWorkState st = WORK_STATES.get(ctx.npcId);
+        return st != null && st.activeSlice != null && st.activeSlice.kind == TaskKind.DELIVERY_ORDER;
+    }
 
     @Override
     public boolean canEnterWork(BrainContext ctx) {

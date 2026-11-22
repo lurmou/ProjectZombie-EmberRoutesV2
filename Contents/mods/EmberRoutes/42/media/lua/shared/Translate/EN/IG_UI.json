@@ -160,7 +160,7 @@
     "IGUI_ER_Roster_TagHere": "[Home]",
     "IGUI_ER_Roster_TagUnassigned": "[Unassigned]",
     "IGUI_ER_Roster_BleedWarn": " !BLEED",
-    "IGUI_ER_Roster_VitalsFmt": "HP%1% H%2% F%3%%4",
+    "IGUI_ER_Roster_VitalsFmt": "HP%1%% H%2%% F%3%%%4",
     "IGUI_ER_Roster_EmptyTitle": "No surviving NPCs yet",
     "IGUI_ER_Roster_EmptyHint": "Spawn test NPCs via world context menu",
     "IGUI_ER_Roster_BtnToSquad": "Set SQUAD",

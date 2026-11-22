@@ -115,6 +115,11 @@ public final class SettlementTaskAuctioneer {
 
     public record Assignment(Bidder bidder, TaskSlice task, double marginalCostSec) {}
 
+    /** 是否属于可参与派单竞拍的稳定姿势（允许站立及闲暇坐椅接单，仅屏蔽睡眠/入床/起立过渡态）。 */
+    public static boolean isBidderPostureEligible(String postureStateName) {
+        return "STANDING".equals(postureStateName) || "SEATED".equals(postureStateName);
+    }
+
     private final RectangularHungarianWorkspace workspace = new RectangularHungarianWorkspace(32);
     private final Map<String, Double> lastAuctionSimTimeBySettlement = new HashMap<>();
     private double[][] costBuffer = new double[16][16];

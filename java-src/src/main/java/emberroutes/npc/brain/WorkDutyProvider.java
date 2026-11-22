@@ -37,4 +37,9 @@ public interface WorkDutyProvider {
     void onTickWork(BrainContext ctx, StateScope scope, double dtSim);
 
     void onExitWork(BrainContext ctx);
+
+    /** 是否属于可立即打断闲暇最短驻留防抖（如玩家手下提货派单）的高优工作。 */
+    default boolean isUrgentWork(BrainContext ctx) {
+        return false;
+    }
 }

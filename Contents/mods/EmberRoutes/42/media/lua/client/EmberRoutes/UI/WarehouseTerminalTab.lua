@@ -477,6 +477,11 @@ function WarehouseTerminalTab.createTabPage(panelCtrl)
     host:initialise()
     host:instantiate()
 
+    local fh = (getTextManager and getTextManager().getFontHeight) and getTextManager():getFontHeight(UIFont.Small) or 14
+    local rowH = math.max(24, fh + 6)
+    local smH = math.max(20, fh + 4)
+    local hintH = math.max(16, fh + 2)
+
     local ctrl = setmetatable({
         parentCtrl = panelCtrl,
         settlementId = nil,
@@ -577,21 +582,23 @@ function WarehouseTerminalTab.createTabPage(panelCtrl)
     })
 
     local leftPane = UI.Column({ padding = 6, gap = 4 }, {
-        UI.Item(UI.Row({ gap = 4 }, {
-            UI.Item(ctrl.searchBox, { grow = 1 }),
+        UI.Item(UI.Row({ gap = 4, align = "stretch" }, {
+            UI.Item(ctrl.searchBox, { basis = 0, grow = 1 }),
             UI.Item(ctrl.ddSort, { basis = 96, grow = 0 }),
             UI.Item(ctrl.btnViewToggle, { basis = 58, grow = 0 }),
-        }), { basis = 24, grow = 0 }),
-        UI.Item(ctrl.chips1, { basis = 24, grow = 0 }),
-        UI.Item(ctrl.chips2, { basis = 24, grow = 0 }),
-        UI.Item(ctrl.statusChips, { basis = 22, grow = 0 }),
-        UI.Item(ctrl.lblGridHint, { basis = 16, grow = 0 }),
+        }), { basis = rowH, grow = 0 }),
+        UI.Item(ctrl.chips1, { basis = rowH, grow = 0 }),
+        UI.Item(ctrl.chips2, { basis = rowH, grow = 0 }),
+        UI.Item(ctrl.statusChips, { basis = smH, grow = 0 }),
+        UI.Item(ctrl.lblGridHint, { basis = hintH, grow = 0 }),
         UI.Item(ctrl.itemGrid, {
+            basis = 0,
             grow = 1,
             key = "gridView",
             when = function(ctx) return (ctx and ctx.viewMode or "grid") == "grid" end,
         }),
         UI.Item(ctrl.itemList, {
+            basis = 0,
             grow = 1,
             key = "listView",
             when = function(ctx) return ctx and ctx.viewMode == "list" end,
@@ -599,28 +606,28 @@ function WarehouseTerminalTab.createTabPage(panelCtrl)
     })
 
     -- Right pane: delivery basket & active orders
-    ctrl.lblSelectedItem = UI.Label(getText("IGUI_ER_Term_SelectPrompt"), { h = 20, color = Theme.accent, truncate = true })
-    ctrl.qtyStepper = UI.Stepper(1, 1, 99, { -10, -1, 1, 10 }, nil, { h = 24 })
-    ctrl.btnAddBasket = UI.Button(getText("IGUI_ER_Term_BtnAddBasket"), ctrl, TabCtrl.onAddToBasket, { h = 24, primary = true })
-    ctrl.lblBasketHdr = UI.Label(getText("IGUI_ER_Term_BasketHdrFmt", "0"), { h = 18, color = Theme.accent })
-    ctrl.btnRemoveBasketItem = UI.Button(getText("IGUI_ER_Term_BtnRemove"), ctrl, TabCtrl.onRemoveSelectedBasketItem, { h = 22 })
-    ctrl.btnClearBasket = UI.Button(getText("IGUI_ER_Term_BtnClear"), ctrl, TabCtrl.onClearBasket, { h = 22 })
+    ctrl.lblSelectedItem = UI.Label(getText("IGUI_ER_Term_SelectPrompt"), { h = smH, color = Theme.accent, truncate = true })
+    ctrl.qtyStepper = UI.Stepper(1, 1, 99, { -10, -1, 1, 10 }, nil, { h = rowH })
+    ctrl.btnAddBasket = UI.Button(getText("IGUI_ER_Term_BtnAddBasket"), ctrl, TabCtrl.onAddToBasket, { h = rowH, primary = true })
+    ctrl.lblBasketHdr = UI.Label(getText("IGUI_ER_Term_BasketHdrFmt", "0"), { h = smH, color = Theme.accent })
+    ctrl.btnRemoveBasketItem = UI.Button(getText("IGUI_ER_Term_BtnRemove"), ctrl, TabCtrl.onRemoveSelectedBasketItem, { h = smH })
+    ctrl.btnClearBasket = UI.Button(getText("IGUI_ER_Term_BtnClear"), ctrl, TabCtrl.onClearBasket, { h = smH })
 
     ctrl.basketList = UI.List({
         owner = ctrl,
-        itemheight = 22,
+        itemheight = math.max(22, fh + 4),
         style = BASKET_STYLE,
         well = true,
         emptyState = { title = getText("IGUI_ER_Term_BasketEmpty"), hint = "" },
     })
 
-    ctrl.ddTarget = UI.Dropdown(ctrl, nil, { h = 24 })
-    ctrl.btnSubmitOrders = UI.Button(getText("IGUI_ER_Term_BtnSubmit"), ctrl, TabCtrl.onSubmitBasket, { h = 26, primary = true, active = true })
+    ctrl.ddTarget = UI.Dropdown(ctrl, nil, { h = rowH })
+    ctrl.btnSubmitOrders = UI.Button(getText("IGUI_ER_Term_BtnSubmit"), ctrl, TabCtrl.onSubmitBasket, { h = rowH + 2, primary = true, active = true })
 
-    ctrl.btnCancelOrder = UI.Button(getText("IGUI_ER_Term_BtnCancelOrder"), ctrl, TabCtrl.onCancelSelectedOrder, { h = 22 })
+    ctrl.btnCancelOrder = UI.Button(getText("IGUI_ER_Term_BtnCancelOrder"), ctrl, TabCtrl.onCancelSelectedOrder, { h = smH })
     ctrl.ordersList = UI.List({
         owner = ctrl,
-        itemheight = 26,
+        itemheight = math.max(26, fh + 6),
         style = ORDER_STYLE,
         well = true,
         emptyState = { title = getText("IGUI_ER_Term_OrdersEmpty"), hint = "" },
@@ -632,24 +639,24 @@ function WarehouseTerminalTab.createTabPage(panelCtrl)
     })
 
     local rightPane = UI.Column({ padding = 6, gap = 4 }, {
-        UI.Item(ctrl.lblSelectedItem, { basis = 20, grow = 0 }),
-        UI.Item(UI.Row({ gap = 4 }, {
-            UI.Item(ctrl.qtyStepper, { grow = 1 }),
+        UI.Item(ctrl.lblSelectedItem, { basis = smH, grow = 0 }),
+        UI.Item(UI.Row({ gap = 4, align = "stretch" }, {
+            UI.Item(ctrl.qtyStepper, { basis = 0, grow = 1 }),
             UI.Item(ctrl.btnAddBasket, { basis = 86, grow = 0 }),
-        }), { basis = 24, grow = 0 }),
-        UI.Item(UI.Row({ gap = 4, align = "center" }, {
-            UI.Item(ctrl.lblBasketHdr, { grow = 1 }),
+        }), { basis = rowH, grow = 0 }),
+        UI.Item(UI.Row({ gap = 4, align = "stretch" }, {
+            UI.Item(ctrl.lblBasketHdr, { basis = 0, grow = 1 }),
             UI.Item(ctrl.btnRemoveBasketItem, { basis = 52, grow = 0 }),
             UI.Item(ctrl.btnClearBasket, { basis = 52, grow = 0 }),
-        }), { basis = 22, grow = 0 }),
-        UI.Item(ctrl.basketList, { basis = 76, grow = 0 }),
-        UI.Item(ctrl.ddTarget, { basis = 24, grow = 0 }),
-        UI.Item(ctrl.btnSubmitOrders, { basis = 26, grow = 0 }),
-        UI.Item(UI.Row({ gap = 4, align = "center" }, {
-            UI.Item(UI.Label(getText("IGUI_ER_Term_OrdersHdr"), { h = 18, color = Theme.accent }), { grow = 1 }),
+        }), { basis = smH, grow = 0 }),
+        UI.Item(ctrl.basketList, { basis = 70, grow = 0 }),
+        UI.Item(ctrl.ddTarget, { basis = rowH, grow = 0 }),
+        UI.Item(ctrl.btnSubmitOrders, { basis = rowH + 2, grow = 0 }),
+        UI.Item(UI.Row({ gap = 4, align = "stretch" }, {
+            UI.Item(UI.Label(getText("IGUI_ER_Term_OrdersHdr"), { h = smH, color = Theme.accent }), { basis = 0, grow = 1 }),
             UI.Item(ctrl.btnCancelOrder, { basis = 74, grow = 0 }),
-        }), { basis = 22, grow = 0 }),
-        UI.Item(ctrl.ordersList, { grow = 1 }),
+        }), { basis = smH, grow = 0 }),
+        UI.Item(ctrl.ordersList, { basis = 0, grow = 1 }),
     })
 
     ctrl.split = UI.SplitView(leftPane, rightPane, {
@@ -661,7 +668,7 @@ function WarehouseTerminalTab.createTabPage(panelCtrl)
     })
 
     host:build(UI.Column({ padding = 0, gap = 0 }, {
-        UI.Item(ctrl.split, { grow = 1 }),
+        UI.Item(ctrl.split, { basis = 0, grow = 1 }),
     }))
     host.ctrl = ctrl
     ctrl:buildChipOptions()

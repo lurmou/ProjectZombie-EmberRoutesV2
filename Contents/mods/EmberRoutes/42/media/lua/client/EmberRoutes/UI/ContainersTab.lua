@@ -226,14 +226,14 @@ function ContainersTab.createTabPage(panelCtrl)
     host:build(UI.Column({ padding = 6, gap = 6 }, {
         UI.Item(UI.Row({ gap = 6 }, {
             UI.Item(ctrl.searchBox, { basis = 210, grow = 0 }),
-            UI.Item(ctrl.roleChips, { grow = 1 }),
+            UI.Item(ctrl.roleChips, { basis = 0, grow = 1 }),
         }), { basis = 24, grow = 0 }),
         UI.Item(UI.Row({ gap = 6 }, {
             UI.Item(ctrl.btnConfigure, { basis = 0, grow = 1 }),
             UI.Item(ctrl.btnAutoZone, { basis = 0, grow = 1 }),
             UI.Item(ctrl.btnLocate, { basis = 0, grow = 1 }),
         }), { basis = 24, grow = 0 }),
-        UI.Item(ctrl.list, { grow = 1 }),
+        UI.Item(ctrl.list, { basis = 0, grow = 1 }),
     }))
 
     host.ctrl = ctrl

@@ -215,4 +215,50 @@ class SettlementTaskAuctioneerTest {
         assertEquals(boxOrderId, recent.get(0).orderId);
         assertEquals(orderId, recent.get(1).orderId);
     }
+
+    @Test
+    void seatedNpcRemainsAuctionEligibleAndUrgentDeliveryBreaksLeisureDwell() {
+        assertTrue(SettlementTaskAuctioneer.isBidderPostureEligible("STANDING"));
+        assertTrue(SettlementTaskAuctioneer.isBidderPostureEligible("SEATED"),
+                "Seated leisure NPCs must remain eligible to accept orders instead of sitting until timer expiry");
+        assertFalse(SettlementTaskAuctioneer.isBidderPostureEligible("SLEEPING"));
+        assertFalse(SettlementTaskAuctioneer.isBidderPostureEligible("ON_BED_AWAKE"));
+        assertFalse(SettlementTaskAuctioneer.isBidderPostureEligible("STANDING_UP"));
+        assertFalse(SettlementTaskAuctioneer.isBidderPostureEligible("ENTERING_SEAT"));
+
+        final boolean[] workReady = {false};
+        final boolean[] urgent = {false};
+        StateNode work = new StateNode("WORK_DUTY", null, null, 0.0, false) {
+            @Override
+            public boolean isPreemptive(BrainContext ctx) {
+                return urgent[0];
+            }
+
+            @Override
+            public boolean canEnter(BrainContext ctx) {
+                return workReady[0];
+            }
+        };
+        StateNode seat = new StateNode("SEAT_REST", null, null, 12.0, false) {};
+        StateNode root = new StateNode("ROOT", new StateNode[]{work, seat}, null, 0.0, false) {};
+        StateTreeRunner runner = new StateTreeRunner(root);
+
+        BrainContext ctx = new BrainContext("npc_seat");
+        ctx.simTime = 10.0;
+        runner.tick(ctx);
+        assertEquals("ROOT/SEAT_REST", runner.getActivePathString());
+
+        // Background haul (non-urgent) during 12s minDwell still waits for debounce
+        workReady[0] = true;
+        urgent[0] = false;
+        ctx.simTime = 13.0;
+        runner.tick(ctx);
+        assertEquals("ROOT/SEAT_REST", runner.getActivePathString());
+
+        // Player-submitted DELIVERY_ORDER marks work preemptive and interrupts SEAT_REST immediately
+        urgent[0] = true;
+        ctx.simTime = 13.5;
+        runner.tick(ctx);
+        assertEquals("ROOT/WORK_DUTY", runner.getActivePathString());
+    }
 }

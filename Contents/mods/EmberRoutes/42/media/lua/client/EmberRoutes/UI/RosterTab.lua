@@ -235,7 +235,7 @@ function RosterTab.createTabPage(panelCtrl)
 
     host:build(UI.Column({ padding = 6, gap = 6 }, {
         UI.Item(ctrl.lblSummary, { basis = 20, grow = 0 }),
-        UI.Item(ctrl.list, { grow = 1 }),
+        UI.Item(ctrl.list, { basis = 0, grow = 1 }),
         UI.Item(UI.Row({ gap = 6 }, {
             UI.Item(ctrl.btnToggleBrain, { basis = 0, grow = 1 }),
             UI.Item(ctrl.btnAssignHome, { basis = 0, grow = 1 }),

@@ -160,7 +160,7 @@
     "IGUI_ER_Roster_TagHere": "[本据点]",
     "IGUI_ER_Roster_TagUnassigned": "[未分配]",
     "IGUI_ER_Roster_BleedWarn": " [流血!]",
-    "IGUI_ER_Roster_VitalsFmt": "血%1% 饥%2% 困%3%%4",
+    "IGUI_ER_Roster_VitalsFmt": "血%1%% 饥%2%% 困%3%%%4",
     "IGUI_ER_Roster_EmptyTitle": "当前尚无存活 NPC",
     "IGUI_ER_Roster_EmptyHint": "可通过右键调试菜单生成测试 NPC",
     "IGUI_ER_Roster_BtnToSquad": "切小队随从",

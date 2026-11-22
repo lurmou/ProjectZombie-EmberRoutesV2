@@ -507,6 +507,11 @@ public final class SettlementBrainBuilder {
         }
 
         @Override
+        public boolean isPreemptive(BrainContext ctx) {
+            return provider.isUrgentWork(ctx);
+        }
+
+        @Override
         public boolean canEnter(BrainContext ctx) {
             return provider.canEnterWork(ctx);
         }

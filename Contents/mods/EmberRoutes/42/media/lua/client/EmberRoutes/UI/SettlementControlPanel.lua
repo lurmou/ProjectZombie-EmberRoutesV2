@@ -471,10 +471,15 @@ function SettlementControlPanel.open(selectSettlementId, initialTabId)
 
     ctrl.tabBar:bindPanels(ctrl.tabPanels)
 
+    local fh = (getTextManager and getTextManager().getFontHeight) and getTextManager():getFontHeight(UIFont.Small) or 14
+    local topRowH = math.max(24, fh + 6)
+    local statRowH = math.max(18, fh + 4)
+    local tabBarH = math.max(28, fh + 8)
+
     local spec = UI.Column({ padding = 10, gap = 6 }, {
-        UI.Item(UI.Row({ gap = 6, align = "center" }, {
+        UI.Item(UI.Row({ gap = 6, align = "stretch" }, {
             UI.Item(ctrl.prevBtn, { basis = 28, grow = 0 }),
-            UI.Item(ctrl.lblHeader, { grow = 1 }),
+            UI.Item(ctrl.lblHeader, { basis = 0, grow = 1 }),
             UI.Item(ctrl.nextBtn, { basis = 28, grow = 0 }),
             UI.Item(ctrl.btnCreate, { basis = 96, grow = 0 }),
             UI.Item(ctrl.btnEdit, { basis = 84, grow = 0 }),
@@ -482,13 +487,13 @@ function SettlementControlPanel.open(selectSettlementId, initialTabId)
             UI.Item(ctrl.btnRescan, { basis = 74, grow = 0 }),
             UI.Item(ctrl.btnDelete, { basis = 64, grow = 0 }),
             UI.Item(ctrl.btnTheme, { basis = 64, grow = 0 }),
-        }), { basis = 24, grow = 0 }),
-        UI.Item(UI.Row({ gap = 8, align = "center" }, {
-            UI.Item(ctrl.lblTerritory, { grow = 1 }),
+        }), { basis = topRowH, grow = 0 }),
+        UI.Item(UI.Row({ gap = 8, align = "stretch" }, {
+            UI.Item(ctrl.lblTerritory, { basis = 0, grow = 1 }),
             UI.Item(ctrl.loadMeter, { basis = 180, grow = 0 }),
-        }), { basis = 18, grow = 0 }),
-        UI.Item(ctrl.tabBar, { basis = 28, grow = 0 }),
-        UI.Item(UI.Native(tabBody), { grow = 1 }),
+        }), { basis = statRowH, grow = 0 }),
+        UI.Item(ctrl.tabBar, { basis = tabBarH, grow = 0 }),
+        UI.Item(UI.Native(tabBody), { basis = 0, grow = 1 }),
     })
     win:setContentSpec(spec)
     win:onResize()

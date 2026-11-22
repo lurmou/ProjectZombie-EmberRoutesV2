@@ -710,7 +710,7 @@ local function createWizardInternal(opts)
     local rightSpec = UI.Column({ padding = 6, gap = 6 }, {
         UI.Item(ctrl.searchBox, { basis = 24, grow = 0 }),
         UI.Item(UI.Label(getText("IGUI_ER_Wiz_TreeHint"), { h = 16, muted = true, truncate = true }), { basis = 16, grow = 0 }),
-        UI.Item(ctrl.treeList, { grow = 1 }),
+        UI.Item(ctrl.treeList, { basis = 0, grow = 1 }),
         UI.Item(UI.Label(getText("IGUI_ER_Wiz_SampleItemsHdr"), { h = 18, color = Theme.accent }), { basis = 18, grow = 0 }),
         UI.Item(ctrl.sampleList, { basis = 88, grow = 0 }),
         UI.Item(UI.Row({ gap = 4 }, {
@@ -728,9 +728,9 @@ local function createWizardInternal(opts)
     })
 
     local rootSpec = UI.Column({ padding = 10, gap = 6 }, {
-        UI.Item(UI.Row({ gap = 6, align = "center" }, {
+        UI.Item(UI.Row({ gap = 6, align = "stretch" }, {
             UI.Item(ctrl.prevBtn, { basis = 28, grow = 0 }),
-            UI.Item(ctrl.lblTitle, { grow = 1 }),
+            UI.Item(ctrl.lblTitle, { basis = 0, grow = 1 }),
             UI.Item(ctrl.nextBtn, { basis = 28, grow = 0 }),
         }), { basis = 24, grow = 0 }),
         UI.Item(UI.Row({ gap = 6 }, {
@@ -739,7 +739,7 @@ local function createWizardInternal(opts)
             UI.Item(ctrl.btnPaste, { basis = 0, grow = 1 }),
             UI.Item(ctrl.btnAutoZone, { basis = 0, grow = 1 }),
         }), { basis = 24, grow = 0 }),
-        UI.Item(ctrl.splitView, { grow = 1 }),
+        UI.Item(ctrl.splitView, { basis = 0, grow = 1 }),
     })
     win:setContentSpec(rootSpec)
 

@@ -110,7 +110,7 @@ public final class StateTreeRunner {
                 StateNode currentLeaf = activeStack[activeDepth - 1];
                 double dwellElapsed = ctx.simTime - enteredSimTime[activeDepth - 1];
                 if (dwellElapsed < currentLeaf.getMinDwellSimSeconds()
-                        && !isPreemptiveSwitch(div, candDepth)) {
+                        && !isPreemptiveSwitch(div, candDepth, ctx)) {
                     holdForDwell = true;
                 }
             }
@@ -197,7 +197,7 @@ public final class StateTreeRunner {
         return true;
     }
 
-    private boolean isPreemptiveSwitch(int div, int candDepth) {
+    private boolean isPreemptiveSwitch(int div, int candDepth, BrainContext ctx) {
         if (div <= 0 || div >= candDepth || div >= activeDepth) {
             return false;
         }
@@ -205,7 +205,7 @@ public final class StateTreeRunner {
             return false;
         }
         for (int d = div; d < candDepth; d++) {
-            if (candPath[d].isPreemptive()) {
+            if (candPath[d].isPreemptive(ctx)) {
                 return true;
             }
         }
