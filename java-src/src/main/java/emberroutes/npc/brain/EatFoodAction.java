@@ -2,6 +2,7 @@ package emberroutes.npc.brain;
 
 import emberroutes.npc.IsoNPC;
 import zombie.characters.CharacterStat;
+import zombie.core.Translator;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.types.Food;
 
@@ -18,6 +19,7 @@ public final class EatFoodAction extends BaseAction {
     private float targetPercentage = 1.0F;
     private boolean useUtensil;
     private String eatSound;
+    private boolean playedScrapeSound;
 
     public EatFoodAction() {
         super(3.0, "eat");
@@ -51,12 +53,17 @@ public final class EatFoodAction extends BaseAction {
 
     @Override
     protected void onStart(BrainContext ctx) {
+        this.playedScrapeSound = false;
+        setPerformingActionAnim("eat");
         IsoNPC npc = ctx != null ? ctx.npc : null;
         if (npc == null || npc.isDead()) {
             return;
         }
         ItemLocation loc = findBestEdibleFood(npc);
-        if (loc == null || !(loc.item() instanceof Food food) || !unpackToMainInventoryIfNeeded(npc, loc)) {
+        if (loc == null
+                || !(loc.item() instanceof Food food)
+                || npc.getInventory() == null
+                || !npc.getInventory().contains(food)) {
             return;
         }
         this.activeFood = food;
@@ -101,6 +108,19 @@ public final class EatFoodAction extends BaseAction {
         }
 
         this.useUtensil = (secondItem != null);
+        boolean isDrinkMenuOption = Translator.getText("ContextMenu_Drink").equals(food.getCustomMenuOption());
+        if (isDrinkMenuOption && !"2handbowl".equals(eatType)) {
+            setPerformingActionAnim("drink");
+        }
+        setDurationSimSec(VanillaActionTiming.computeEatFoodSeconds(
+                food.getBaseHunger(),
+                food.getHungerChange(),
+                food.getThirstChange(),
+                this.targetPercentage,
+                this.useUtensil,
+                isDrinkMenuOption,
+                food.getEatTime(),
+                eatType));
         if (foodTypeVar != null && !foodTypeVar.isBlank()) {
             setExtraAnimVar("FoodType", foodTypeVar);
         }
@@ -120,6 +140,16 @@ public final class EatFoodAction extends BaseAction {
         IsoNPC npc = ctx != null ? ctx.npc : null;
         if (npc != null && !npc.isDead()) {
             ensureActionSoundPlaying(npc, this.eatSound);
+            if (this.useUtensil
+                    && this.activeFood != null
+                    && !this.playedScrapeSound
+                    && getProgress01() >= 0.7F) {
+                String et = this.activeFood.getEatType();
+                if ("Can".equals(et) || "Candrink".equals(et)) {
+                    playOneShotSound(npc, "ScrapeCannedFood");
+                    this.playedScrapeSound = true;
+                }
+            }
         }
     }
 

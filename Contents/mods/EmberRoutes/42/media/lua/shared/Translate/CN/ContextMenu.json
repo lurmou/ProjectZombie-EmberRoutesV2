@@ -53,5 +53,7 @@
     "ContextMenu_ER_M3_AutoSmartZone": "一键智能自动分区 (SmartZoning)",
     "ContextMenu_ER_OpenContainerWizard": "配置容器分拣规则向导...",
     "ContextMenu_ER_M3_InspectLogisticsFmt": "打印据点物流广播与提货单状态 [%1]",
-    "ContextMenu_ER_M3_TestDeliverAppleFmt": "测试实体配送订单: 苹果 x1 [%1]"
+    "ContextMenu_ER_M3_TestDeliverAppleFmt": "测试实体配送订单: 苹果 x1 [%1]",
+    "ContextMenu_ER_M3_OpenAnimDebugMonitorFmt": "打开原版动画调试监控器 [%1]",
+    "ContextMenu_ER_M3_ToggleAnimRecorderFmt": "开关原版逐帧动画录像 CSV [%1]"
 }

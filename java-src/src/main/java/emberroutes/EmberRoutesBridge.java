@@ -435,6 +435,14 @@ public final class EmberRoutesBridge {
         return NpcManager.getPostureState(npcId);
     }
 
+    public static boolean isNpcAnimRecorderActive(String npcId) {
+        return NpcManager.isNpcAnimRecorderActive(npcId);
+    }
+
+    public static String toggleNpcAnimRecorder(String npcId) {
+        return NpcManager.toggleNpcAnimRecorder(npcId);
+    }
+
     public static boolean isSittableFurniture(IsoObject obj) {
         return NpcPostureController.isSittableFurniture(obj);
     }

@@ -128,6 +128,17 @@ class SmartZoningAndSlotTest {
         int[] recoveredStand = SmartObjectRegistry.pickBestStandTile(rack, 10.5F, 8.0F, 36.0);
         assertEquals(0, recoveredStand[2]);
 
+        // 正向优先：即使 NPC 从斜角靠近且 NE(bit1)/SE(bit3) 更近，只要四正方向可用仍优先挑 N/E 等正位；四正全屏蔽/退避时才退回斜角
+        SmartSlot allEightRack = SmartObjectRegistry.registerContainerSlot(
+                "s1", "20:20:0#shelf:shelf:0#0", 20, 20, 0, 10L, 0b11111111, prepRule, 5, 50.0, 5.0, 1.0);
+        int[] cardOverDiag = SmartObjectRegistry.pickBestStandTile(allEightRack, 22.2F, 19.6F, 5.0);
+        assertEquals(0, cardOverDiag[2] & 1); // 虽斜角 NE(dSq=0.50) 最近，四正可用仍优先正位 E(dSq=1.30)
+        assertEquals(2, cardOverDiag[2]);
+        SmartSlot diagOnlyRack = SmartObjectRegistry.registerContainerSlot(
+                "s1", "22:22:0#shelf:shelf:0#0", 22, 22, 0, 10L, 0b10101010, prepRule, 5, 50.0, 5.0, 1.0);
+        int[] diagFallback = SmartObjectRegistry.pickBestStandTile(diagOnlyRack, 24.2F, 21.6F, 5.0);
+        assertEquals(1, diagFallback[2]);     // 四正全不可达时优雅退回 NE(1)
+
         // 同层门连通邻接分类
         RoomConnectivityIndex.recordDoorEdge("s1", 0, 10L, 20L);
         assertEquals(RoomTransition.SAME_ROOM, SmartObjectRegistry.classifyRoomTransition("s1", 0, 10L, 0, 10L));

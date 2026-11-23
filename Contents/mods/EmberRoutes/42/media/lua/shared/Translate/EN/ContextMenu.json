@@ -53,5 +53,7 @@
     "ContextMenu_ER_M3_AutoSmartZone": "Auto-Configure SmartZoning",
     "ContextMenu_ER_OpenContainerWizard": "Configure Sorting Wizard...",
     "ContextMenu_ER_M3_InspectLogisticsFmt": "Inspect Logistics & Delivery Queue [%1]",
-    "ContextMenu_ER_M3_TestDeliverAppleFmt": "Test Physical Delivery: Apple x1 [%1]"
+    "ContextMenu_ER_M3_TestDeliverAppleFmt": "Test Physical Delivery: Apple x1 [%1]",
+    "ContextMenu_ER_M3_OpenAnimDebugMonitorFmt": "Open Vanilla Anim Debug Monitor [%1]",
+    "ContextMenu_ER_M3_ToggleAnimRecorderFmt": "Toggle Vanilla Frame Anim Recorder CSV [%1]"
 }

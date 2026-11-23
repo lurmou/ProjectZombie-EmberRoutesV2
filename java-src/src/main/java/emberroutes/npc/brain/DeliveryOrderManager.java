@@ -19,7 +19,7 @@ import java.util.Map;
  */
 public final class DeliveryOrderManager {
     public static final double PLAYER_OUTSIDE_BUFFER_TILES = 15.0;
-    public static final double HANDOVER_RANGE_TILES = 2.5;
+    public static final double HANDOVER_RANGE_TILES = 1.40;
     public static final double PICKUP_OUT_PROTECTION_SEC = 60.0;
 
     public enum OrderStatus {

@@ -352,6 +352,48 @@ public final class SmartObjectRegistry {
         }
     }
 
+    /** 严格双向判定角色站位格能否穿通/交互至目标容器格（禁穿墙、禁隔关门、禁隔窗、禁跨层，含斜向直角拐点门控）。 */
+    public static boolean canReachSquare(IsoGridSquare fromSq, IsoGridSquare targetSq) {
+        if (fromSq == null || targetSq == null || fromSq.getZ() != targetSq.getZ()) {
+            return false;
+        }
+        if (fromSq == targetSq) {
+            return true;
+        }
+        int dx = targetSq.getX() - fromSq.getX();
+        int dy = targetSq.getY() - fromSq.getY();
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+            return false;
+        }
+        if (!fromSq.canReachTo(targetSq) || !targetSq.canReachTo(fromSq)) {
+            return false;
+        }
+        if (fromSq.isBlockedTo(targetSq) || targetSq.isBlockedTo(fromSq)) {
+            return false;
+        }
+        if (fromSq.isWindowTo(targetSq) || targetSq.isWindowTo(fromSq)) {
+            return false;
+        }
+        if (dx != 0 && dy != 0) {
+            IsoCell cell = fromSq.getCell();
+            if (cell == null) {
+                return false;
+            }
+            IsoGridSquare c1 = cell.getGridSquare(targetSq.getX(), fromSq.getY(), fromSq.getZ());
+            IsoGridSquare c2 = cell.getGridSquare(fromSq.getX(), targetSq.getY(), fromSq.getZ());
+            boolean via1 = c1 != null
+                    && !fromSq.isBlockedTo(c1) && !c1.isBlockedTo(targetSq)
+                    && !fromSq.isWindowTo(c1) && !c1.isWindowTo(targetSq);
+            boolean via2 = c2 != null
+                    && !fromSq.isBlockedTo(c2) && !c2.isBlockedTo(targetSq)
+                    && !fromSq.isWindowTo(c2) && !c2.isWindowTo(targetSq);
+            if (!via1 && !via2) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /** 预计算世界格 8 邻格可达站位掩码（位 {@code d = 0..7} 对应 {@link #DIR_DX}/{@link #DIR_DY}）。 */
     public static int computeStandDirMask(IsoGridSquare sq) {
         if (sq == null) {
@@ -372,57 +414,76 @@ public final class SmartObjectRegistry {
             if (nb == null || !nb.TreatAsSolidFloor() || nb.isSolid() || nb.isSolidTrans()) {
                 continue;
             }
-            if ((d & 1) == 0) {
-                if (!sq.isBlockedTo(nb)) {
-                    mask |= (1 << d);
-                }
-            } else {
-                IsoGridSquare c1 = cell.getGridSquare(nx, y, z);
-                IsoGridSquare c2 = cell.getGridSquare(x, ny, z);
-                boolean via1 = c1 != null && !sq.isBlockedTo(c1) && !c1.isBlockedTo(nb);
-                boolean via2 = c2 != null && !sq.isBlockedTo(c2) && !c2.isBlockedTo(nb);
-                if (via1 || via2) {
-                    mask |= (1 << d);
-                }
+            if (canReachSquare(nb, sq)) {
+                mask |= (1 << d);
             }
         }
         return mask;
     }
 
-    /** 选出距发起点最近的非退避可达站位，返回 {@code {standX, standY, dirIdx}}（若无侧位则回退原点）。 */
+    /** 选出距发起点最近的非退避可达站位（优先四正方向 N/E/S/W，全阻塞时回退四斜角），返回 {@code {standX, standY, dirIdx}}。 */
     public static int[] pickBestStandTile(SmartSlot slot, float fromX, float fromY, double simTime) {
         if (slot == null) {
             return new int[]{0, 0, -1};
         }
-        int bestDir = -1;
-        double bestDistSq = Double.MAX_VALUE;
-        int fallbackDir = -1;
-        double fallbackDistSq = Double.MAX_VALUE;
+        return pickBestStandTileInternal(slot.originX, slot.originY, slot.standDirMask, slot, fromX, fromY, simTime);
+    }
+
+    /** 基于纯掩码选出距发起点最近的可达站位（优先四正方向 N/E/S/W，供 {@code ReturnToolNode} 等无 {@link SmartSlot} 路径复用）。 */
+    public static int[] pickBestStandTileFromMask(int originX, int originY, int standDirMask, float fromX, float fromY) {
+        return pickBestStandTileInternal(originX, originY, standDirMask, null, fromX, fromY, 0.0);
+    }
+
+    private static int[] pickBestStandTileInternal(
+            int originX, int originY, int standDirMask, SmartSlot slot, float fromX, float fromY, double simTime) {
+        int bestCardDir = -1;
+        double bestCardDistSq = Double.MAX_VALUE;
+        int bestDiagDir = -1;
+        double bestDiagDistSq = Double.MAX_VALUE;
+        int fallbackCardDir = -1;
+        double fallbackCardDistSq = Double.MAX_VALUE;
+        int fallbackDiagDir = -1;
+        double fallbackDiagDistSq = Double.MAX_VALUE;
 
         for (int d = 0; d < 8; d++) {
-            if ((slot.standDirMask & (1 << d)) == 0) {
+            if ((standDirMask & (1 << d)) == 0) {
                 continue;
             }
-            int sx = slot.originX + DIR_DX[d];
-            int sy = slot.originY + DIR_DY[d];
+            int sx = originX + DIR_DX[d];
+            int sy = originY + DIR_DY[d];
             double dx = (sx + 0.5) - fromX;
             double dy = (sy + 0.5) - fromY;
             double dSq = dx * dx + dy * dy;
-            if (dSq < fallbackDistSq) {
-                fallbackDistSq = dSq;
-                fallbackDir = d;
-            }
-            if (!slot.isStandDirBackedOff(d, simTime) && dSq < bestDistSq) {
-                bestDistSq = dSq;
-                bestDir = d;
+            boolean cardinal = (d & 1) == 0;
+            boolean backedOff = slot != null && slot.isStandDirBackedOff(d, simTime);
+            if (cardinal) {
+                if (dSq < fallbackCardDistSq) {
+                    fallbackCardDistSq = dSq;
+                    fallbackCardDir = d;
+                }
+                if (!backedOff && dSq < bestCardDistSq) {
+                    bestCardDistSq = dSq;
+                    bestCardDir = d;
+                }
+            } else {
+                if (dSq < fallbackDiagDistSq) {
+                    fallbackDiagDistSq = dSq;
+                    fallbackDiagDir = d;
+                }
+                if (!backedOff && dSq < bestDiagDistSq) {
+                    bestDiagDistSq = dSq;
+                    bestDiagDir = d;
+                }
             }
         }
 
-        int chosen = bestDir >= 0 ? bestDir : fallbackDir;
+        int chosen = bestCardDir >= 0 ? bestCardDir
+                : (bestDiagDir >= 0 ? bestDiagDir
+                : (fallbackCardDir >= 0 ? fallbackCardDir : fallbackDiagDir));
         if (chosen < 0) {
-            return new int[]{slot.originX, slot.originY, -1};
+            return new int[]{originX, originY, -1};
         }
-        return new int[]{slot.originX + DIR_DX[chosen], slot.originY + DIR_DY[chosen], chosen};
+        return new int[]{originX + DIR_DX[chosen], originY + DIR_DY[chosen], chosen};
     }
 
     /** 寻路遇到特定方位 {@code NO_PATH / STUCK} 时记 30s 局部退避，驱动下次自动换侧。 */

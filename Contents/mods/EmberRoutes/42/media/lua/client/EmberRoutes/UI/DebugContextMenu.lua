@@ -7,6 +7,7 @@ local ZoneOverlay = require "EmberRoutes/UI/ZoneOverlay"
 local ZoneEditorPanel = require "EmberRoutes/UI/ZoneEditorPanel"
 local SettlementControlPanel = require "EmberRoutes/UI/SettlementControlPanel"
 local ContainerConfigWizard = require "EmberRoutes/UI/ContainerConfigWizard"
+local NpcAnimDebugBridge = require "EmberRoutes/UI/NpcAnimDebugBridge"
 
 local CONTAINER_ROLES = {
     { id = "STORAGE", key = "ContextMenu_ER_M3_Role_STORAGE" },
@@ -375,6 +376,15 @@ local function appendM2NpcSubmenu(parentSub, context, actor, gx, gy, z, bedObj, 
         addNeedOption("ContextMenu_ER_M3_NeedFatigue", "FATIGUE")
         addNeedOption("ContextMenu_ER_M3_NeedBleeding", "BLEEDING")
         addNeedOption("ContextMenu_ER_M3_NeedRestore", "RESTORE")
+
+        m2Sub:addOption(getText("ContextMenu_ER_M3_OpenAnimDebugMonitorFmt", brainTarget), actor, function()
+            NpcAnimDebugBridge.openForNpc(brainTarget)
+        end)
+
+        m2Sub:addOption(getText("ContextMenu_ER_M3_ToggleAnimRecorderFmt", brainTarget), actor, function()
+            local res = NpcRuntime.toggleAnimRecorder(brainTarget)
+            print("[EmberRoutes][M3] AnimRecorder " .. tostring(brainTarget) .. " -> " .. tostring(res))
+        end)
     end
 end
 
@@ -459,6 +469,9 @@ Kernel.registerModule({
     id = "debug-context-menu",
     onWorldReady = function(scope)
         scope:on(Events.OnFillWorldObjectContextMenu, onFillWorldMenu)
+    end,
+    onTeardown = function()
+        NpcAnimDebugBridge.detach()
     end,
 })
 

@@ -160,6 +160,9 @@ public final class SettlementTaskAuctioneer {
         if (bidder == null || task == null) {
             return EmberFormationMatcher.DUMMY_COST;
         }
+        if (bidder.lookahead && task.kind == TaskKind.DELIVERY_ORDER) {
+            return EmberFormationMatcher.DUMMY_COST;
+        }
         double dist2D = Math.hypot(task.x + 0.5 - bidder.anchorX, task.y + 0.5 - bidder.anchorY);
         double floorPenalty = 0.0;
         RoomTransition effectiveTrans = transition;

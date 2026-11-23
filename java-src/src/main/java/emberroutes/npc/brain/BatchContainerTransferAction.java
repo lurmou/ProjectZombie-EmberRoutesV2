@@ -2,28 +2,38 @@ package emberroutes.npc.brain;
 
 import emberroutes.npc.IsoNPC;
 import emberroutes.warehouse.ContainerDirtyQueue;
+import emberroutes.warehouse.SmartObjectRegistry;
 import emberroutes.warehouse.WarehouseFastIndex;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import zombie.characters.BodyDamage.Metabolics;
+import zombie.characters.IsoGameCharacter;
 import zombie.characters.IsoPlayer;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
 import zombie.inventory.types.InventoryContainer;
+import zombie.inventory.types.Radio;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
+import zombie.iso.objects.IsoDeadBody;
+import zombie.iso.objects.IsoStove;
+import zombie.scripting.objects.CharacterTrait;
 
 /**
- * 机械动力 / 原版对齐的批量箱物交互动作（挂载原版 {@code Loot} 动作 + 真实原件转移）：
+ * 原版 B42 对齐的容器物品转移 TimedAction（1:1 复刻 {@code ISInventoryTransferAction}）：
  * <ul>
- *   <li>严格通过 {@code DoRemoveItem(item) -> AddItem(item)} 迁移真实 {@link InventoryItem} 实例，100% 保留 {@code id} 与 {@code ModData}；</li>
- *   <li>支持中途目标箱满仓检出（返回 {@link #getLeftoverItems()} 供上层平滑切换次优箱或退回源箱）；</li>
- *   <li>每次变动立即置 {@code setDirty(true)} 并唤醒 {@link ContainerDirtyQueue#markSquare(IsoGridSquare)}。</li>
+ *   <li>挂载原版 {@code Loot} 动作、按容器高度设 {@code LootPosition}、调用 {@code configureHandModels(null, null)} 隐藏武器并上报 {@code EventLootItem}；</li>
+ *   <li>开始前自动关闭运行中的微波炉、播放容器 {@code TakeSound} 与循环翻找音 {@code RummageInInventory}，期间施加 {@code Metabolics.LightWork}；</li>
+ *   <li>按 {@link VanillaActionTiming#computeInventoryTransferSeconds} 对每件物品独立计时，每完成 1 件立即执行 {@code DoRemoveItem -> AddItem} 真实原件转移并播放 {@code PutSound / StoreItemPlayerInventory}，中途打断保留已完成件。</li>
  * </ul>
  */
 public final class BatchContainerTransferAction extends BaseAction {
+    private static final double MAX_CONTAINER_TRANSFER_DIST = 1.65;
+    private static final double MAX_HANDOVER_TRANSFER_DIST = 1.75;
+
     public enum TransferMode {
         LOAD_FROM_CONTAINER,
         UNLOAD_TO_CONTAINER,
@@ -38,6 +48,10 @@ public final class BatchContainerTransferAction extends BaseAction {
     private final List<InventoryItem> transferredItems = new ArrayList<>();
     private final List<InventoryItem> leftoverItems = new ArrayList<>();
     private boolean containerMissing;
+    private double[] itemDurations;
+    private int currentIdx;
+    private double itemElapsedSimSec;
+    private IsoObject facingTarget;
 
     public BatchContainerTransferAction(
             TransferMode mode,
@@ -81,129 +95,292 @@ public final class BatchContainerTransferAction extends BaseAction {
 
     @Override
     protected void onStart(BrainContext ctx) {
+        transferredItems.clear();
+        leftoverItems.clear();
+        containerMissing = false;
+        currentIdx = 0;
+        itemElapsedSimSec = 0.0;
+        facingTarget = null;
+
         IsoNPC npc = ctx != null ? ctx.npc : null;
         if (npc == null || npc.isDead()) {
+            itemDurations = new double[0];
+            setDurationSimSec(0.05);
             return;
         }
+
+        ItemContainer worldCont = null;
         if (mode == TransferMode.HANDOVER_TO_PLAYER) {
             IsoPlayer targetPlayer = resolveTargetPlayer(targetPlayerIndex);
-            if (targetPlayer != null) {
-                npc.faceThisObject(targetPlayer);
+            if (targetPlayer == null
+                    || targetPlayer.isDead()
+                    || targetPlayer.getInventory() == null
+                    || !canReachPlayer(npc, targetPlayer)) {
+                abortRemainingAsLeftover();
+                itemDurations = new double[0];
+                setDurationSimSec(0.05);
+                return;
             }
-            playActionSound(npc, "PutItemInBag");
+            worldCont = targetPlayer.getInventory();
+            facingTarget = targetPlayer;
+            npc.faceThisObject(targetPlayer);
+            setPerformingActionAnim("TransferItemOnSelf");
+            setReportEventName(null);
+        } else {
+            WarehouseFastIndex.LiveContainerRef ref = WarehouseFastIndex.resolveLiveContainer(worldContainerId);
+            if (ref == null || ref.container() == null) {
+                containerMissing = true;
+                abortRemainingAsLeftover();
+                itemDurations = new double[0];
+                setDurationSimSec(0.05);
+                return;
+            }
+            if (!canReachContainer(npc, ref.square())) {
+                abortRemainingAsLeftover();
+                itemDurations = new double[0];
+                setDurationSimSec(0.05);
+                return;
+            }
+            worldCont = ref.container();
+            facingTarget = ref.object();
+
+            if ("microwave".equalsIgnoreCase(worldCont.getType())
+                    && worldCont.getParent() instanceof IsoStove stove
+                    && stove.Activated()) {
+                stove.setActivated(false);
+            }
+
+            String lootPos = worldCont.getContainerPosition();
+            if ("freezer".equalsIgnoreCase(worldCont.getType()) && worldCont.getFreezerPosition() != null) {
+                lootPos = worldCont.getFreezerPosition();
+            }
+            if ("floor".equalsIgnoreCase(worldCont.getType())
+                    || worldCont.getParent() instanceof IsoDeadBody
+                    || (worldCont.getContainingItem() != null && worldCont.getContainingItem().getWorldItem() != null)) {
+                lootPos = "Low";
+            }
+            if (lootPos != null && !lootPos.isEmpty()) {
+                setExtraAnimVar("LootPosition", lootPos);
+            }
+            if (facingTarget != null) {
+                npc.faceThisObject(facingTarget);
+            }
+            setPerformingActionAnim("Loot");
+            setReportEventName("EventLootItem");
+        }
+
+        configureHandModels(null, null);
+
+        if (mode == TransferMode.LOAD_FROM_CONTAINER && worldCont != null) {
+            String takeSound = worldCont.getTakeSound();
+            if (takeSound != null && !takeSound.isEmpty()) {
+                playOneShotSound(npc, takeSound);
+            }
+        } else if (!plannedItems.isEmpty()) {
+            ItemContainer srcBag = resolveNpcOwnedContainer(npc, plannedItems.get(0));
+            String takeSound = srcBag != null ? srcBag.getTakeSound() : null;
+            if (takeSound != null && !takeSound.isEmpty()) {
+                playOneShotSound(npc, takeSound);
+            }
+        }
+        playLoopingActionSound(npc, "RummageInInventory");
+
+        int n = plannedItems.size();
+        this.itemDurations = new double[n];
+        if (n == 0) {
+            setDurationSimSec(0.05);
             return;
         }
-        WarehouseFastIndex.LiveContainerRef ref = WarehouseFastIndex.resolveLiveContainer(worldContainerId);
-        if (ref == null || ref.container() == null) {
-            containerMissing = true;
+        boolean dextrous = npc.hasTrait(CharacterTrait.DEXTROUS);
+        boolean clumsy = npc.hasTrait(CharacterTrait.ALL_THUMBS) || npc.isWearingAwkwardGloves();
+        boolean toFloor = mode == TransferMode.UNLOAD_TO_CONTAINER
+                && worldCont != null
+                && "floor".equalsIgnoreCase(worldCont.getType());
+
+        double totalSec = 0.0;
+        for (int i = 0; i < n; i++) {
+            InventoryItem item = plannedItems.get(i);
+            double w = item != null ? item.getActualWeight() : 0.1;
+            boolean fromMainInv = item != null
+                    && mode != TransferMode.LOAD_FROM_CONTAINER
+                    && resolveNpcOwnedContainer(npc, item) == npc.getInventory();
+            double sec = VanillaActionTiming.computeInventoryTransferSeconds(
+                    w, false, 1.0, dextrous, clumsy, toFloor, fromMainInv);
+            this.itemDurations[i] = sec;
+            totalSec += sec;
+        }
+        setDurationSimSec(totalSec);
+    }
+
+    @Override
+    protected void onTick(BrainContext ctx, double dtSim) {
+        IsoNPC npc = ctx != null ? ctx.npc : null;
+        if (npc == null || npc.isDead()) {
+            abortRemainingAsLeftover();
+            setDurationSimSec(getElapsedSimSec());
             return;
         }
-        ItemContainer ic = ref.container();
-        if ("freezer".equalsIgnoreCase(ic.getType()) && ic.getFreezerPosition() != null) {
-            setExtraAnimVar("LootPosition", ic.getFreezerPosition());
-        } else if (ic.getContainerPosition() != null) {
-            setExtraAnimVar("LootPosition", ic.getContainerPosition());
+        npc.setMetabolicTarget(Metabolics.LightWork);
+        if (facingTarget != null && !npc.isSittingOnFurniture()) {
+            npc.faceThisObject(facingTarget);
         }
-        if (ref.object() != null) {
-            npc.faceThisObject(ref.object());
+        if (itemDurations == null || currentIdx >= plannedItems.size()) {
+            return;
         }
-        playActionSound(npc, "PutItemInBag");
+        this.itemElapsedSimSec += Math.max(0.0, dtSim);
+        while (currentIdx < plannedItems.size() && this.itemElapsedSimSec >= itemDurations[currentIdx]) {
+            this.itemElapsedSimSec -= itemDurations[currentIdx];
+            if (!processCurrentItem(npc)) {
+                abortRemainingAsLeftover();
+                setDurationSimSec(getElapsedSimSec());
+                return;
+            }
+        }
     }
 
     @Override
     protected boolean onComplete(BrainContext ctx) {
-        transferredItems.clear();
-        leftoverItems.clear();
         IsoNPC npc = ctx != null ? ctx.npc : null;
         if (npc == null || npc.isDead() || npc.getInventory() == null) {
-            leftoverItems.addAll(plannedItems);
+            abortRemainingAsLeftover();
             return false;
         }
+        while (currentIdx < plannedItems.size()) {
+            if (!processCurrentItem(npc)) {
+                abortRemainingAsLeftover();
+                break;
+            }
+        }
+        return !transferredItems.isEmpty() || leftoverItems.isEmpty();
+    }
 
+    @Override
+    protected void onInterrupt(BrainContext ctx, String reason) {
+        abortRemainingAsLeftover();
+    }
+
+    private void abortRemainingAsLeftover() {
+        while (currentIdx < plannedItems.size()) {
+            InventoryItem rem = plannedItems.get(currentIdx++);
+            if (rem != null) {
+                leftoverItems.add(rem);
+            }
+        }
+    }
+
+    private boolean processCurrentItem(IsoNPC npc) {
+        InventoryItem item = plannedItems.get(currentIdx);
+        currentIdx++;
+        if (item == null) {
+            return true;
+        }
         if (mode == TransferMode.HANDOVER_TO_PLAYER) {
             IsoPlayer player = resolveTargetPlayer(targetPlayerIndex);
-            if (player == null || player.isDead() || player.getInventory() == null) {
-                leftoverItems.addAll(plannedItems);
+            if (player == null
+                    || player.isDead()
+                    || player.getInventory() == null
+                    || !canReachPlayer(npc, player)) {
+                leftoverItems.add(item);
                 return false;
             }
-            return executeTransfer(npc, npc.getInventory(), player.getInventory(), null, player);
+            transferSingleItem(npc, npc.getInventory(), player.getInventory(), null, player, item);
+            return true;
         }
 
         WarehouseFastIndex.LiveContainerRef ref = WarehouseFastIndex.resolveLiveContainer(worldContainerId);
         if (ref == null || ref.container() == null) {
             containerMissing = true;
-            leftoverItems.addAll(plannedItems);
+            leftoverItems.add(item);
+            return false;
+        }
+        if (!canReachContainer(npc, ref.square())) {
+            leftoverItems.add(item);
             return false;
         }
 
         ItemContainer worldCont = ref.container();
         IsoGridSquare sq = ref.square();
         if (mode == TransferMode.LOAD_FROM_CONTAINER) {
-            return executeTransfer(npc, worldCont, npc.getInventory(), sq, npc);
+            transferSingleItem(npc, worldCont, npc.getInventory(), sq, npc, item);
         } else {
-            return executeTransfer(npc, npc.getInventory(), worldCont, sq, npc);
+            transferSingleItem(npc, npc.getInventory(), worldCont, sq, npc, item);
         }
+        return true;
     }
 
-    private boolean executeTransfer(
+    private void transferSingleItem(
             IsoNPC actor,
             ItemContainer defaultSrc,
             ItemContainer defaultDest,
             IsoGridSquare worldSq,
-            zombie.characters.IsoGameCharacter destOwner) {
+            IsoGameCharacter destOwner,
+            InventoryItem item) {
         ItemContainer actorMainInv = actor.getInventory();
         boolean npcIsSource = mode != TransferMode.LOAD_FROM_CONTAINER;
-        boolean anyMoved = false;
-
-        for (int i = 0, n = plannedItems.size(); i < n; i++) {
-            InventoryItem item = plannedItems.get(i);
-            if (item == null) {
-                continue;
-            }
-            ItemContainer actualSrc = npcIsSource ? resolveNpcOwnedContainer(actor, item) : defaultSrc;
-            if (actualSrc == null || !actualSrc.contains(item)) {
-                continue;
-            }
-
-            ItemContainer targetDest = defaultDest;
-            if (!npcIsSource && loadTargetsByItem != null) {
-                ItemContainer preferred = loadTargetsByItem.get(item);
-                if (preferred != null
-                        && preferred != defaultDest
-                        && isNpcOwnedContainer(actor, preferred)
-                        && preferred.hasRoomFor(destOwner, item)
-                        && preferred.isItemAllowed(item)) {
-                    targetDest = preferred;
-                }
-            }
-
-            if (!targetDest.hasRoomFor(destOwner, item) || !targetDest.isItemAllowed(item)) {
-                leftoverItems.add(item);
-                continue;
-            }
-            if (actor.getPrimaryHandItem() == item) {
-                actor.setPrimaryHandItem(null);
-            }
-            if (actor.getSecondaryHandItem() == item) {
-                actor.setSecondaryHandItem(null);
-            }
-            actualSrc.DoRemoveItem(item);
-            actualSrc.setDirty(true);
-            actualSrc.setDrawDirty(true);
-            targetDest.AddItem(item);
-            targetDest.setDirty(true);
-            targetDest.setDrawDirty(true);
-            if (actorMainInv != null && (actualSrc != actorMainInv || targetDest != actorMainInv)) {
-                actorMainInv.setDirty(true);
-                actorMainInv.setDrawDirty(true);
-            }
-            transferredItems.add(item);
-            anyMoved = true;
+        ItemContainer actualSrc = npcIsSource ? resolveNpcOwnedContainer(actor, item) : defaultSrc;
+        if (actualSrc == null || !actualSrc.contains(item)) {
+            return;
         }
-        if (worldSq != null && anyMoved) {
+
+        ItemContainer targetDest = defaultDest;
+        if (!npcIsSource && loadTargetsByItem != null) {
+            ItemContainer preferred = loadTargetsByItem.get(item);
+            if (preferred != null
+                    && preferred != defaultDest
+                    && isNpcOwnedContainer(actor, preferred)
+                    && preferred.hasRoomFor(destOwner, item)
+                    && preferred.isItemAllowed(item)) {
+                targetDest = preferred;
+            }
+        }
+
+        if (!npcIsSource && (!targetDest.hasRoomFor(destOwner, item) || !targetDest.isItemAllowed(item))) {
+            ItemContainer fallbackBag = findFallbackEquippedBag(actor, destOwner, item, targetDest);
+            if (fallbackBag != null) {
+                targetDest = fallbackBag;
+            }
+        }
+
+        if (!targetDest.hasRoomFor(destOwner, item) || !targetDest.isItemAllowed(item)) {
+            leftoverItems.add(item);
+            return;
+        }
+        if (actor.getPrimaryHandItem() == item) {
+            actor.setPrimaryHandItem(null);
+        }
+        if (actor.getSecondaryHandItem() == item) {
+            actor.setSecondaryHandItem(null);
+        }
+        actualSrc.DoRemoveItem(item);
+        actualSrc.setDirty(true);
+        actualSrc.setDrawDirty(true);
+        targetDest.AddItem(item);
+        targetDest.setDirty(true);
+        targetDest.setDrawDirty(true);
+        if (actorMainInv != null && (actualSrc != actorMainInv || targetDest != actorMainInv)) {
+            actorMainInv.setDirty(true);
+            actorMainInv.setDrawDirty(true);
+        }
+        transferredItems.add(item);
+        if (item instanceof Radio) {
+            actor.updateEquippedRadioFreq();
+            if (destOwner != null && destOwner != actor) {
+                destOwner.updateEquippedRadioFreq();
+            }
+        }
+        if (worldSq != null) {
             ContainerDirtyQueue.markSquare(worldSq);
         }
-        return anyMoved || leftoverItems.isEmpty();
+
+        String completeSound = targetDest.getPutSound();
+        if ((completeSound == null || completeSound.isEmpty())
+                && destOwner != null
+                && targetDest == destOwner.getInventory()) {
+            completeSound = "StoreItemPlayerInventory";
+        }
+        if (completeSound != null && !completeSound.isEmpty()) {
+            playOneShotSound(actor, completeSound);
+        }
     }
 
     /** 检索 NPC 主物品栏或已装备/随身子背包容器，定位该物品真实所在的容器。 */
@@ -248,6 +425,62 @@ public final class BatchContainerTransferAction extends BaseAction {
             }
         }
         return false;
+    }
+
+    private static ItemContainer findFallbackEquippedBag(
+            IsoNPC actor,
+            IsoGameCharacter destOwner,
+            InventoryItem item,
+            ItemContainer excluded) {
+        if (actor == null || item == null || actor.getInventory() == null) {
+            return null;
+        }
+        List<InventoryItem> mainItems = actor.getInventory().getItems();
+        if (mainItems == null || mainItems.isEmpty()) {
+            return null;
+        }
+        ItemContainer best = null;
+        int bestReduction = -1;
+        for (int i = 0, n = mainItems.size(); i < n; i++) {
+            InventoryItem entry = mainItems.get(i);
+            if (!(entry instanceof InventoryContainer bag) || !actor.isEquipped(bag)) {
+                continue;
+            }
+            ItemContainer bagInv = bag.getInventory();
+            if (bagInv == null || bagInv == excluded) {
+                continue;
+            }
+            if (bagInv.hasRoomFor(destOwner, item) && bagInv.isItemAllowed(item)) {
+                int reduction = bag.getWeightReduction();
+                if (best == null || reduction > bestReduction) {
+                    best = bagInv;
+                    bestReduction = reduction;
+                }
+            }
+        }
+        return best;
+    }
+
+    private static boolean canReachContainer(IsoNPC npc, IsoGridSquare contSq) {
+        if (npc == null || contSq == null) {
+            return false;
+        }
+        if (!SmartObjectRegistry.canReachSquare(npc.getCurrentSquare(), contSq)) {
+            return false;
+        }
+        return Math.hypot((contSq.getX() + 0.5) - npc.getX(), (contSq.getY() + 0.5) - npc.getY())
+                <= MAX_CONTAINER_TRANSFER_DIST;
+    }
+
+    private static boolean canReachPlayer(IsoNPC npc, IsoPlayer player) {
+        if (npc == null || player == null) {
+            return false;
+        }
+        if (!SmartObjectRegistry.canReachSquare(npc.getCurrentSquare(), player.getCurrentSquare())) {
+            return false;
+        }
+        return Math.hypot(player.getX() - npc.getX(), player.getY() - npc.getY())
+                <= MAX_HANDOVER_TRANSFER_DIST;
     }
 
     private static IsoPlayer resolveTargetPlayer(int playerIndex) {

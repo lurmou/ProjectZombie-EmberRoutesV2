@@ -160,7 +160,7 @@ public final class StateTreeRunner {
         chainedNextScope = new StateScope();
     }
 
-    private void closeAndResetChainedScope() {
+    public void closeAndResetChainedScope() {
         if (chainedNextScope != null && !chainedNextScope.isClosed()) {
             chainedNextScope.close();
         }

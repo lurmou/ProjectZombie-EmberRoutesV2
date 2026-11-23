@@ -187,13 +187,29 @@ function PanelCtrl:syncActiveTabLive()
     end
 end
 
-function PanelCtrl:refreshAllTabPages(settlementId, snap, containers)
-    if not self.tabPanels then return end
-    for _id, panel in pairs(self.tabPanels) do
-        if panel and panel.ctrl and panel.ctrl.refreshData then
-            panel.ctrl:refreshData(settlementId, snap, containers)
+function PanelCtrl:refreshTabIfDirty(tabId)
+    if not tabId or not self.tabDirty or not self.tabDirty[tabId] then
+        return false
+    end
+    local panel = self.tabPanels and self.tabPanels[tabId]
+    if panel and panel.ctrl and panel.ctrl.refreshData then
+        panel.ctrl:refreshData(self.lastSettlementId, self.lastSnap, self.lastContainers)
+    end
+    self.tabDirty[tabId] = false
+    return true
+end
+
+function PanelCtrl:invalidateAndRefreshActiveTab(settlementId, snap, containers)
+    self.lastSettlementId = settlementId
+    self.lastSnap = snap
+    self.lastContainers = containers
+    self.tabDirty = self.tabDirty or {}
+    if self.tabPanels then
+        for id, _panel in pairs(self.tabPanels) do
+            self.tabDirty[id] = true
         end
     end
+    self:refreshTabIfDirty(self.activeTabId)
 end
 
 function PanelCtrl:projectIfDirty(force)
@@ -206,8 +222,6 @@ function PanelCtrl:projectIfDirty(force)
     local actor = getSpecificPlayer and getSpecificPlayer(0) or nil
     local pz = actor and math.floor(actor:getZ()) or 0
     local list = self:getSettlementListCached()
-    local dirtyEv = EmberRoutesJava.getDirtyEventCount()
-    local awakeTickers = EmberRoutesJava.getAwakeTickerCount and EmberRoutesJava.getAwakeTickerCount() or 0
 
     if #list == 0 then
         local changed = force or self.storeDirty or self.viewDirty or self.cachedSettlementId ~= nil
@@ -223,8 +237,6 @@ function PanelCtrl:projectIfDirty(force)
         self.viewDirty = false
         self.cachedSettlementId = nil
         self.cachedRevision = -1
-        self.cachedDirtyEvents = dirtyEv
-        self.cachedAwakeTickers = awakeTickers
         self.cachedFloorZ = pz
         self.lastLivePollMs = nowMs()
 
@@ -237,7 +249,7 @@ function PanelCtrl:projectIfDirty(force)
         if self.btnDelete then self.btnDelete:setEnable(false) end
         if self.prevBtn then self.prevBtn:setEnable(false) end
         if self.nextBtn then self.nextBtn:setEnable(false) end
-        self:refreshAllTabPages(nil, nil, nil)
+        self:invalidateAndRefreshActiveTab(nil, nil, nil)
         return
     end
 
@@ -252,8 +264,6 @@ function PanelCtrl:projectIfDirty(force)
         or self.viewDirty
         or self.cachedSettlementId ~= s.id
         or self.cachedRevision ~= rev
-        or self.cachedDirtyEvents ~= dirtyEv
-        or self.cachedAwakeTickers ~= awakeTickers
         or self.cachedFloorZ ~= pz
 
     if not structuralDirty then
@@ -269,8 +279,6 @@ function PanelCtrl:projectIfDirty(force)
     self.viewDirty = false
     self.cachedSettlementId = s.id
     self.cachedRevision = rev
-    self.cachedDirtyEvents = dirtyEv
-    self.cachedAwakeTickers = awakeTickers
     self.cachedFloorZ = pz
     self.lastLivePollMs = nowMs()
 
@@ -314,7 +322,7 @@ function PanelCtrl:projectIfDirty(force)
     local containers = EmberRoutesJava.listSettlementContainers
         and EmberRoutesJava.listSettlementContainers(s.id)
         or {}
-    self:refreshAllTabPages(s.id, snap, containers)
+    self:invalidateAndRefreshActiveTab(s.id, snap, containers)
 end
 
 function SettlementControlPanel.open(selectSettlementId, initialTabId)
@@ -345,12 +353,14 @@ function SettlementControlPanel.open(selectSettlementId, initialTabId)
         cachedList = nil,
         cachedSettlementId = nil,
         cachedRevision = -1,
-        cachedDirtyEvents = -1,
-        cachedAwakeTickers = -1,
         cachedFloorZ = 0,
         lastLivePollMs = 0,
+        lastSettlementId = nil,
+        lastSnap = nil,
+        lastContainers = nil,
         activeTabId = initialTabId or "warehouse",
         tabPanels = {},
+        tabDirty = {},
     }, PanelCtrl)
 
     scope:subscribe(SettlementStore, function()
@@ -463,10 +473,13 @@ function SettlementControlPanel.open(selectSettlementId, initialTabId)
         end
         target.activeTabId = nextId
         local nextPanel = target.tabPanels and target.tabPanels[nextId]
+        local refreshed = target:refreshTabIfDirty(nextId)
         if nextPanel and nextPanel.onActivate then
             nextPanel:onActivate()
         end
-        target:syncActiveTabLive()
+        if not refreshed then
+            target:syncActiveTabLive()
+        end
     end, { h = 28, variant = "underline", target = ctrl, panels = ctrl.tabPanels })
 
     ctrl.tabBar:bindPanels(ctrl.tabPanels)
@@ -504,12 +517,6 @@ function SettlementControlPanel.open(selectSettlementId, initialTabId)
             baseUpdate(self)
         end
         ctrl:projectIfDirty(false)
-    end
-
-    local basePrerender = EmberUI.WindowHost.prerender
-    win.prerender = function(self)
-        ctrl:projectIfDirty(false)
-        basePrerender(self)
     end
 
     instance = ctrl

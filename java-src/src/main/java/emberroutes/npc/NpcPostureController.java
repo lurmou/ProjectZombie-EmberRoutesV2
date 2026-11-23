@@ -3,6 +3,7 @@ package emberroutes.npc;
 import emberroutes.npc.EmberPostureMath.BedApproach;
 import emberroutes.npc.EmberPostureMath.BedFacing;
 import emberroutes.npc.EmberPostureMath.BedSlot;
+import emberroutes.npc.brain.TempPropHelper;
 import emberroutes.warehouse.SmartObjectRegistry;
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +20,8 @@ import zombie.core.skinnedmodel.advancedanimation.AnimLayer;
 import zombie.core.skinnedmodel.advancedanimation.LiveAnimNode;
 import zombie.core.skinnedmodel.animation.AnimationPlayer;
 import zombie.core.skinnedmodel.animation.AnimationTrack;
+import zombie.core.skinnedmodel.model.Model;
+import zombie.core.skinnedmodel.model.SkeletonBone;
 import zombie.debug.DebugLog;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoDirections;
@@ -26,6 +29,7 @@ import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 import zombie.iso.IsoWorld;
 import zombie.iso.LosUtil;
+import zombie.iso.Vector3;
 import zombie.iso.sprite.IsoSprite;
 import zombie.iso.sprite.IsoSpriteGrid;
 import zombie.seating.SeatingManager;
@@ -82,9 +86,16 @@ public final class NpcPostureController {
     private static final long SIT_AWAKE_TO_ASLEEP_MS = 650L;
     private static final long SIT_BRIDGE_SETTLE_MS = 160L;
     private static final long AWAKE_TO_ASLEEP_PREP_MS = 100L;
+    private static final float HEAD_TILE_PRIORITY_BONUS = -100.0F;
+    private static final float PRE_ENTRY_POS_TOL = 0.025F;
+    private static final float PRE_ENTRY_GLIDE_SPEED = 1.65F;
+    private static final long BED_TRACE_CLIMB_INTERVAL_MS = 120L;
+    private static final long BED_TRACE_HANDOFF_INTERVAL_MS = 60L;
+    private static final long BED_TRACE_HANDOFF_WINDOW_MS = 400L;
 
     private PostureState state = PostureState.STANDING;
     private IsoObject targetObj;
+    private IsoObject bedSlotOtherTile;
     private long pendingMoveSeq;
 
     private float approachX;
@@ -120,10 +131,19 @@ public final class NpcPostureController {
     private volatile float cachedBedRenderLiftZ;
     private boolean sleepInSitState;
     private boolean enterBedFromSit;
+    private long bedTraceUntilMs;
+    private long bedTraceLastLogMs;
+    private String bedTraceLastPhase = "";
+    private final Vector3 scratchWorldVec = new Vector3();
     private float bedSitProgress01;
     private IsoObject bedHeadTargetForSitBridge;
+    private IsoObject bedOtherTileForSitBridge;
+    private BedFacing bedLieFacingForSitBridge;
     private boolean standUpAfterSitBridge;
     private boolean urgentAfterSitBridge;
+    private IsoObject bedApproachFallbackBed;
+    private IsoObject bedApproachExcludedTile;
+    private boolean bedApproachFallbackUsed;
     private IsoObject bedSeatTile;
     private IsoDirections bedSeatDir = IsoDirections.S;
     private float bedSeatX;
@@ -150,6 +170,10 @@ public final class NpcPostureController {
 
     public IsoObject getTargetObject() {
         return targetObj;
+    }
+
+    public IsoObject getSecondaryBedTile() {
+        return bedSlotOtherTile;
     }
 
     public boolean hasSafeStandPos() {
@@ -227,6 +251,7 @@ public final class NpcPostureController {
         if (npc == null || npc.isDead() || !isSittableFurniture(clickedFurniture) || !hasAnimReady(npc)) {
             return false;
         }
+        TempPropHelper.cleanupAllTempProps(npc);
         boolean onBedPhase = state == PostureState.SLEEPING
                 || state == PostureState.ON_BED_AWAKE
                 || state == PostureState.WAKING_BED
@@ -318,13 +343,15 @@ public final class NpcPostureController {
 
         npc.getFollow().stop(npc, false, "POSTURE_SIT");
         this.targetObj = best.tile;
+        this.bedSlotOtherTile = null;
         this.sitDir = best.sitDir;
         this.seatSideStr = best.sideStr;
         this.beforeDir = best.beforeDir;
         this.approachX = best.x;
         this.approachY = best.y;
         this.approachZ = best.z;
-        this.bedHeadTargetForSitBridge = null;
+        clearSitBridgeTargets();
+        clearBedFallbackTargets();
         this.standUpAfterSitBridge = false;
         this.urgentAfterSitBridge = false;
         this.bedSeatTile = null;
@@ -345,6 +372,11 @@ public final class NpcPostureController {
     }
 
     public boolean commandSleepOnBed(IsoNPC npc, IsoObject clickedBed) {
+        return commandSleepOnBedInternal(npc, clickedBed, null, false);
+    }
+
+    private boolean commandSleepOnBedInternal(
+            IsoNPC npc, IsoObject clickedBed, IsoObject excludeTile, boolean fallbackUsed) {
         if (npc == null || npc.isDead() || !isBedObject(clickedBed) || clickedBed.getSquare() == null || !hasAnimReady(npc)) {
             return false;
         }
@@ -352,26 +384,32 @@ public final class NpcPostureController {
         if (cell == null) {
             return false;
         }
+        TempPropHelper.cleanupAllTempProps(npc);
 
         ArrayList<IsoObject> bedTiles = collectGridObjects(clickedBed);
         BedLayout layout = resolveBedLayout(clickedBed, bedTiles);
 
-        // 1. 已坐在同一张床侧沿时，免起身直转入睡（Bob_SatChair -> 倒放 Bob_GetOutBed 50%..0% -> Bob_Awake -> Bob_Asleep）
+        // 1. 已坐在同一张床侧沿时，免起身直转入睡（坐在床尾则就地以床尾为头、反转卧向）
         if ((state == PostureState.SEATED || state == PostureState.SEAT_BRIDGE_WAIT)
                 && targetObj != null && containsObject(bedTiles, targetObj)) {
-            String sideOnBedDir = EmberPostureMath.resolveOnBedSideFromSitDir(layout.facing, toBedFacing(sitDir));
             BedSlot matchingSlot = findSlotContainingTile(layout, targetObj);
-            if (sideOnBedDir != null && matchingSlot != null
-                    && slotHasApproachBeforeDir(matchingSlot, toBedFacing(sitDir).opposite())) {
+            if (matchingSlot != null && slotHasApproachBeforeDir(matchingSlot, toBedFacing(sitDir).opposite())) {
                 IsoObject headObj = layout.gridObjects[matchingSlot.headGridX()][matchingSlot.headGridY()];
                 IsoObject footObj = layout.gridObjects[matchingSlot.footGridX()][matchingSlot.footGridY()];
-                if (headObj != null && headObj.getObjectIndex() != -1
+                boolean reversedAtFoot = (footObj != null && footObj != headObj && targetObj == footObj);
+                IsoObject effectiveHeadObj = reversedAtFoot ? footObj : headObj;
+                IsoObject otherSlotObj = reversedAtFoot ? headObj : footObj;
+                BedFacing effectiveLieFacing = reversedAtFoot ? layout.facing.opposite() : layout.facing;
+                String sideOnBedDir = EmberPostureMath.resolveOnBedSideFromSitDir(effectiveLieFacing, toBedFacing(sitDir));
+                if (sideOnBedDir != null && effectiveHeadObj != null && effectiveHeadObj.getObjectIndex() != -1
                         && !isBedSlotOccupied(npc, headObj, footObj, layout.originX, layout.originY, layout.bedZ, matchingSlot)) {
                     clearPendingContinuation();
-                    this.bedHeadTargetForSitBridge = null;
+                    clearSitBridgeTargets();
+                    clearBedFallbackTargets();
                     this.standUpAfterSitBridge = false;
                     this.urgentAfterSitBridge = false;
-                    beginDirectSitToBed(npc, targetObj, sitDir, headObj, bedTiles, layout.facing, sideOnBedDir, layout.bedZ);
+                    beginDirectSitToBed(npc, targetObj, sitDir, effectiveHeadObj, otherSlotObj, bedTiles,
+                            effectiveLieFacing, sideOnBedDir, layout.bedZ);
                     return true;
                 }
             }
@@ -389,18 +427,26 @@ public final class NpcPostureController {
             state = PostureState.STANDING;
         }
 
-        // 2. 站立走近睡眠：优先通过床沿坐姿适配层先落座再抬腿躺平，无坐位定义（如帐篷/模组床）则走直入床兜底
-        BedViaSitCandidate sitCand = findBestBedViaSitCandidate(npc, cell, layout);
+        // 2. 站立走近睡眠：优先床沿坐姿适配层落座再躺平；床头不可达时自动退而头睡床尾（反转卧向，手性镜像复用 Left/Right）
+        BedViaSitCandidate sitCand = findBestBedViaSitCandidate(npc, cell, layout, excludeTile);
         if (sitCand != null) {
             npc.getFollow().stop(npc, false, "POSTURE_SLEEP_VIA_SIT");
             this.targetObj = sitCand.seatTile;
+            this.bedSlotOtherTile = (sitCand.otherSlotObj != null && sitCand.otherSlotObj != sitCand.seatTile)
+                    ? sitCand.otherSlotObj
+                    : null;
             this.sitDir = sitCand.sitDir;
             this.seatSideStr = sitCand.sideStr;
             this.beforeDir = sitCand.beforeDir;
             this.approachX = sitCand.x;
             this.approachY = sitCand.y;
             this.approachZ = sitCand.z;
-            this.bedHeadTargetForSitBridge = sitCand.headObj;
+            this.bedHeadTargetForSitBridge = sitCand.sleepHeadObj;
+            this.bedOtherTileForSitBridge = this.bedSlotOtherTile;
+            this.bedLieFacingForSitBridge = sitCand.lieFacing;
+            this.bedApproachFallbackBed = (!fallbackUsed && sitCand.isHeadTile) ? clickedBed : null;
+            this.bedApproachExcludedTile = (!fallbackUsed && sitCand.isHeadTile) ? sitCand.seatTile : null;
+            this.bedApproachFallbackUsed = fallbackUsed;
             this.standUpAfterSitBridge = false;
             this.urgentAfterSitBridge = false;
             this.bedSeatTile = null;
@@ -414,8 +460,9 @@ public final class NpcPostureController {
             this.stateEnteredMs = System.currentTimeMillis();
 
             DebugLog.log(String.format(Locale.US,
-                    "[EmberRoutes][POSTURE_DIAG] BED_VIA_SIT_CMD npc=%s seatSprite=%s headSprite=%s sitDir=%s side=%s beforeDir=%s app=(%.2f,%.2f,%d) seq=%d",
-                    npc.getNpcId(), safeSpriteName(sitCand.seatTile), safeSpriteName(sitCand.headObj),
+                    "[EmberRoutes][POSTURE_DIAG] BED_VIA_SIT_CMD npc=%s seatSprite=%s sleepHead=%s headAtFoot=%s lieDir=%s sitDir=%s side=%s beforeDir=%s app=(%.2f,%.2f,%d) seq=%d",
+                    npc.getNpcId(), safeSpriteName(sitCand.seatTile), safeSpriteName(sitCand.sleepHeadObj),
+                    !sitCand.isHeadTile, sitCand.lieFacing.name(),
                     sitCand.sitDir.name(), sitCand.sideStr, sitCand.beforeDir.name(),
                     sitCand.x, sitCand.y, sitCand.z, pendingMoveSeq));
             return true;
@@ -426,38 +473,7 @@ public final class NpcPostureController {
                 ? SeatingManager.getInstance().getFacingDirection(clickedBed)
                 : "?";
 
-        BedCandidate best = null;
-        for (int si = 0; si < layout.slots.size(); si++) {
-            BedSlot slot = layout.slots.get(si);
-            IsoObject headObj = layout.gridObjects[slot.headGridX()][slot.headGridY()];
-            IsoObject footObj = layout.gridObjects[slot.footGridX()][slot.footGridY()];
-            if (headObj == null || headObj.getObjectIndex() == -1) {
-                continue;
-            }
-            if (isBedSlotOccupied(npc, headObj, footObj, layout.originX, layout.originY, layout.bedZ, slot)) {
-                continue;
-            }
-            for (BedApproach cand : slot.approaches()) {
-                IsoGridSquare adjSq = cell.getGridSquare(cand.adjTileX(), cand.adjTileY(), layout.bedZ);
-                if (adjSq == null || !adjSq.TreatAsSolidFloor() || adjSq.isSolid() || adjSq.isSolidTrans()) {
-                    continue;
-                }
-                if (!EmberTargetProjector.canStandClean(npc, cand.approachX(), cand.approachY(), layout.bedZ)) {
-                    continue;
-                }
-                if (isLosBlocked(cell, cand.adjTileX(), cand.adjTileY(), layout.bedZ,
-                        cand.adjacentTargetTileX(), cand.adjacentTargetTileY())) {
-                    continue;
-                }
-                float dist = dist3D(npc, cand.approachX(), cand.approachY(), layout.bedZ);
-                float score = dist
-                        + (cand.headEntry() ? -2.0F : 0.0F)
-                        + (slot.slotIndex() == layout.clickedSlot ? -1.5F : 0.0F);
-                if (best == null || score < best.score) {
-                    best = new BedCandidate(headObj, slot.slotIndex(), cand, score);
-                }
-            }
-        }
+        BedCandidate best = findBestDirectBedCandidate(npc, cell, layout, excludeTile);
 
         if (best == null) {
             DebugLog.log(String.format(Locale.US,
@@ -468,26 +484,35 @@ public final class NpcPostureController {
 
         npc.getFollow().stop(npc, false, "POSTURE_SLEEP");
         BedApproach app = best.approach;
-        this.targetObj = best.headObj;
+        this.targetObj = best.effectiveHeadObj;
+        this.bedSlotOtherTile = (best.otherSlotObj != null && best.otherSlotObj != best.effectiveHeadObj)
+                ? best.otherSlotObj
+                : null;
         this.onBedDirection = app.onBedDirection();
         this.beforeDir = toIsoDir(app.beforeDir());
         this.lieDir = toIsoDir(app.lieDir());
-        this.bedType = resolveBedType(best.headObj);
+        this.bedType = resolveBedType(best.effectiveHeadObj);
         this.approachX = app.approachX();
         this.approachY = app.approachY();
         this.approachZ = layout.bedZ;
-        this.bedCenterX = best.headObj.getSquare().getX() + 0.5F;
-        this.bedCenterY = best.headObj.getSquare().getY() + 0.5F;
+        this.bedCenterX = best.effectiveHeadObj.getSquare().getX() + 0.5F;
+        this.bedCenterY = best.effectiveHeadObj.getSquare().getY() + 0.5F;
         this.bedSlidePrevU = 0.0F;
         this.leavingBed = false;
         this.bedExitPrevU = 0.0F;
         this.enterBedFromSit = false;
-        this.bedHeadTargetForSitBridge = null;
+        clearSitBridgeTargets();
+        this.bedApproachFallbackBed = (!fallbackUsed && app.headEntry()) ? clickedBed : null;
+        this.bedApproachExcludedTile = (!fallbackUsed && app.headEntry()) ? best.effectiveHeadObj : null;
+        this.bedApproachFallbackUsed = fallbackUsed;
         this.standUpAfterSitBridge = false;
         this.urgentAfterSitBridge = false;
         this.bedSeatTile = null;
-        this.bedMaxLiftZ = resolveBedMaxLiftZ(best.headObj, bedTiles);
+        this.bedMaxLiftZ = resolveBedMaxLiftZ(best.effectiveHeadObj, bedTiles);
         this.cachedBedRenderLiftZ = 0.0F;
+        this.bedTraceUntilMs = 0L;
+        this.bedTraceLastLogMs = 0L;
+        this.bedTraceLastPhase = "";
         saveSafeStandPos(app.approachX(), app.approachY(), layout.bedZ);
         this.pendingMoveSeq = npc.getLocomotion().moveTo(npc, app.approachX(), app.approachY(), layout.bedZ, false);
         this.eventFired = false;
@@ -498,10 +523,10 @@ public final class NpcPostureController {
         this.stateEnteredMs = System.currentTimeMillis();
 
         DebugLog.log(String.format(Locale.US,
-                "[EmberRoutes][POSTURE_DIAG] BED_CMD npc=%s sprite=%s propsFacing=%s resolved=%s seatingFacing=%s grid=%dx%d slot=%d/%d onBedDir=%s beforeDir=%s lieDir=%s app=(%.2f,%.2f,%d) liftZ=%.3f seq=%d",
-                npc.getNpcId(), safeSpriteName(best.headObj), String.valueOf(propsFacingRaw), layout.facing.name(),
+                "[EmberRoutes][POSTURE_DIAG] BED_CMD npc=%s sprite=%s propsFacing=%s resolved=%s seatingFacing=%s grid=%dx%d slot=%d/%d headAtFoot=%s onBedDir=%s beforeDir=%s lieDir=%s app=(%.2f,%.2f,%d) liftZ=%.3f seq=%d",
+                npc.getNpcId(), safeSpriteName(best.effectiveHeadObj), String.valueOf(propsFacingRaw), layout.facing.name(),
                 String.valueOf(seatingFacingRaw), layout.gridW, layout.gridH, best.slotIndex, layout.slots.size(),
-                onBedDirection, beforeDir.name(), lieDir.name(), app.approachX(), app.approachY(), layout.bedZ,
+                !app.headEntry(), onBedDirection, beforeDir.name(), lieDir.name(), app.approachX(), app.approachY(), layout.bedZ,
                 bedMaxLiftZ, pendingMoveSeq));
         return true;
     }
@@ -510,6 +535,7 @@ public final class NpcPostureController {
         if (npc == null || state == PostureState.STANDING) {
             return false;
         }
+        TempPropHelper.cleanupAllTempProps(npc);
         long now = System.currentTimeMillis();
         switch (state) {
             case APPROACHING_SEAT, APPROACHING_BED -> {
@@ -519,7 +545,7 @@ public final class NpcPostureController {
                 return true;
             }
             case ENTERING_SEAT -> {
-                this.bedHeadTargetForSitBridge = null;
+                clearSitBridgeTargets();
                 if (!eventFired && !npc.isSittingOnFurniture()) {
                     clearActiveFields();
                     state = PostureState.STANDING;
@@ -534,7 +560,7 @@ public final class NpcPostureController {
                 return true;
             }
             case SEAT_BRIDGE_WAIT, SEATED -> {
-                this.bedHeadTargetForSitBridge = null;
+                clearSitBridgeTargets();
                 this.standUpAfterSitBridge = false;
                 this.urgentAfterSitBridge = false;
                 if (urgent) {
@@ -670,9 +696,25 @@ public final class NpcPostureController {
             state = (state == PostureState.APPROACHING_BED)
                     ? PostureState.ENTERING_BED
                     : PostureState.ENTERING_SEAT;
+            if (state == PostureState.ENTERING_BED) {
+                emitBedTrace(npc, "ARRIVED", now, true);
+            }
             return;
         }
         if (loco.getSettledSeq() >= pendingMoveSeq) {
+            if (bedApproachFallbackBed != null && !bedApproachFallbackUsed
+                    && bedApproachFallbackBed.getObjectIndex() != -1) {
+                IsoObject retryBed = this.bedApproachFallbackBed;
+                IsoObject failedTile = this.bedApproachExcludedTile;
+                DebugLog.log(String.format(Locale.US,
+                        "[EmberRoutes][POSTURE_DIAG] APPROACH_FAILED_BED_FALLBACK npc=%s state=%s status=%s reason=%s exclude=%s",
+                        npc.getNpcId(), state.name(), loco.getStatus().name(), loco.getLastReason(),
+                        safeSpriteName(failedTile)));
+                clearActiveFields();
+                state = PostureState.STANDING;
+                commandSleepOnBedInternal(npc, retryBed, failedTile, true);
+                return;
+            }
             DebugLog.log(String.format(Locale.US,
                     "[EmberRoutes][POSTURE_DIAG] APPROACH_FAILED npc=%s state=%s status=%s reason=%s",
                     npc.getNpcId(), state.name(), loco.getStatus().name(), loco.getLastReason()));
@@ -754,20 +796,27 @@ public final class NpcPostureController {
             return;
         }
         if (bedHeadTargetForSitBridge != null) {
-            IsoObject head = this.bedHeadTargetForSitBridge;
-            this.bedHeadTargetForSitBridge = null;
-            if (head.getObjectIndex() != -1 && head.getSquare() != null
+            IsoObject effectiveHead = this.bedHeadTargetForSitBridge;
+            IsoObject otherTile = this.bedOtherTileForSitBridge;
+            BedFacing effectiveLieFacing = this.bedLieFacingForSitBridge;
+            clearSitBridgeTargets();
+            if (effectiveHead.getObjectIndex() != -1 && effectiveHead.getSquare() != null
                     && targetObj != null && targetObj.getObjectIndex() != -1) {
-                ArrayList<IsoObject> bedTiles = collectGridObjects(head);
-                BedLayout layout = resolveBedLayout(head, bedTiles);
+                ArrayList<IsoObject> bedTiles = collectGridObjects(effectiveHead);
+                if (effectiveLieFacing == null) {
+                    effectiveLieFacing = resolveBedLayout(effectiveHead, bedTiles).facing;
+                }
                 String sideOnBedDir = EmberPostureMath.resolveOnBedSideFromSitDir(
-                        layout.facing, toBedFacing(sitDir));
-                if (sideOnBedDir != null && !NpcManager.isBedHeadClaimedByOther(npc, head)) {
-                    beginDirectSitToBed(npc, targetObj, sitDir, head, bedTiles,
-                            layout.facing, sideOnBedDir, head.getSquare().getZ());
+                        effectiveLieFacing, toBedFacing(sitDir));
+                boolean claimed = NpcManager.isBedHeadClaimedByOther(npc, effectiveHead)
+                        || (otherTile != null && NpcManager.isBedHeadClaimedByOther(npc, otherTile));
+                if (sideOnBedDir != null && !claimed) {
+                    beginDirectSitToBed(npc, targetObj, sitDir, effectiveHead, otherTile, bedTiles,
+                            effectiveLieFacing, sideOnBedDir, effectiveHead.getSquare().getZ());
                     return;
                 }
             }
+            this.bedSlotOtherTile = null;
             this.state = PostureState.SEATED;
             this.stateEnteredMs = now;
             return;
@@ -834,17 +883,21 @@ public final class NpcPostureController {
             if (!isIdleReady(npc) && now - stateEnteredMs < IDLE_READY_MAX_MS) {
                 return;
             }
-            if (targetObj == null || targetObj.getObjectIndex() == -1
-                    || NpcManager.isBedHeadClaimedByOther(npc, targetObj)) {
+            boolean claimed = targetObj != null && (NpcManager.isBedHeadClaimedByOther(npc, targetObj)
+                    || (bedSlotOtherTile != null && NpcManager.isBedHeadClaimedByOther(npc, bedSlotOtherTile)));
+            if (targetObj == null || targetObj.getObjectIndex() == -1 || claimed) {
                 clearActiveFields();
                 state = PostureState.STANDING;
                 return;
             }
-            if (!awaitPreEntryTurn(npc, now, beforeDir)) {
+            if (!convergePreEntryPose(npc, now, approachX, approachY, approachZ, beforeDir)) {
+                emitBedTrace(npc, "PRE_ALIGN", now, false);
                 return;
             }
 
-            snapPosition(npc, approachX, approachY, approachZ);
+            if (Math.hypot(approachX - npc.getX(), approachY - npc.getY()) > 0.005F) {
+                snapPosition(npc, approachX, approachY, approachZ);
+            }
             ensureAlignedBeforeEntry(npc, beforeDir);
             this.bedSlidePrevU = 0.0F;
             this.leavingBed = false;
@@ -863,11 +916,13 @@ public final class NpcPostureController {
                     "[EmberRoutes][POSTURE_DIAG] BED_FIRE npc=%s onBedDir=%s beforeDir=%s lieDir=%s snap=(%.2f,%.2f,%d)",
                     npc.getNpcId(), onBedDirection, beforeDir.name(), lieDir.name(),
                     npc.getX(), npc.getY(), approachZ));
+            emitBedTrace(npc, "BED_FIRE", now, true);
             return;
         }
 
         if (eventFired && npc.isCurrentState(PlayerOnBedState.instance())) {
             applyBedEntrySmoothCentering(npc, now);
+            emitBedTrace(npc, "CLIMB", now, false);
         }
 
         if (npc.isCurrentState(PlayerOnBedState.instance())
@@ -880,11 +935,14 @@ public final class NpcPostureController {
                 && "idle".equalsIgnoreCase(npc.getCurrentActionContextStateName())) {
             eventRetried = true;
             this.bedSlidePrevU = 0.0F;
-            snapPosition(npc, approachX, approachY, approachZ);
+            if (Math.hypot(approachX - npc.getX(), approachY - npc.getY()) > 0.005F) {
+                snapPosition(npc, approachX, approachY, approachZ);
+            }
             ensureAlignedBeforeEntry(npc, beforeDir);
             npc.reportEvent("EventGetOnBed");
             npc.faceDirection(lieDir);
             eventFiredMs = now;
+            emitBedTrace(npc, "BED_RETRY", now, true);
         }
     }
 
@@ -915,9 +973,11 @@ public final class NpcPostureController {
         }
         this.enterBedFromSit = false;
         this.bedSlidePrevU = 1.0F;
-        snapPosition(npc, bedCenterX, bedCenterY, approachZ);
+        if (Math.hypot(bedCenterX - npc.getX(), bedCenterY - npc.getY()) > 0.005F) {
+            snapPosition(npc, bedCenterX, bedCenterY, approachZ);
+        }
         float desiredRad = AnimationPlayer.calculateAnimPlayerAngle(lieDir.dx(), lieDir.dy());
-        if (Math.abs(PZMath.getClosestAngle(npc.getAnimAngleRadians(), desiredRad)) > 0.03F) {
+        if (Math.abs(PZMath.getClosestAngle(npc.getAnimAngleRadians(), desiredRad)) > 0.02F) {
             forceAnimFacing(npc, lieDir);
         }
         npc.setVariable("OnBedStarted", true);
@@ -927,9 +987,11 @@ public final class NpcPostureController {
         npc.setForceWakeUpTime(-1.0F);
         this.state = PostureState.ON_BED_AWAKE;
         this.stateEnteredMs = now;
+        this.bedTraceUntilMs = now + BED_TRACE_HANDOFF_WINDOW_MS;
         DebugLog.log(String.format(Locale.US,
                 "[EmberRoutes][POSTURE_DIAG] ON_BED_AWAKE npc=%s pos=(%.2f,%.2f,%.1f) lieDir=%s",
                 npc.getNpcId(), npc.getX(), npc.getY(), npc.getZ(), lieDir.name()));
+        emitBedTrace(npc, "ON_BED_AWAKE", now, true);
     }
 
     private void tickOnBed(IsoNPC npc, long now) {
@@ -972,6 +1034,14 @@ public final class NpcPostureController {
                     lieDir.name()));
         }
         applyBedIdleSpeedScale(npc);
+        if (this.bedTraceUntilMs > 0L) {
+            if (now <= this.bedTraceUntilMs) {
+                emitBedTrace(npc, "HANDOFF", now, false);
+            } else {
+                emitBedTrace(npc, "HANDOFF_END", now, true);
+                this.bedTraceUntilMs = 0L;
+            }
+        }
         if (!npc.isOnBed() && npc.isCurrentState(IdleState.instance())) {
             finishStandUpClean(npc, "EXTERNAL_EXIT");
         }
@@ -1082,6 +1152,7 @@ public final class NpcPostureController {
 
         IsoObject seatObj = this.bedSeatTile;
         this.targetObj = seatObj;
+        this.bedSlotOtherTile = null;
         this.sitDir = this.bedSeatDir;
         this.seatSideStr = "Front";
         this.beforeDir = this.bedSeatDir;
@@ -1149,6 +1220,7 @@ public final class NpcPostureController {
         if (npc == null) {
             return;
         }
+        TempPropHelper.cleanupAllTempProps(npc);
         if (clearPending) {
             clearPendingContinuation();
         }
@@ -1229,8 +1301,21 @@ public final class NpcPostureController {
         this.safeStandZ = z;
     }
 
+    private void clearSitBridgeTargets() {
+        this.bedHeadTargetForSitBridge = null;
+        this.bedOtherTileForSitBridge = null;
+        this.bedLieFacingForSitBridge = null;
+    }
+
+    private void clearBedFallbackTargets() {
+        this.bedApproachFallbackBed = null;
+        this.bedApproachExcludedTile = null;
+        this.bedApproachFallbackUsed = false;
+    }
+
     private void clearActiveFields() {
         this.targetObj = null;
+        this.bedSlotOtherTile = null;
         this.pendingMoveSeq = 0L;
         this.hasSafeStandPos = false;
         this.eventFired = false;
@@ -1248,8 +1333,12 @@ public final class NpcPostureController {
         this.cachedBedRenderLiftZ = 0.0F;
         this.sleepInSitState = false;
         this.enterBedFromSit = false;
+        this.bedTraceUntilMs = 0L;
+        this.bedTraceLastLogMs = 0L;
+        this.bedTraceLastPhase = "";
         this.bedSitProgress01 = 0.0F;
-        this.bedHeadTargetForSitBridge = null;
+        clearSitBridgeTargets();
+        clearBedFallbackTargets();
         this.standUpAfterSitBridge = false;
         this.urgentAfterSitBridge = false;
         this.bedSeatTile = null;
@@ -1438,8 +1527,7 @@ public final class NpcPostureController {
         }
     }
 
-    // TODO(BedAnim): 临时补位逻辑 — 原版 Bob_GetInBed_Left/Right 实测仅进床 0.43 格且偏床头 0.15 格，
-    // FootLeft 仅 0.32/0.75 格，FootRight 复用 Right.x 无床尾爬行；后续制作自定义/镜像 B42 爬床与下床动画后移除本补位。
+    // 温和导正原版 Bob_GetInBed_Left/Right（实测进床 0.43 格且偏床头 0.15 格）到当前等效头部睡格中心。
     private void applyBedEntrySmoothCentering(IsoNPC npc, long now) {
         float frac = readActiveTrackFraction(npc, "GetInBed", now, eventFiredMs, 1350.0F);
         float nextU = EmberPostureMath.smoothstep01((frac - 0.15F) / 0.85F);
@@ -1469,23 +1557,125 @@ public final class NpcPostureController {
 
     private static float readActiveTrackFraction(
             IsoNPC npc, String nameToken, long now, long startMs, float fallbackDurationMs) {
-        AnimationPlayer anim = npc.getAnimationPlayer();
-        if (anim != null && anim.getMultiTrack() != null) {
-            List<AnimationTrack> tracks = anim.getMultiTrack().getTracks();
-            if (tracks != null) {
-                for (int i = tracks.size() - 1; i >= 0; i--) {
-                    AnimationTrack track = tracks.get(i);
-                    if (track != null && track.hasClip()) {
-                        String tname = track.getName();
-                        if (tname != null && tname.contains(nameToken)) {
-                            return Math.max(0.0F, Math.min(1.0F, track.getCurrentTimeFraction()));
-                        }
-                    }
-                }
-            }
+        AnimationTrack track = findActiveTrackByToken(npc, nameToken);
+        if (track != null) {
+            return Math.max(0.0F, Math.min(1.0F, track.getCurrentTimeFraction()));
         }
         float elapsedMs = Math.max(0.0F, (now - startMs) - 150.0F);
         return Math.max(0.0F, Math.min(1.0F, elapsedMs / Math.max(1.0F, fallbackDurationMs)));
+    }
+
+    private static AnimationTrack findActiveTrackByToken(IsoNPC npc, String nameToken) {
+        AnimationPlayer anim = npc != null ? npc.getAnimationPlayer() : null;
+        if (anim == null || anim.getMultiTrack() == null) {
+            return null;
+        }
+        List<AnimationTrack> tracks = anim.getMultiTrack().getTracks();
+        if (tracks == null) {
+            return null;
+        }
+        for (int i = tracks.size() - 1; i >= 0; i--) {
+            AnimationTrack track = tracks.get(i);
+            if (track != null && track.hasClip()) {
+                String tname = track.getName();
+                if (tname != null && tname.contains(nameToken)) {
+                    return track;
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean convergePreEntryPose(
+            IsoNPC npc, long now, float targetX, float targetY, int targetZ, IsoDirections desiredDir) {
+        boolean turnReady = awaitPreEntryTurn(npc, now, desiredDir);
+        float dx = targetX - npc.getX();
+        float dy = targetY - npc.getY();
+        float remDist = (float) Math.hypot(dx, dy);
+        if (remDist > 0.001F) {
+            if (remDist <= PRE_ENTRY_POS_TOL) {
+                smoothMovePosition(npc, targetX, targetY, targetZ);
+                remDist = 0.0F;
+            } else {
+                float dt = Math.max(0.001F, Math.min(0.05F, npc.getAnimationTimeDelta()));
+                float step = Math.min(remDist, PRE_ENTRY_GLIDE_SPEED * dt);
+                float nx = npc.getX() + (dx / remDist) * step;
+                float ny = npc.getY() + (dy / remDist) * step;
+                smoothMovePosition(npc, nx, ny, targetZ);
+                remDist = (float) Math.hypot(targetX - nx, targetY - ny);
+            }
+        }
+        return now - turnStartedMs >= TURN_WAIT_MAX_MS || (turnReady && remDist <= PRE_ENTRY_POS_TOL);
+    }
+
+    private void emitBedTrace(IsoNPC npc, String phase, long now, boolean force) {
+        long interval = "HANDOFF".equals(phase) ? BED_TRACE_HANDOFF_INTERVAL_MS : BED_TRACE_CLIMB_INTERVAL_MS;
+        if (!force && phase.equals(bedTraceLastPhase) && (now - bedTraceLastLogMs) < interval) {
+            return;
+        }
+        bedTraceLastLogMs = now;
+        bedTraceLastPhase = phase;
+
+        float errApp = (float) Math.hypot(approachX - npc.getX(), approachY - npc.getY());
+        float errBed = (float) Math.hypot(bedCenterX - npc.getX(), bedCenterY - npc.getY());
+        float bx = Float.NaN;
+        float by = Float.NaN;
+        float bz = Float.NaN;
+        try {
+            AnimationPlayer ap = npc.getAnimationPlayer();
+            int bipIdx = SkeletonBone.Bip01.index();
+            if (ap != null && ap.isReady() && bipIdx >= 0 && bipIdx < ap.getModelTransformsCount()
+                    && ap.getModelTransformAt(bipIdx) != null) {
+                scratchWorldVec.set(0.0F, 0.0F, 0.0F);
+                Model.boneToWorldCoords(npc, bipIdx, scratchWorldVec);
+                bx = scratchWorldVec.x;
+                by = scratchWorldVec.y;
+                bz = scratchWorldVec.z;
+            }
+        } catch (Throwable ignored) {}
+
+        DebugLog.log(String.format(Locale.US,
+                "[EmberRoutes][POSTURE_DIAG] BED_TRACE npc=%s phase=%s state=%s pos=(%.3f,%.3f,%.2f) errApp=%.3f errBed=%.3f animDeg=%.1f liftZ=%.3f bipW=(%.3f,%.3f,%.3f) tracks=[%s]",
+                npc.getNpcId(),
+                phase,
+                state.name(),
+                npc.getX(),
+                npc.getY(),
+                npc.getZ(),
+                errApp,
+                errBed,
+                Math.toDegrees(npc.getAnimAngleRadians()),
+                cachedBedRenderLiftZ,
+                bx,
+                by,
+                bz,
+                formatActiveTracks(npc)));
+    }
+
+    private static String formatActiveTracks(IsoNPC npc) {
+        AnimationPlayer anim = npc != null ? npc.getAnimationPlayer() : null;
+        if (anim == null || anim.getMultiTrack() == null) {
+            return "";
+        }
+        List<AnimationTrack> tracks = anim.getMultiTrack().getTracks();
+        if (tracks == null || tracks.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0, n = tracks.size(); i < n; i++) {
+            AnimationTrack track = tracks.get(i);
+            if (track == null || !track.hasClip()) {
+                continue;
+            }
+            if (!sb.isEmpty()) {
+                sb.append(',');
+            }
+            sb.append(track.getName())
+                    .append('@')
+                    .append(String.format(Locale.US, "%.2f/%.2f",
+                            track.getCurrentTimeFraction(), track.getBlendWeight()));
+        }
+        return sb.toString();
     }
 
     private boolean awaitPreEntryTurn(IsoNPC npc, long now, IsoDirections desiredDir) {
@@ -1725,7 +1915,8 @@ public final class NpcPostureController {
             IsoNPC npc,
             IsoObject seatTile,
             IsoDirections currentSitDir,
-            IsoObject headObj,
+            IsoObject effectiveHeadObj,
+            IsoObject otherSlotObj,
             ArrayList<IsoObject> bedTiles,
             BedFacing lieFacing,
             String sideOnBedDir,
@@ -1743,15 +1934,16 @@ public final class NpcPostureController {
         this.bedSeatX = this.bedSlideStartX;
         this.bedSeatY = this.bedSlideStartY;
 
-        this.targetObj = headObj;
+        this.targetObj = effectiveHeadObj;
+        this.bedSlotOtherTile = (otherSlotObj != null && otherSlotObj != effectiveHeadObj) ? otherSlotObj : null;
         this.onBedDirection = sideOnBedDir;
         this.lieDir = toIsoDir(lieFacing);
         this.beforeDir = toIsoDir(toBedFacing(currentSitDir).opposite());
-        this.bedType = resolveBedType(headObj);
-        this.bedCenterX = headObj.getSquare().getX() + 0.5F;
-        this.bedCenterY = headObj.getSquare().getY() + 0.5F;
+        this.bedType = resolveBedType(effectiveHeadObj);
+        this.bedCenterX = effectiveHeadObj.getSquare().getX() + 0.5F;
+        this.bedCenterY = effectiveHeadObj.getSquare().getY() + 0.5F;
         this.approachZ = bedZ;
-        this.bedMaxLiftZ = resolveBedMaxLiftZ(headObj, bedTiles);
+        this.bedMaxLiftZ = resolveBedMaxLiftZ(effectiveHeadObj, bedTiles);
         this.cachedBedRenderLiftZ = 0.0F;
 
         this.enterBedFromSit = true;
@@ -1776,7 +1968,7 @@ public final class NpcPostureController {
         npc.blockTurning = true;
         npc.setCollidable(false);
         npc.setHideWeaponModel(true);
-        npc.setBed(headObj);
+        npc.setBed(effectiveHeadObj);
         npc.setBedType(bedType);
         npc.setVariable("SitOnFurnitureStarted", true);
         npc.setVariable("SitOnFurnitureAnim", "Idle");
@@ -1789,12 +1981,13 @@ public final class NpcPostureController {
         this.stateEnteredMs = now;
 
         DebugLog.log(String.format(Locale.US,
-                "[EmberRoutes][POSTURE_DIAG] BED_FROM_SIT npc=%s anim=%s seatSprite=%s headSprite=%s onBedDir=%s lieDir=%s start=(%.2f,%.2f) center=(%.2f,%.2f) mode=IN_SIT",
-                npc.getNpcId(), animKey, safeSpriteName(seatTile), safeSpriteName(headObj), onBedDirection, lieDir.name(),
+                "[EmberRoutes][POSTURE_DIAG] BED_FROM_SIT npc=%s anim=%s seatSprite=%s sleepHead=%s onBedDir=%s lieDir=%s start=(%.2f,%.2f) center=(%.2f,%.2f) mode=IN_SIT",
+                npc.getNpcId(), animKey, safeSpriteName(seatTile), safeSpriteName(effectiveHeadObj), onBedDirection, lieDir.name(),
                 bedSlideStartX, bedSlideStartY, bedCenterX, bedCenterY));
     }
 
-    private BedViaSitCandidate findBestBedViaSitCandidate(IsoNPC npc, IsoCell cell, BedLayout layout) {
+    private BedViaSitCandidate findBestBedViaSitCandidate(
+            IsoNPC npc, IsoCell cell, BedLayout layout, IsoObject excludeTile) {
         SeatingManager sm = SeatingManager.getInstance();
         if (sm == null) {
             return null;
@@ -1824,6 +2017,9 @@ public final class NpcPostureController {
                 }
                 for (int ti = 0; ti < slotTiles.length; ti++) {
                     IsoObject seatTile = slotTiles[ti];
+                    if (excludeTile != null && seatTile == excludeTile) {
+                        continue;
+                    }
                     boolean isHeadTile = (ti == 0);
                     if (!isSittableFurniture(seatTile) || seatTile.getSquare() == null) {
                         continue;
@@ -1832,6 +2028,10 @@ public final class NpcPostureController {
                         continue;
                     }
                     IsoGridSquare sq = seatTile.getSquare();
+                    IsoObject otherSlotObj = isHeadTile
+                            ? ((footObj != null && footObj != headObj && footObj.getObjectIndex() != -1) ? footObj : null)
+                            : headObj;
+                    BedFacing lieFacing = isHeadTile ? layout.facing : layout.facing.opposite();
                     for (String sideStr : SEAT_SIDES) {
                         if (!sm.getAdjacentPosition(npc, seatTile, outDir.name(), sideStr,
                                 "sitonfurniture", "SitOnFurniture" + sideStr, worldPos)) {
@@ -1842,16 +2042,61 @@ public final class NpcPostureController {
                         }
                         float dist = dist3D(npc, worldPos.x, worldPos.y, sq.getZ());
                         float score = dist
-                                + (isHeadTile ? -2.5F : 0.0F)
+                                + (isHeadTile ? HEAD_TILE_PRIORITY_BONUS : 0.0F)
                                 + (slot.slotIndex() == layout.clickedSlot ? -1.5F : 0.0F)
                                 + ("Front".equals(sideStr) ? -0.3F : 0.0F);
                         if (best == null || score < best.score) {
                             IsoDirections iSitDir = toIsoDir(outDir);
                             IsoDirections iBeforeDir = toIsoDir(EmberPostureMath.resolveSeatBeforeDir(outDir, sideStr));
-                            best = new BedViaSitCandidate(headObj, seatTile, iSitDir, sideStr, iBeforeDir,
-                                    worldPos.x, worldPos.y, sq.getZ(), score);
+                            best = new BedViaSitCandidate(seatTile, otherSlotObj, seatTile, isHeadTile, lieFacing,
+                                    iSitDir, sideStr, iBeforeDir, worldPos.x, worldPos.y, sq.getZ(), score);
                         }
                     }
+                }
+            }
+        }
+        return best;
+    }
+
+    private BedCandidate findBestDirectBedCandidate(
+            IsoNPC npc, IsoCell cell, BedLayout layout, IsoObject excludeTile) {
+        BedCandidate best = null;
+        for (int si = 0; si < layout.slots.size(); si++) {
+            BedSlot slot = layout.slots.get(si);
+            IsoObject headObj = layout.gridObjects[slot.headGridX()][slot.headGridY()];
+            IsoObject footObj = layout.gridObjects[slot.footGridX()][slot.footGridY()];
+            if (headObj == null || headObj.getObjectIndex() == -1) {
+                continue;
+            }
+            if (isBedSlotOccupied(npc, headObj, footObj, layout.originX, layout.originY, layout.bedZ, slot)) {
+                continue;
+            }
+            boolean hasSeparateFoot = footObj != null && footObj != headObj && footObj.getObjectIndex() != -1;
+            for (BedApproach cand : slot.approaches()) {
+                IsoObject effectiveHeadObj = cand.headEntry() ? headObj : (hasSeparateFoot ? footObj : headObj);
+                if (excludeTile != null && effectiveHeadObj == excludeTile) {
+                    continue;
+                }
+                IsoObject otherSlotObj = hasSeparateFoot
+                        ? (effectiveHeadObj == headObj ? footObj : headObj)
+                        : null;
+                IsoGridSquare adjSq = cell.getGridSquare(cand.adjTileX(), cand.adjTileY(), layout.bedZ);
+                if (adjSq == null || !adjSq.TreatAsSolidFloor() || adjSq.isSolid() || adjSq.isSolidTrans()) {
+                    continue;
+                }
+                if (!EmberTargetProjector.canStandClean(npc, cand.approachX(), cand.approachY(), layout.bedZ)) {
+                    continue;
+                }
+                if (isLosBlocked(cell, cand.adjTileX(), cand.adjTileY(), layout.bedZ,
+                        cand.adjacentTargetTileX(), cand.adjacentTargetTileY())) {
+                    continue;
+                }
+                float dist = dist3D(npc, cand.approachX(), cand.approachY(), layout.bedZ);
+                float score = dist
+                        + (cand.headEntry() ? HEAD_TILE_PRIORITY_BONUS : 0.0F)
+                        + (slot.slotIndex() == layout.clickedSlot ? -1.5F : 0.0F);
+                if (best == null || score < best.score) {
+                    best = new BedCandidate(effectiveHeadObj, otherSlotObj, slot.slotIndex(), cand, score);
                 }
             }
         }
@@ -2011,13 +2256,14 @@ public final class NpcPostureController {
             float x, float y, int z, float score) {}
 
     private record BedCandidate(
-            IsoObject headObj, int slotIndex, BedApproach approach, float score) {}
+            IsoObject effectiveHeadObj, IsoObject otherSlotObj, int slotIndex, BedApproach approach, float score) {}
 
     private record BedLayout(
             int gridW, int gridH, int originX, int originY, int bedZ,
             IsoObject[][] gridObjects, BedFacing facing, List<BedSlot> slots, int clickedSlot) {}
 
     private record BedViaSitCandidate(
-            IsoObject headObj, IsoObject seatTile, IsoDirections sitDir, String sideStr,
+            IsoObject sleepHeadObj, IsoObject otherSlotObj, IsoObject seatTile, boolean isHeadTile,
+            BedFacing lieFacing, IsoDirections sitDir, String sideStr,
             IsoDirections beforeDir, float x, float y, int z, float score) {}
 }

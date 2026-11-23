@@ -258,6 +258,14 @@ function EmberRoutesJava.standUpAllNpcs(urgent) end
 ---@return string
 function EmberRoutesJava.getNpcPostureState(npcId) end
 
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.isNpcAnimRecorderActive(npcId) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.toggleNpcAnimRecorder(npcId) end
+
 ---@param obj any
 ---@return boolean
 function EmberRoutesJava.isSittableFurniture(obj) end

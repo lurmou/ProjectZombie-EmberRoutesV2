@@ -37,6 +37,7 @@ import zombie.characters.SurvivorFactory.SurvivorType;
 import zombie.characters.WornItems.WornItem;
 import zombie.characters.WornItems.WornItems;
 import zombie.core.Core;
+import zombie.core.skinnedmodel.animation.debug.AnimationPlayerRecorder;
 import zombie.debug.DebugLog;
 import zombie.entity.ComponentType;
 import zombie.entity.components.fluids.Fluid;
@@ -300,6 +301,7 @@ public final class NpcManager {
             rec.liveNpc.getFollow().stop(rec.liveNpc, false, "DESPAWN");
             rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "DESPAWN");
             collectSettledMoveEventLocked(rec);
+            rec.liveNpc.detachAnimDebugTools();
             detachFromWorld(rec.liveNpc, currentCell());
             rec.liveNpc = null;
         }
@@ -332,6 +334,7 @@ public final class NpcManager {
         npc.getFollow().stop(npc, true, "OFFSCREEN");
         npc.getLocomotion().interrupt(npc, "OFFSCREEN");
         collectSettledMoveEventLocked(rec);
+        npc.detachAnimDebugTools();
         try {
             rec.offscreenSnapshot = NpcSnapshot.captureFrom(npc);
         } catch (Throwable t) {
@@ -906,6 +909,24 @@ public final class NpcManager {
         return npc.getPosture().commandStandUp(npc, urgent);
     }
 
+    public static synchronized boolean isNpcAnimRecorderActive(String npcId) {
+        IsoNPC npc = getLiveNpc(npcId);
+        return npc != null && npc.isAnimationRecorderActive();
+    }
+
+    public static synchronized String toggleNpcAnimRecorder(String npcId) {
+        IsoNPC npc = getLiveNpc(npcId);
+        if (npc == null || npc.isDead()) {
+            return "MISSING";
+        }
+        boolean next = !npc.isAnimationRecorderActive();
+        npc.setAnimRecorderActive(next, next);
+        if (!next) {
+            npc.closeAnimationRecorder();
+        }
+        return (next ? "ON -> " : "OFF -> ") + AnimationPlayerRecorder.getRecordingDir();
+    }
+
     public static synchronized int standUpAllNpcs(boolean urgent) {
         int count = 0;
         for (NpcRecord rec : records.values()) {
@@ -955,6 +976,7 @@ public final class NpcManager {
             }
             IsoNPC other = rec.liveNpc;
             if (matchesTargetFurniture(other.getPosture().getTargetObject(), target, matchSpriteGrid)
+                    || matchesTargetFurniture(other.getPosture().getSecondaryBedTile(), target, matchSpriteGrid)
                     || matchesTargetFurniture(other.getSitOnFurnitureObject(), target, matchSpriteGrid)
                     || (includeBed && matchesTargetFurniture(other.getBed(), target, matchSpriteGrid))) {
                 return true;

@@ -154,6 +154,16 @@ function NpcRuntime.getPostureState(npcId)
     return EmberRoutesJava.getNpcPostureState(npcId) or "MISSING"
 end
 
+function NpcRuntime.isAnimRecorderActive(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.isNpcAnimRecorderActive or not npcId then return false end
+    return EmberRoutesJava.isNpcAnimRecorderActive(npcId) == true
+end
+
+function NpcRuntime.toggleAnimRecorder(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.toggleNpcAnimRecorder or not npcId then return "UNAVAILABLE" end
+    return EmberRoutesJava.toggleNpcAnimRecorder(npcId) or "UNAVAILABLE"
+end
+
 function NpcRuntime.setBrainMode(npcId, modeName)
     if not EmberRoutesJava or not EmberRoutesJava.setNpcBrainMode or not npcId or not modeName then return false end
     return EmberRoutesJava.setNpcBrainMode(npcId, modeName) == true

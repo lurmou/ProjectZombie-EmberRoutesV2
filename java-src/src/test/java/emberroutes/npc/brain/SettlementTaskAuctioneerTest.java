@@ -1,5 +1,6 @@
 package emberroutes.npc.brain;
 
+import emberroutes.npc.EmberFormationMatcher;
 import emberroutes.npc.brain.SettlementTaskAuctioneer.Assignment;
 import emberroutes.npc.brain.SettlementTaskAuctioneer.Bidder;
 import emberroutes.npc.brain.SettlementTaskAuctioneer.TaskKind;
@@ -121,9 +122,9 @@ class SettlementTaskAuctioneerTest {
         double t1 = BatchTourBuilder.computeDampedTransferDuration(1);
         double t4 = BatchTourBuilder.computeDampedTransferDuration(4);
         double t9 = BatchTourBuilder.computeDampedTransferDuration(9);
-        assertEquals(1.0, t1, 1e-6);
-        assertEquals(1.35, t4, 1e-6);
-        assertEquals(1.70, t9, 1e-6);
+        assertEquals(50.0 / 30.0, t1, 1e-6);
+        assertEquals((4 * 50.0) / 30.0, t4, 1e-6);
+        assertEquals((9 * 50.0) / 30.0, t9, 1e-6);
 
         record Point(String id, int x, int y) {}
         List<Point> raw = List.of(
@@ -260,5 +261,170 @@ class SettlementTaskAuctioneerTest {
         ctx.simTime = 13.5;
         runner.tick(ctx);
         assertEquals("ROOT/WORK_DUTY", runner.getActivePathString());
+    }
+
+    @Test
+    void shortestPathOrderingMinimizesStartToEndRouteForSmallAndLargeStopCounts() {
+        record Stop3D(String id, int x, int y, int z) {}
+
+        // n <= 7: Held-Karp 精确 s-t 最短路应先绕取反方向近端箱再顺路回终点，总路程 36 < 贪心最近邻 40
+        List<Stop3D> small = List.of(
+                new Stop3D("near", 12, 0, 0),
+                new Stop3D("farBack", 2, 0, 0),
+                new Stop3D("nearEnd", 28, 0, 0));
+        List<Stop3D> smallOpt = BatchTourBuilder.orderStopsShortestPath(
+                10.5, 0.5, 0, 30.5, 0.5, 0, small, Stop3D::x, Stop3D::y, Stop3D::z);
+        assertEquals(List.of("farBack", "near", "nearEnd"), smallOpt.stream().map(Stop3D::id).toList());
+
+        // 跨楼层惩罚分组：先完成 0 层全取货再上 1 层，避免来回上下楼
+        List<Stop3D> multiFloor = List.of(
+                new Stop3D("f1_b", 18, 0, 1),
+                new Stop3D("f0_a", 5, 0, 0),
+                new Stop3D("f1_a", 6, 0, 1),
+                new Stop3D("f0_b", 12, 0, 0));
+        List<Stop3D> floorOpt = BatchTourBuilder.orderStopsShortestPath(
+                0.5, 0.5, 0, 20.5, 0.5, 1, multiFloor, Stop3D::x, Stop3D::y, Stop3D::z);
+        assertEquals(0, floorOpt.get(0).z());
+        assertEquals(0, floorOpt.get(1).z());
+        assertEquals(1, floorOpt.get(2).z());
+        assertEquals(1, floorOpt.get(3).z());
+
+        // n > 7: 2-opt 消除折返交叉
+        List<Stop3D> large = List.of(
+                new Stop3D("s80", 80, 0, 0),
+                new Stop3D("s20", 20, 0, 0),
+                new Stop3D("s60", 60, 0, 0),
+                new Stop3D("s10", 10, 0, 0),
+                new Stop3D("s90", 90, 0, 0),
+                new Stop3D("s40", 40, 0, 0),
+                new Stop3D("s70", 70, 0, 0),
+                new Stop3D("s30", 30, 0, 0),
+                new Stop3D("s50", 50, 0, 0));
+        List<Stop3D> largeOpt = BatchTourBuilder.orderStopsShortestPath(
+                0.5, 0.5, 0, 100.5, 0.5, 0, large, Stop3D::x, Stop3D::y, Stop3D::z);
+        assertEquals(9, largeOpt.size());
+        double total = Math.hypot((largeOpt.get(0).x() + 0.5) - 0.5, (largeOpt.get(0).y() + 0.5) - 0.5);
+        for (int i = 1; i < largeOpt.size(); i++) {
+            total += Math.hypot(largeOpt.get(i).x() - largeOpt.get(i - 1).x(), largeOpt.get(i).y() - largeOpt.get(i - 1).y());
+        }
+        total += Math.hypot(100.5 - (largeOpt.get(largeOpt.size() - 1).x() + 0.5), 0.5 - (largeOpt.get(largeOpt.size() - 1).y() + 0.5));
+        assertEquals(100.0, total, 1e-4);
+    }
+
+    @Test
+    void carryBudgetSharesCapacityAcrossMultipleOrdersAndStopsCleanly() {
+        List<EquippedBagSpec> bags = List.of(new EquippedBagSpec(0, 15.0, 80, 0.0));
+        SmartItemPicker.CarryBudget budget = new SmartItemPicker.CarryBudget(4.0, 12.0, bags, true);
+
+        // Order 1: 3 x 3.0kg -> 进 0 号背包（effUsed: 4.0 + 3*0.6 = 5.8，背包余量 6.0）
+        for (int i = 0; i < 3; i++) {
+            assertEquals(0, budget.tryAssign(3.0));
+        }
+        // Order 2: 2 x 3.0kg -> 填满 0 号背包（effUsed: 5.8 + 2*0.6 = 7.0，背包余量 0.0）
+        for (int i = 0; i < 2; i++) {
+            assertEquals(0, budget.tryAssign(3.0));
+        }
+        // Order 3: 5 x 3.0kg -> 前 3 件进主物品栏（effUsed = 16.0 <= 17.95），第 4 件超限拒收
+        for (int i = 0; i < 3; i++) {
+            assertEquals(-1, budget.tryAssign(3.0));
+        }
+        assertEquals(Integer.MIN_VALUE, budget.tryAssign(3.0));
+        assertEquals(8, budget.getAssignedCount());
+        assertEquals(16.0, budget.getEffUsed(), 1e-6);
+        assertTrue(budget.canFitAnyMinWeight());
+
+        // 还能塞 1 件 1.95kg 小件达到 17.95 上限，之后不可再装
+        assertEquals(-1, budget.tryAssign(1.95));
+        assertFalse(budget.canFitAnyMinWeight());
+        assertEquals(Integer.MIN_VALUE, budget.tryAssign(0.05));
+    }
+
+    @Test
+    void chainedNextScopeResetAllowsSubsequentDeferWithoutImmediateRun() {
+        StateNode work = new StateNode("WORK_DUTY", null, null, 0.0, false) {
+            @Override
+            public boolean canEnter(BrainContext ctx) {
+                return true;
+            }
+        };
+        StateNode root = new StateNode("ROOT", new StateNode[]{work}, null, 0.0, false) {};
+        StateTreeRunner runner = new StateTreeRunner(root);
+
+        AtomicInteger expiredRuns = new AtomicInteger();
+        runner.getChainedNextScope().defer(expiredRuns::incrementAndGet);
+        runner.closeAndResetChainedScope();
+        assertEquals(1, expiredRuns.get());
+        assertFalse(runner.getChainedNextScope().isClosed(),
+                "closeAndResetChainedScope must replace closed scope with fresh open StateScope");
+
+        AtomicInteger freshRuns = new AtomicInteger();
+        runner.getChainedNextScope().defer(freshRuns::incrementAndGet);
+        assertEquals(0, freshRuns.get(),
+                "defer on fresh chained scope must NOT execute immediately after prior expiration");
+        runner.closeAndResetChainedScope();
+        assertEquals(1, freshRuns.get());
+    }
+
+    @Test
+    void lookaheadBidderIsExcludedFromDeliveryOrders() {
+        SettlementTaskAuctioneer auctioneer = new SettlementTaskAuctioneer();
+        Bidder lookaheadNear = new Bidder("npc_1", 10.5, 10.5, 0, 1L, 0.5, 1.0, false, true);
+        Bidder idleFar = new Bidder("npc_2", 30.5, 10.5, 0, 1L, 0.0, 1.0, false, false);
+        TaskSlice delivery = new TaskSlice(
+                "delivery:ord_1", TaskKind.DELIVERY_ORDER, "s1", "src1", 11, 10, 0, 1L, 10.0, 4.0, "ord_1");
+        TaskSlice haul = new TaskSlice(
+                "haul:src2", TaskKind.HAUL_BATCH, "s1", "src2", 11, 10, 0, 1L, 10.0, 2.0, null);
+
+        assertEquals(EmberFormationMatcher.DUMMY_COST,
+                SettlementTaskAuctioneer.computeMarginalCost(lookaheadNear, delivery, RoomTransition.SAME_ROOM, 10.0),
+                1e-6);
+
+        List<Assignment> out = new ArrayList<>();
+        int assigned = auctioneer.runAuction(
+                "s1", List.of(lookaheadNear, idleFar), List.of(delivery, haul), 10.0, out);
+        assertEquals(2, assigned);
+        for (Assignment asg : out) {
+            if (asg.task().kind == TaskKind.DELIVERY_ORDER) {
+                assertEquals("npc_2", asg.bidder().npcId,
+                        "Lookahead bidder must never win DELIVERY_ORDER; idle bidder takes it");
+            } else if (asg.task().kind == TaskKind.HAUL_BATCH) {
+                assertEquals("npc_1", asg.bidder().npcId);
+            }
+        }
+    }
+
+    @Test
+    void carryBudgetRespectsHardCapAndUsesEquippedBackpackWhenMainInventoryHeavy() {
+        List<EquippedBagSpec> bags = List.of(
+                new EquippedBagSpec(0, 17.0, 80, 0.0),
+                new EquippedBagSpec(1, 10.0, 50, 0.0));
+
+        // 1) 主包已达 50.0 硬上限时，即使背包还有空位也不再强塞（防 hasRoomFor(world -> bag) 瞬时过手失败死锁）
+        SmartItemPicker.CarryBudget atCap = new SmartItemPicker.CarryBudget(50.0, 12.0, bags, true);
+        assertFalse(atCap.canFitAnyMinWeight());
+        assertFalse(atCap.canFit(1.0));
+        assertEquals(Integer.MIN_VALUE, atCap.tryAssign(1.0));
+
+        // 2) 主包 19.0（已超过 maxWeight=12 的不扣血上限 17.95，但远低于 50.0 硬上限）且背有减重背包：
+        //    首件应优先塞进减重率最高的 0 号背包（>= 0），而非盲目塞主物品栏（-1）
+        SmartItemPicker.CarryBudget overNoDamageUnderCap = new SmartItemPicker.CarryBudget(19.0, 12.0, bags, true);
+        assertTrue(overNoDamageUnderCap.canFitAnyMinWeight());
+        assertTrue(overNoDamageUnderCap.canFit(1.0));
+        assertEquals(0, overNoDamageUnderCap.tryAssign(1.0));
+
+        // 3) preferBags = true 时先装减重率 80% 的 0 号包，再装 50% 的 1 号包，最后才落主包
+        List<EquippedBagSpec> smallBags = List.of(
+                new EquippedBagSpec(0, 2.0, 50, 0.0),
+                new EquippedBagSpec(1, 2.0, 80, 0.0));
+        SmartItemPicker.CarryBudget multiBag = new SmartItemPicker.CarryBudget(2.0, 12.0, smallBags, true);
+        assertEquals(1, multiBag.tryAssign(2.0));
+        assertEquals(0, multiBag.tryAssign(2.0));
+        assertEquals(-1, multiBag.tryAssign(2.0));
+
+        // 4) 轻任务 preferBags = false 时先放主物品栏，途中追单切 setPreferBags(true) 后再启用最高减重背包
+        SmartItemPicker.CarryBudget lightThenOverflow = new SmartItemPicker.CarryBudget(2.0, 12.0, smallBags, false);
+        assertEquals(-1, lightThenOverflow.tryAssign(2.0));
+        lightThenOverflow.setPreferBags(true);
+        assertEquals(1, lightThenOverflow.tryAssign(2.0));
     }
 }
