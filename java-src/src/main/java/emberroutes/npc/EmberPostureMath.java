@@ -11,7 +11,7 @@ import java.util.Locale;
  * <ul>
  *   <li>严格对齐原版 B42 {@code PlayerSitOnFurnitureState}、{@code PlayerOnBedState} 与 {@code PlayerGetUpState}；</li>
  *   <li>避开 {@code SeatingManager.getFacingDirection(bed)} 会把 {@code seating.txt} 侧坐位当成床朝向的 90° 偏移坑；</li>
- *   <li>禁止生成 {@code OnBedDirection = "Foot"}（原版 {@code fromOnBed.xml} 条件错写为 {@code Front} 会永久卡死起身）。</li>
+ *   <li>仅生成 {@code HeadLeft / HeadRight}（头睡床头为正向 {@code Facing}；床头不可达时支持头睡床尾并反转卧向为 {@code Facing.opposite()}），禁止生成原版起身卡死的 {@code Foot}。</li>
  * </ul>
  */
 public final class EmberPostureMath {
@@ -194,15 +194,15 @@ public final class EmberPostureMath {
         return null;
     }
 
-    /** 由床卧朝向与 {@code OnBedDirection} 解析床沿外侧面朝向（{@code Left/Right} -> 垂直朝外坐向）。 */
+    /** 由床卧朝向与 {@code OnBedDirection} 解析床沿外侧面朝向（{@code HeadLeft/HeadRight} -> 垂直朝外坐向）。 */
     public static BedFacing resolveOutwardSitDir(BedFacing lieDir, String onBedDirection) {
         if (lieDir == null || onBedDirection == null) {
             return null;
         }
-        if ("HeadLeft".equals(onBedDirection) || "FootLeft".equals(onBedDirection)) {
+        if ("HeadLeft".equals(onBedDirection)) {
             return lieDir.rotLeft90();
         }
-        if ("HeadRight".equals(onBedDirection) || "FootRight".equals(onBedDirection)) {
+        if ("HeadRight".equals(onBedDirection)) {
             return lieDir.rotRight90();
         }
         return null;
@@ -210,7 +210,7 @@ public final class EmberPostureMath {
 
     /** 判断给定 {@code OnBedDirection} 是否处于左侧（对应 {@code Bob_GetOutBedLeft}）。 */
     public static boolean isLeftSideOnBed(String onBedDirection) {
-        return "HeadLeft".equals(onBedDirection) || "FootLeft".equals(onBedDirection);
+        return "HeadLeft".equals(onBedDirection);
     }
 
     /** 在床沿坐高 {@code fromLiftZ} 与床垫卧高 {@code toLiftZ} 间按平滑曲线插值渲染 Z 抬升。 */
@@ -304,20 +304,16 @@ public final class EmberPostureMath {
 
         // 仅允许从外侧纵边上下床（双人床中间禁止穿越另一半床体）
         if (slotIndex == 0) {
-            String headDir = (lieDir == BedFacing.N) ? "HeadLeft" : "HeadRight";
-            String footDir = (lieDir == BedFacing.N) ? "FootLeft" : "FootRight";
             addSideApproaches(out, slotIndex, slotIndex, headGy, slotIndex, footGy,
                     hx - BED_EDGE_OVERLAP, hy + 0.5F, hx - 1, hy, hx, hy,
                     hx - BED_EDGE_OVERLAP, fy + 0.5F, hx - 1, fy, hx, fy,
-                    BedFacing.E, lieDir, headDir, footDir, hasSeparateFoot);
+                    BedFacing.E, lieDir, hasSeparateFoot);
         }
         if (slotIndex == gridW - 1) {
-            String headDir = (lieDir == BedFacing.N) ? "HeadRight" : "HeadLeft";
-            String footDir = (lieDir == BedFacing.N) ? "FootRight" : "FootLeft";
             addSideApproaches(out, slotIndex, slotIndex, headGy, slotIndex, footGy,
                     hx + 1.0F + BED_EDGE_OVERLAP, hy + 0.5F, hx + 1, hy, hx, hy,
                     hx + 1.0F + BED_EDGE_OVERLAP, fy + 0.5F, hx + 1, fy, hx, fy,
-                    BedFacing.W, lieDir, headDir, footDir, hasSeparateFoot);
+                    BedFacing.W, lieDir, hasSeparateFoot);
         }
         return out;
     }
@@ -332,20 +328,16 @@ public final class EmberPostureMath {
         boolean hasSeparateFoot = (footGx != headGx);
 
         if (slotIndex == 0) {
-            String headDir = (lieDir == BedFacing.W) ? "HeadRight" : "HeadLeft";
-            String footDir = (lieDir == BedFacing.W) ? "FootRight" : "FootLeft";
             addSideApproaches(out, slotIndex, headGx, slotIndex, footGx, slotIndex,
                     hx + 0.5F, hy - BED_EDGE_OVERLAP, hx, hy - 1, hx, hy,
                     fx + 0.5F, hy - BED_EDGE_OVERLAP, fx, hy - 1, fx, hy,
-                    BedFacing.S, lieDir, headDir, footDir, hasSeparateFoot);
+                    BedFacing.S, lieDir, hasSeparateFoot);
         }
         if (slotIndex == gridH - 1) {
-            String headDir = (lieDir == BedFacing.W) ? "HeadLeft" : "HeadRight";
-            String footDir = (lieDir == BedFacing.W) ? "FootLeft" : "FootRight";
             addSideApproaches(out, slotIndex, headGx, slotIndex, footGx, slotIndex,
                     hx + 0.5F, hy + 1.0F + BED_EDGE_OVERLAP, hx, hy + 1, hx, hy,
                     fx + 0.5F, hy + 1.0F + BED_EDGE_OVERLAP, fx, hy + 1, fx, hy,
-                    BedFacing.N, lieDir, headDir, footDir, hasSeparateFoot);
+                    BedFacing.N, lieDir, hasSeparateFoot);
         }
         return out;
     }
@@ -357,17 +349,21 @@ public final class EmberPostureMath {
             float headAppX, float headAppY, int headAdjX, int headAdjY, int headTargetX, int headTargetY,
             float footAppX, float footAppY, int footAdjX, int footAdjY, int footTargetX, int footTargetY,
             BedFacing beforeDir, BedFacing lieDir,
-            String headOnBedDir, String footOnBedDir,
             boolean includeFoot) {
+        BedFacing outwardSitDir = beforeDir.opposite();
+        String headOnBedDir = resolveOnBedSideFromSitDir(lieDir, outwardSitDir);
         out.add(new BedApproach(
                 slotIndex, headGx, headGy, footGx, footGy,
                 headAppX, headAppY, headAdjX, headAdjY, headTargetX, headTargetY,
                 beforeDir, lieDir, headOnBedDir, true));
         if (includeFoot) {
+            // 头睡床尾：床尾直接作为等效头位并反转卧向，手性按新卧向自动镜像以复用 HeadLeft/HeadRight
+            BedFacing footLieDir = lieDir.opposite();
+            String footOnBedDir = resolveOnBedSideFromSitDir(footLieDir, outwardSitDir);
             out.add(new BedApproach(
                     slotIndex, headGx, headGy, footGx, footGy,
                     footAppX, footAppY, footAdjX, footAdjY, footTargetX, footTargetY,
-                    beforeDir, lieDir, footOnBedDir, false));
+                    beforeDir, footLieDir, footOnBedDir, false));
         }
     }
 

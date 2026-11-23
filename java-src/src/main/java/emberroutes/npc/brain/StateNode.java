@@ -51,6 +51,11 @@ public abstract class StateNode {
         return preemptive;
     }
 
+    /** 上下文感知的高优抢占判定（默认委托给构造期 {@link #preemptive} 标记）。 */
+    public boolean isPreemptive(BrainContext ctx) {
+        return preemptive;
+    }
+
     /** 节点进入门控条件（默认永远可进入）。 */
     public boolean canEnter(BrainContext ctx) {
         return true;

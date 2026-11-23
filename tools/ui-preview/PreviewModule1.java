@@ -5,6 +5,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
 import org.json.JSONObject;
 import org.lwjgl.opengl.GL11;
@@ -41,12 +43,12 @@ import zombie.ui.UIManager;
 
 /**
  * 脱机原生 OpenGL UI 帧缓冲渲染自检器：
- * 同时打开新版的「左键拖框划区编辑器 ZoneEditorPanel」与「实时仓储与据点面板 DebugWarehousePanel」，
+ * 同时验证 ZoneEditorPanel、SettlementControlPanel（仓储提货 / 容器分拣 / 人员名册）、ContainerConfigWizard 与 NpcInventoryPanel，
  * 导出 CN 与 EN 真实帧缓冲截图核验无压字、无重叠、无裁剪溢出。
  */
 public final class PreviewModule1 {
-    private static final int WIDTH = 980;
-    private static final int HEIGHT = 540;
+    private static final int WIDTH = 1280;
+    private static final int HEIGHT = 640;
 
     public static void main(String[] args) {
         int code = 0;
@@ -144,11 +146,7 @@ public final class PreviewModule1 {
         LuaManager.env.rawset("getText", (JavaFunction) (frame, count) -> {
             String key = String.valueOf(frame.get(0));
             if (dict.has(key)) {
-                String v = dict.getString(key);
-                for (int i = 1; i < count; i++) {
-                    v = v.replace("%" + i, String.valueOf(frame.get(i)));
-                }
-                return frame.push("CN".equals(lang) ? previewS2T(v) : v);
+                return frame.push(formatPreviewText(dict.getString(key), lang, frame, count));
             }
             Object[] a = new Object[count];
             for (int i = 0; i < count; i++) a[i] = frame.get(i);
@@ -160,11 +158,7 @@ public final class PreviewModule1 {
         LuaManager.env.rawset("getTextOrNull", (JavaFunction) (frame, count) -> {
             String key = String.valueOf(frame.get(0));
             if (dict.has(key)) {
-                String v = dict.getString(key);
-                for (int i = 1; i < count; i++) {
-                    v = v.replace("%" + i, String.valueOf(frame.get(i)));
-                }
-                return frame.push("CN".equals(lang) ? previewS2T(v) : v);
+                return frame.push(formatPreviewText(dict.getString(key), lang, frame, count));
             }
             return frame.push(null);
         });
@@ -247,25 +241,79 @@ public final class PreviewModule1 {
             enc.rawset("playerBuilt", Boolean.TRUE);
             return cf.push(enc);
         });
+        boolean isCnLang = "CN".equals(lang);
+        Map<String, String[]> itemCatalog = new LinkedHashMap<>();
+        itemCatalog.put("Base.Axe", new String[]{ isCnLang ? "消防斧" : "Fire Axe", "Axe" });
+        itemCatalog.put("Base.Plank", new String[]{ isCnLang ? "木板" : "Plank", "Plank" });
+        itemCatalog.put("Base.Apple", new String[]{ isCnLang ? "蘋果" : "Apple", "Apple" });
+        itemCatalog.put("Base.TinnedBeans", new String[]{ isCnLang ? "罐頭豆子" : "Canned Beans", "Beans" });
+        itemCatalog.put("Base.Bandage", new String[]{ isCnLang ? "急救繃帶" : "Bandage", "Bandage" });
+        itemCatalog.put("Base.Antibiotics", new String[]{ isCnLang ? "抗生素" : "Antibiotics", "Antibiotics" });
+        itemCatalog.put("Base.Bullets9mm", new String[]{ isCnLang ? "9mm子彈" : "9mm Rounds", "PistolAmmo" });
+        itemCatalog.put("Base.Pistol", new String[]{ isCnLang ? "M9手槍" : "M9 Pistol", "HandGun3" });
+        itemCatalog.put("Base.Bag_BigHikingBag", new String[]{ isCnLang ? "大登山包" : "Hiking Bag", "BigHiking_Blue" });
+        itemCatalog.put("Base.Hammer", new String[]{ isCnLang ? "鐵錘" : "Hammer", "Hammer" });
+        itemCatalog.put("Base.Saw", new String[]{ isCnLang ? "鋼鋸" : "Hacksaw", "Hacksaw" });
+        itemCatalog.put("Base.Nails", new String[]{ isCnLang ? "鐵釘" : "Nails", "Nails" });
+        itemCatalog.put("Base.WaterBottle", new String[]{ isCnLang ? "飲用水瓶" : "Water Bottle", "WaterBottle" });
+        itemCatalog.put("Base.FirstAidKit", new String[]{ isCnLang ? "急救箱" : "First Aid Kit", "FirstAid" });
+        itemCatalog.put("Base.Battery", new String[]{ isCnLang ? "乾電池" : "Battery", "Battery" });
+        itemCatalog.put("Base.Book", new String[]{ isCnLang ? "技能書" : "Skill Book", "Book" });
+        itemCatalog.put("Base.Crowbar", new String[]{ isCnLang ? "撬棍" : "Crowbar", "Crowbar" });
+        itemCatalog.put("Base.Scalpel", new String[]{ isCnLang ? "手術刀" : "Scalpel", "Scalpel" });
+        itemCatalog.put("Base.RottenApple", new String[]{ isCnLang ? "腐爛蘋果" : "Rotten Apple", "AppleRotten" });
+
+        Map<String, KahluaTable> mockScriptItems = new HashMap<>();
+        for (Map.Entry<String, String[]> entry : itemCatalog.entrySet()) {
+            String dName = entry.getValue()[0];
+            String icon = entry.getValue()[1];
+            Texture tex = Texture.trygetTexture("Item_" + icon);
+            if (tex == null) tex = Texture.getSharedTexture("Item_" + icon);
+            final Texture fTex = tex;
+            KahluaTable si = LuaManager.platform.newTable();
+            si.rawset("getDisplayName", (JavaFunction) (cf, n) -> cf.push(dName));
+            si.rawset("getNormalTexture", (JavaFunction) (cf, n) -> cf.push(fTex));
+            si.rawset("getIcon", (JavaFunction) (cf, n) -> cf.push(icon));
+            mockScriptItems.put(entry.getKey(), si);
+        }
+        KahluaTable mockSm = LuaManager.platform.newTable();
+        mockSm.rawset("FindItem", (JavaFunction) (cf, n) -> {
+            String ft = n >= 2 ? String.valueOf(cf.get(1)) : String.valueOf(cf.get(0));
+            return cf.push(mockScriptItems.get(ft));
+        });
+        LuaManager.env.rawset("getScriptManager", (JavaFunction) (cf, n) -> cf.push(mockSm));
+
         jb.rawset("getWarehouseSnapshot", (JavaFunction) (cf, n) -> {
             KahluaTable snap = LuaManager.platform.newTable();
             KahluaTable counts = LuaManager.platform.newTable();
             counts.rawset("loaded", Double.valueOf(8));
             counts.rawset("unloaded", Double.valueOf(2));
             counts.rawset("privateCount", Double.valueOf(1));
-            counts.rawset("items", Double.valueOf(128));
+            counts.rawset("items", Double.valueOf(345));
             counts.rawset("usedWeight", Double.valueOf(184.6));
             counts.rawset("totalCapacity", Double.valueOf(480.0));
             snap.rawset("counts", counts);
 
             KahluaTable rows = LuaManager.platform.newTable();
             String[][] sampleRows = {
-                {"tools", "Base.Axe", "3", "3", "0", "2"},
+                {"materials", "Base.Nails", "120", "120", "0", "2"},
+                {"weapons.ammo", "Base.Bullets9mm", "64", "64", "0", "1"},
                 {"materials", "Base.Plank", "48", "48", "0", "3"},
                 {"food.perishable", "Base.Apple", "24", "18", "6", "2"},
                 {"food.stable", "Base.TinnedBeans", "24", "24", "0", "2"},
-                {"medical", "Base.Bandage", "15", "15", "0", "1"},
-                {"weapons.ammo", "Base.Bullets9mm", "14", "14", "0", "1"}
+                {"medical.bandages", "Base.Bandage", "15", "15", "0", "1"},
+                {"medical.pills", "Base.Antibiotics", "8", "8", "0", "1"},
+                {"fluids", "Base.WaterBottle", "6", "6", "0", "1"},
+                {"materials", "Base.Battery", "6", "4", "2", "1"},
+                {"literature", "Base.Book", "4", "4", "0", "1"},
+                {"tools", "Base.Axe", "3", "3", "0", "2"},
+                {"tools", "Base.Hammer", "3", "3", "0", "1"},
+                {"tools", "Base.Saw", "2", "2", "0", "1"},
+                {"weapons.guns", "Base.Pistol", "2", "2", "0", "1"},
+                {"apparel.bags", "Base.Bag_BigHikingBag", "2", "2", "0", "1"},
+                {"medical.bandages", "Base.FirstAidKit", "2", "2", "0", "1"},
+                {"tools", "Base.Crowbar", "1", "1", "0", "1"},
+                {"medical.bandages", "Base.Scalpel", "1", "1", "0", "1"}
             };
             for (int i = 0; i < sampleRows.length; i++) {
                 KahluaTable r = LuaManager.platform.newTable();
@@ -283,6 +331,140 @@ public final class PreviewModule1 {
             snap.rawset("rows", rows);
             return cf.push(snap);
         });
+        Map<String, KahluaTable> mockRules = new LinkedHashMap<>();
+        String[][] containerSpecs = {
+            {"108:104:0#crate:crate:0#0", isCnLang ? "提货交接箱" : "Pickup Box", "PICKUP_OUT", "5", "true", "false", "", "", "4.2", "50", "108", "104", "0"},
+            {"106:104:0#crate:crate:0#0", isCnLang ? "战利品卸货箱" : "Loot Buffer", "BUFFER_IN", "3", "true", "false", "", "", "18.5", "50", "106", "104", "0"},
+            {"110:102:0#fridge:fridge:0#0", isCnLang ? "医药冷柜" : "Medical Fridge", "STORAGE", "4", "true", "false", "medical,food.perishable", "scrap.compost", "21.0", "65", "110", "102", "0"},
+            {"112:102:0#locker:locker:0#0", isCnLang ? "私人枪械柜" : "Private Locker", "STORAGE", "5", "true", "true", "weapons.guns,weapons.ammo", "", "0.0", "0", "112", "102", "0"}
+        };
+        for (String[] cs : containerSpecs) {
+            KahluaTable rt = LuaManager.platform.newTable();
+            rt.rawset("containerId", cs[0]);
+            rt.rawset("displayName", cs[1]);
+            rt.rawset("role", cs[2]);
+            rt.rawset("priority", Double.valueOf(Double.parseDouble(cs[3])));
+            rt.rawset("enabled", Boolean.valueOf(Boolean.parseBoolean(cs[4])));
+            rt.rawset("isPrivate", Boolean.valueOf(Boolean.parseBoolean(cs[5])));
+            rt.rawset("allowGroups", cs[6]);
+            rt.rawset("denyGroups", cs[7]);
+            rt.rawset("allowTypes", "Base.Scalpel");
+            rt.rawset("denyTypes", "Base.RottenApple");
+            rt.rawset("usedWeight", Double.valueOf(Double.parseDouble(cs[8])));
+            rt.rawset("capacity", Double.valueOf(Double.parseDouble(cs[9])));
+            rt.rawset("x", Double.valueOf(Double.parseDouble(cs[10])));
+            rt.rawset("y", Double.valueOf(Double.parseDouble(cs[11])));
+            rt.rawset("z", Double.valueOf(Double.parseDouble(cs[12])));
+            rt.rawset("loaded", Boolean.TRUE);
+            mockRules.put(cs[0], rt);
+        }
+
+        jb.rawset("listSettlementContainers", (JavaFunction) (cf, n) -> {
+            KahluaTable out = LuaManager.platform.newTable();
+            int idx = 1;
+            for (KahluaTable rt : mockRules.values()) {
+                out.rawset(Double.valueOf(idx++), rt);
+            }
+            return cf.push(out);
+        });
+        jb.rawset("getContainerRuleById", (JavaFunction) (cf, n) -> {
+            String cid = n >= 2 ? String.valueOf(cf.get(1)) : "";
+            return cf.push(mockRules.get(cid));
+        });
+        jb.rawset("setContainerRuleById", (JavaFunction) (cf, n) -> {
+            if (n >= 3 && cf.get(2) instanceof KahluaTable rt) {
+                String cid = String.valueOf(cf.get(1));
+                KahluaTable existing = mockRules.get(cid);
+                if (existing != null) {
+                    existing.rawset("role", rt.rawget("role"));
+                    existing.rawset("priority", rt.rawget("priority"));
+                    existing.rawset("enabled", rt.rawget("enabled"));
+                    existing.rawset("isPrivate", rt.rawget("isPrivate"));
+                    existing.rawset("allowGroups", rt.rawget("allowGroups"));
+                    existing.rawset("denyGroups", rt.rawget("denyGroups"));
+                    existing.rawset("allowTypes", rt.rawget("allowTypes"));
+                    existing.rawset("denyTypes", rt.rawget("denyTypes"));
+                }
+            }
+            return cf.push(Boolean.TRUE);
+        });
+        jb.rawset("autoConfigureContainerById", (JavaFunction) (cf, n) -> cf.push("STORAGE:P4:medical"));
+        jb.rawset("getContainerSampleItemsById", (JavaFunction) (cf, n) -> {
+            KahluaTable out = LuaManager.platform.newTable();
+            String[][] samples = {
+                {"Base.Scalpel", isCnLang ? "手術刀" : "Scalpel", "1", "medical.bandages"},
+                {"Base.Bandage", isCnLang ? "繃帶" : "Bandage", "12", "medical.bandages"},
+                {"Base.Antibiotics", isCnLang ? "抗生素" : "Antibiotics", "6", "medical.pills"},
+                {"Base.RottenApple", isCnLang ? "腐爛蘋果" : "Rotten Apple", "2", "scrap.compost"}
+            };
+            for (int i = 0; i < samples.length; i++) {
+                KahluaTable s = LuaManager.platform.newTable();
+                s.rawset("fullType", samples[i][0]);
+                s.rawset("displayName", samples[i][1]);
+                s.rawset("count", Double.valueOf(Double.parseDouble(samples[i][2])));
+                s.rawset("node", samples[i][3]);
+                out.rawset(Double.valueOf(i + 1), s);
+            }
+            return cf.push(out);
+        });
+        jb.rawset("setContainerHighlight", (JavaFunction) (cf, n) -> 0);
+        jb.rawset("clearContainerHighlight", (JavaFunction) (cf, n) -> 0);
+
+        List<KahluaTable> mockOrders = new ArrayList<>();
+        String[][] seedOrders = {
+            {"ord_1", "Base.Bandage", "10", "4", "ASSIGNED", "npc_1", ""},
+            {"ord_2", "Base.Plank", "24", "0", "PENDING", "", "108:104:0#crate:crate:0#0"},
+            {"ord_3", "Base.Apple", "6", "6", "FALLBACK_PICKUP_OUT", "", ""},
+            {"ord_4", "Base.Axe", "1", "1", "COMPLETED", "", ""}
+        };
+        for (String[] so : seedOrders) {
+            KahluaTable ord = LuaManager.platform.newTable();
+            ord.rawset("orderId", so[0]);
+            ord.rawset("fullType", so[1]);
+            ord.rawset("requestedCount", Double.valueOf(Double.parseDouble(so[2])));
+            ord.rawset("deliveredCount", Double.valueOf(Double.parseDouble(so[3])));
+            ord.rawset("status", so[4]);
+            if (!so[5].isEmpty()) ord.rawset("assignedNpcId", so[5]);
+            if (!so[6].isEmpty()) ord.rawset("targetPickupOutContainerId", so[6]);
+            mockOrders.add(ord);
+        }
+        jb.rawset("listDeliveryOrders", (JavaFunction) (cf, n) -> {
+            KahluaTable out = LuaManager.platform.newTable();
+            for (int i = 0; i < mockOrders.size(); i++) {
+                out.rawset(Double.valueOf(i + 1), mockOrders.get(i));
+            }
+            return cf.push(out);
+        });
+        jb.rawset("submitDeliveryOrder", (JavaFunction) (cf, n) -> cf.push("ord_new"));
+        jb.rawset("submitDeliveryOrderToBox", (JavaFunction) (cf, n) -> cf.push("ord_box"));
+        jb.rawset("cancelDeliveryOrder", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+
+        jb.rawset("listNpcRoster", (JavaFunction) (cf, n) -> {
+            KahluaTable out = LuaManager.platform.newTable();
+            String[][] rosterData = {
+                {"npc_1", isCnLang ? "艾莉絲" : "Alice Mercer", "true", "settlement_1", "SETTLEMENT", "ROOT/SETTLEMENT/WORK_DUTY", "98", "0.18", "0.22", "false"},
+                {"npc_2", isCnLang ? "馬庫斯" : "Marcus Vance", "true", "settlement_1", "SQUAD", "ROOT/SQUAD/FOLLOW_LEADER", "84", "0.42", "0.35", "false"},
+                {"npc_3", isCnLang ? "伊蓮娜" : "Elena Rostova", "true", "", "SETTLEMENT", "ROOT/SETTLEMENT/IDLE", "62", "0.74", "0.50", "true"},
+                {"npc_4", isCnLang ? "薩米爾" : "Samir Patel", "false", "settlement_1", "SETTLEMENT", "OFFSCREEN", "100", "0.0", "0.0", "false"}
+            };
+            for (int i = 0; i < rosterData.length; i++) {
+                KahluaTable r = LuaManager.platform.newTable();
+                r.rawset("npcId", rosterData[i][0]);
+                r.rawset("displayName", rosterData[i][1]);
+                r.rawset("phasedIn", Boolean.valueOf(Boolean.parseBoolean(rosterData[i][2])));
+                r.rawset("assignedSettlementId", rosterData[i][3]);
+                r.rawset("brainMode", rosterData[i][4]);
+                r.rawset("brainStatePath", rosterData[i][5]);
+                r.rawset("health", Double.valueOf(Double.parseDouble(rosterData[i][6])));
+                r.rawset("hunger", Double.valueOf(Double.parseDouble(rosterData[i][7])));
+                r.rawset("fatigue", Double.valueOf(Double.parseDouble(rosterData[i][8])));
+                r.rawset("bleeding", Boolean.valueOf(Boolean.parseBoolean(rosterData[i][9])));
+                out.rawset(Double.valueOf(i + 1), r);
+            }
+            return cf.push(out);
+        });
+        jb.rawset("setNpcBrainMode", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("assignNpcToSettlement", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
         jb.rawset("getNpcId", (JavaFunction) (cf, n) -> cf.push(null));
         jb.rawset("isNpcAttached", (JavaFunction) (cf, n) -> cf.push(Boolean.FALSE));
         jb.rawset("getNpcDisplayName", (JavaFunction) (cf, n) -> cf.push(null));
@@ -303,19 +485,29 @@ public final class PreviewModule1 {
             local Kernel = require "EmberRoutes/Kernel"
             local Store = require "EmberRoutes/Settlement/SettlementStore"
             local Geo = require "EmberRoutes/Settlement/SettlementGeometry"
-            local Panel = require "EmberRoutes/UI/DebugWarehousePanel"
+            local Panel = require "EmberRoutes/UI/SettlementControlPanel"
             local Editor = require "EmberRoutes/UI/ZoneEditorPanel"
             Kernel.onWorldReady()
             local s = Store.createSettlement("Rosewood Outpost", 100, 100, 114, 114)
             Store.expandTerritory(s.id, 115, 100, 120, 108)
             Store.trimTerritory(s.id, 104, 104, 108, 108)
             s = Store.get(s.id)
-            local win = Panel.open(s.id)
-            win:setX(466)
-            win:setY(36)
+            local win = Panel.open(s.id, "warehouse")
+            win:setX(422)
+            win:setY(50)
+            local wTab = win.tabPanels and win.tabPanels.warehouse
+            if wTab and wTab.ctrl and wTab.ctrl.filteredItems then
+                if wTab.ctrl.filteredItems[1] then
+                    wTab.ctrl:adjustBasketItem(wTab.ctrl.filteredItems[1], 10)
+                end
+                if wTab.ctrl.filteredItems[6] then
+                    wTab.ctrl:adjustBasketItem(wTab.ctrl.filteredItems[6], 4)
+                    wTab.ctrl:selectStorageItem(wTab.ctrl.filteredItems[6])
+                end
+            end
             local ed = Editor.open(s)
-            ed:setX(20)
-            ed:setY(36)
+            ed:setX(18)
+            ed:setY(30)
             ed:onModeErase()
             ed.dragging = true
             ed.dragRect = Geo.rectangle(100, 110, 104, 114)
@@ -327,6 +519,86 @@ public final class PreviewModule1 {
         pcallLua(sceneCode);
         waitForAssets();
 
+        renderPreviewFrames(outDir.resolve("preview-" + lang + ".png"), true);
+
+        pcallLua("""
+            local win = _G.__previewWin
+            assert(win.win.contentHost.errorStage == false, "SettlementControlPanel root layout must solve cleanly: " .. tostring(win.win.contentHost.errorStage))
+            local wTab = win.tabPanels and win.tabPanels.warehouse
+            assert(wTab and wTab.errorStage == false, "Warehouse tab must solve cleanly")
+            assert(wTab.ctrl.split.firstPane.errorStage == false, "AE2 left pane must solve at default 840x540")
+            assert(wTab.ctrl.split.secondPane.errorStage == false, "AE2 right pane must solve cleanly at default 840x540")
+            """);
+
+        pcallLua("""
+            local Kernel = require "EmberRoutes/Kernel"
+            local Editor = require "EmberRoutes/UI/ZoneEditorPanel"
+            assert(ISWorldObjectContextMenu.disableWorldMenu == true, "Editor must lock disableWorldMenu")
+            Kernel.teardown()
+            assert(_G.__previewEd.win.disposed == true, "Kernel.teardown must close ZoneEditorPanel via attachExternalScope")
+            assert(_G.__previewWin.win.disposed == true, "Kernel.teardown must close SettlementControlPanel via attachExternalScope")
+            assert(not ISWorldObjectContextMenu.disableWorldMenu, "Kernel.teardown must restore disableWorldMenu")
+            assert(Editor.getActive() == nil, "Editor active handle must clear on teardown")
+            _G.__previewWin = nil
+            _G.__previewEd = nil
+            """);
+
+        // Scene 2: ContainerConfigWizard (centered, generous dimensions) + SettlementControlPanel Roster/Containers
+        pcallLua("""
+            local Kernel = require "EmberRoutes/Kernel"
+            local Store = require "EmberRoutes/Settlement/SettlementStore"
+            local Panel = require "EmberRoutes/UI/SettlementControlPanel"
+            local Wizard = require "EmberRoutes/UI/ContainerConfigWizard"
+            Kernel.onWorldReady()
+            local existing = Store.list()
+            local s = (existing and existing[1]) or Store.createSettlement("Rosewood Outpost", 100, 100, 114, 114)
+            local panel = Panel.open(s.id, "roster")
+            panel.win:setWidth(820)
+            panel.win:setHeight(540)
+            panel:setX(230)
+            panel:setY(40)
+            panel:forceRefresh()
+            _G.__previewPanel = panel
+            """);
+        waitForAssets();
+        renderPreviewFrames(outDir.resolve("preview-roster-" + lang + ".png"), false);
+
+        pcallLua("""
+            local Wizard = require "EmberRoutes/UI/ContainerConfigWizard"
+            _G.__previewPanel:selectTab("containers")
+            _G.__previewPanel:forceRefresh()
+            """);
+        renderPreviewFrames(outDir.resolve("preview-containers-" + lang + ".png"), false);
+
+        pcallLua("""
+            local Wizard = require "EmberRoutes/UI/ContainerConfigWizard"
+            _G.__previewPanel.win:setVisible(false)
+            local wiz = Wizard.openForSettlementContainer(_G.__previewPanel.cachedSettlementId, "110:102:0#fridge:fridge:0#0")
+            wiz.win:setWidth(780)
+            wiz.win:setHeight(540)
+            wiz:setX(250)
+            wiz:setY(40)
+            _G.__previewWiz = wiz
+            """);
+        waitForAssets();
+        renderPreviewFrames(outDir.resolve("preview-wizard-" + lang + ".png"), false);
+
+        pcallLua("""
+            local Kernel = require "EmberRoutes/Kernel"
+            local Wizard = require "EmberRoutes/UI/ContainerConfigWizard"
+            _G.__previewPanel.win:setVisible(true)
+            Kernel.teardown()
+            assert(_G.__previewWiz.win.disposed == true, "Kernel.teardown must close ContainerConfigWizard")
+            assert(_G.__previewPanel.win.disposed == true, "Kernel.teardown must close SettlementControlPanel")
+            assert(Wizard.getActive() == nil, "Wizard active handle must clear on teardown")
+            _G.__previewWiz = nil
+            _G.__previewPanel = nil
+            """);
+
+        renderNpcInventoryPreview(outDir, lang);
+    }
+
+    private static void renderPreviewFrames(Path outFile, boolean drawZonePolygon) throws Exception {
         for (int frame = 0; frame < 4; frame++) {
             Display.processMessages();
             GameWindow.fileSystem.updateAsyncTransactions();
@@ -347,7 +619,9 @@ public final class PreviewModule1 {
                 r.StartShader(SceneShaderStore.defaultShaderId, -1);
 
                 PreviewFrame.flushPendingUI();
-                drawIrregularZonePreview(r);
+                if (drawZonePolygon) {
+                    drawIrregularZonePreview(r);
+                }
                 for (var el : new ArrayList<>(UIManager.getUI())) {
                     if (el.isVisible()) {
                         el.update();
@@ -361,27 +635,12 @@ public final class PreviewModule1 {
                 r.postRender();
 
                 if (fIdx == 3) {
-                    capturePng(outDir.resolve("preview-" + lang + ".png"));
+                    capturePng(outFile);
                 }
                 Display.update();
             });
             Display.sync(30);
         }
-
-        pcallLua("""
-            local Kernel = require "EmberRoutes/Kernel"
-            local Editor = require "EmberRoutes/UI/ZoneEditorPanel"
-            assert(ISWorldObjectContextMenu.disableWorldMenu == true, "Editor must lock disableWorldMenu")
-            Kernel.teardown()
-            assert(_G.__previewEd.win.disposed == true, "Kernel.teardown must close ZoneEditorPanel via attachExternalScope")
-            assert(_G.__previewWin.win.disposed == true, "Kernel.teardown must close DebugWarehousePanel via attachExternalScope")
-            assert(not ISWorldObjectContextMenu.disableWorldMenu, "Kernel.teardown must restore disableWorldMenu")
-            assert(Editor.getActive() == nil, "Editor active handle must clear on teardown")
-            _G.__previewWin = nil
-            _G.__previewEd = nil
-            """);
-
-        renderNpcInventoryPreview(outDir, lang);
     }
 
     private static void renderNpcInventoryPreview(Path outDir, String lang) throws Exception {
@@ -496,45 +755,7 @@ public final class PreviewModule1 {
             _G.__previewInvMock = nil
             """);
 
-        for (int frame = 0; frame < 4; frame++) {
-            Display.processMessages();
-            GameWindow.fileSystem.updateAsyncTransactions();
-            final int fIdx = frame;
-            RenderThread.invokeOnRenderContext(() -> {
-                GL11.glViewport(0, 0, WIDTH, HEIGHT);
-                GL11.glClearColor(0.10f, 0.12f, 0.14f, 1f);
-                GL11.glDisable(GL11.GL_SCISSOR_TEST);
-                GL11.glDisable(GL11.GL_STENCIL_TEST);
-                GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_STENCIL_BUFFER_BIT);
-                GL11.glEnable(GL11.GL_BLEND);
-                GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
-
-                SpriteRenderer r = SpriteRenderer.instance;
-                r.prePopulating();
-                PreviewFrame.resetStencilDepth();
-                r.glDoStartFrame(WIDTH, HEIGHT, 1, -1);
-                r.StartShader(SceneShaderStore.defaultShaderId, -1);
-
-                PreviewFrame.flushPendingUI();
-                for (var el : new ArrayList<>(UIManager.getUI())) {
-                    if (el.isVisible()) {
-                        el.update();
-                        el.render();
-                    }
-                }
-
-                r.glDoEndFrame();
-                r.pushFrameDown();
-                r.acquireStateForRendering(() -> false);
-                r.postRender();
-
-                if (fIdx == 3) {
-                    capturePng(outDir.resolve("preview-npc-inv-" + lang + ".png"));
-                }
-                Display.update();
-            });
-            Display.sync(30);
-        }
+        renderPreviewFrames(outDir.resolve("preview-npc-inv-" + lang + ".png"), false);
 
         pcallLua("""
             local Kernel = require "EmberRoutes/Kernel"
@@ -570,7 +791,26 @@ public final class PreviewModule1 {
         Map.entry('远', '遠'), Map.entry('内', '內'), Map.entry('绷', '繃'), Map.entry('带', '帶'),
         Map.entry('头', '頭'), Map.entry('丝', '絲'), Map.entry('马', '馬'), Map.entry('库', '庫'),
         Map.entry('类', '類'), Map.entry('别', '別'), Map.entry('电', '電'), Map.entry('装', '裝'),
-        Map.entry('备', '備')
+        Map.entry('备', '備'), Map.entry('拣', '揀'), Map.entry('员', '員'),
+        Map.entry('册', '冊'), Map.entry('边', '邊'), Map.entry('关', '關'), Map.entry('题', '題'),
+        Map.entry('篮', '籃'), Map.entry('状', '狀'), Map.entry('选', '選'), Map.entry('项', '項'),
+        Map.entry('药', '藥'), Map.entry('枪', '槍'), Map.entry('弹', '彈'), Map.entry('杂', '雜'),
+        Map.entry('废', '廢'), Map.entry('烂', '爛'), Map.entry('冲', '衝'),
+        Map.entry('险', '險'), Map.entry('转', '轉'), Map.entry('护', '護'), Map.entry('导', '導'),
+        Map.entry('规', '規'), Map.entry('则', '則'), Map.entry('复', '複'), Map.entry('贴', '貼'),
+        Map.entry('启', '啟'), Map.entry('设', '設'), Map.entry('优', '優'), Map.entry('树', '樹'),
+        Map.entry('循', '循'), Map.entry('环', '環'), Map.entry('换', '換'), Map.entry('样', '樣'),
+        Map.entry('饥', '飢'), Map.entry('满', '滿'), Map.entry('终', '終'), Map.entry('端', '端'),
+        Map.entry('毁', '毀'), Map.entry('细', '細'), Map.entry('调', '調'), Map.entry('缝', '縫'),
+        Map.entry('针', '針'), Map.entry('线', '線'), Map.entry('农', '農'), Map.entry('种', '種'),
+        Map.entry('铁', '鐵'), Map.entry('处', '處'), Map.entry('属', '屬'), Map.entry('对', '對'),
+        Map.entry('应', '應'), Map.entry('将', '將'), Map.entry('从', '從'), Map.entry('为', '為'),
+        Map.entry('书', '書'), Map.entry('刊', '刊'), Map.entry('报', '報'), Map.entry('纸', '紙'),
+        Map.entry('体', '體'), Map.entry('专', '專'), Map.entry('门', '門'), Map.entry('进', '進'),
+        Map.entry('还', '還'), Map.entry('运', '運'), Map.entry('过', '過'), Map.entry('达', '達'),
+        Map.entry('给', '給'), Map.entry('级', '級'), Map.entry('组', '組'), Map.entry('织', '織'),
+        Map.entry('统', '統'), Map.entry('维', '維'), Map.entry('网', '網'), Map.entry('络', '絡'),
+        Map.entry('称', '稱'), Map.entry('钉', '釘'), Map.entry('锯', '鋸'), Map.entry('锤', '錘')
     );
 
     private static float isoX(float gx, float gy) {
@@ -610,6 +850,27 @@ public final class PreviewModule1 {
                 0.25f, 0.95f, 0.58f, 0.96f, 2
             );
         }
+    }
+
+    private static final Pattern PREVIEW_FMT_TOKEN = Pattern.compile("%%|%([1-9])");
+
+    private static String formatPreviewText(String raw, String lang, se.krka.kahlua.vm.LuaCallFrame frame, int count) {
+        if (raw == null) return "";
+        Matcher m = PREVIEW_FMT_TOKEN.matcher(raw);
+        StringBuilder sb = new StringBuilder(raw.length());
+        while (m.find()) {
+            String g = m.group(1);
+            if (g == null) {
+                m.appendReplacement(sb, "%");
+            } else {
+                int idx = Integer.parseInt(g);
+                String repl = idx < count ? String.valueOf(frame.get(idx)) : m.group(0);
+                m.appendReplacement(sb, Matcher.quoteReplacement(repl));
+            }
+        }
+        m.appendTail(sb);
+        String out = sb.toString();
+        return "CN".equals(lang) ? previewS2T(out) : out;
     }
 
     private static String previewS2T(String s) {

@@ -5,6 +5,8 @@ import zombie.characters.CharacterStat;
 import zombie.entity.ComponentType;
 import zombie.entity.components.fluids.FluidContainer;
 import zombie.inventory.InventoryItem;
+import zombie.inventory.types.DrainableComboItem;
+import zombie.inventory.types.Food;
 
 /**
  * 确定性饮水动作（100% 对齐原版 {@code ISDrinkFluidAction} 与 {@code IsoGameCharacter#autoDrink}）：
@@ -49,7 +51,7 @@ public final class DrinkWaterAction extends BaseAction {
             return;
         }
         ItemLocation loc = findCleanWaterContainer(npc);
-        if (loc == null || !unpackToMainInventoryIfNeeded(npc, loc)) {
+        if (loc == null || npc.getInventory() == null || !npc.getInventory().contains(loc.item())) {
             return;
         }
         this.activeItem = loc.item();
@@ -67,6 +69,12 @@ public final class DrinkWaterAction extends BaseAction {
         float endRatio = this.startRatio * (1.0F - percentage);
         this.targetConsumedRatio = Math.max(0.0F, this.startRatio - endRatio);
 
+        double fluidHung = activeContainer.getProperties() != null
+                ? activeContainer.getProperties().getHungerChange()
+                : 0.0;
+        setDurationSimSec(VanillaActionTiming.computeDrinkFluidSeconds(
+                fluidHung, percentage, activeItem.getEatType()));
+
         String eatType = activeItem.getEatType();
         if (eatType != null && !eatType.isBlank()) {
             setExtraAnimVar("FoodType", eatType);
@@ -81,6 +89,19 @@ public final class DrinkWaterAction extends BaseAction {
         }
 
         this.drinkSound = activeContainer.getCustomDrinkSound();
+        if ("DrinkingFromMug".equals(this.drinkSound)) {
+            float heat;
+            if (activeItem instanceof Food f) {
+                heat = f.getHeat();
+            } else if (activeItem instanceof DrainableComboItem d) {
+                heat = d.getHeat();
+            } else {
+                heat = activeItem.getItemHeat();
+            }
+            if (heat > 1.0F) {
+                this.drinkSound = "DrinkingFromHotTeaCup";
+            }
+        }
         if (this.drinkSound != null && !this.drinkSound.isBlank()) {
             playActionSound(npc, this.drinkSound);
         }

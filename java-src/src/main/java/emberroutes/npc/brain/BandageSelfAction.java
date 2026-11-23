@@ -5,7 +5,12 @@ import java.util.List;
 import zombie.characters.BodyDamage.BodyDamage;
 import zombie.characters.BodyDamage.BodyPart;
 import zombie.characters.BodyDamage.BodyPartType;
+import zombie.characters.BodyDamage.Metabolics;
+import zombie.characters.CharacterStat;
+import zombie.characters.skills.PerkFactory;
+import zombie.core.random.Rand;
 import zombie.inventory.InventoryItem;
+import zombie.scripting.objects.CharacterTrait;
 
 /**
  * 确定性自我包扎动作（100% 对齐原版 {@code ISApplyBandage} 与 {@code ISHealthPanel.getBandageType}）：
@@ -101,14 +106,20 @@ public final class BandageSelfAction extends BaseAction {
         if (npc == null || npc.isDead()) {
             return;
         }
-        ItemLocation loc = findBestBandage(npc);
-        if (loc != null) {
-            unpackToMainInventoryIfNeeded(npc, loc);
-        }
+        int doctorLevel = npc.getPerkLevel(PerkFactory.Perks.Doctor);
+        setDurationSimSec(VanillaActionTiming.computeApplyBandageSeconds(doctorLevel));
         BodyPart targetPart = findFirstBleedingUnbandagedPart(npc);
         setExtraAnimVar("BandageType", resolveBandageType(targetPart));
         configureHandModels(null, null);
         playActionSound(npc, "FirstAidApplyBandage");
+    }
+
+    @Override
+    protected void onTick(BrainContext ctx, double dtSim) {
+        IsoNPC npc = ctx != null ? ctx.npc : null;
+        if (npc != null && !npc.isDead()) {
+            npc.setMetabolicTarget(Metabolics.LightDomestic);
+        }
     }
 
     @Override
@@ -130,8 +141,26 @@ public final class BandageSelfAction extends BaseAction {
             return false;
         }
         InventoryItem item = loc.item();
+        if (npc.hasTrait(CharacterTrait.HEMOPHOBIC)
+                && targetPart.getBleedingTime() > 0.0F
+                && npc.getStats() != null) {
+            npc.getStats().add(CharacterStat.PANIC, 50.0F);
+        }
+        int doctorLevel = npc.getPerkLevel(PerkFactory.Perks.Doctor);
+        float minLife = (doctorLevel + 1) * 0.5F;
+        float maxLife = (doctorLevel + 1) * 1.0F;
         float power = item.getBandagePower() > 0.0F ? item.getBandagePower() : 4.0F;
-        targetPart.setBandaged(true, power, item.isAlcoholic(), item.getFullType());
+        float bandageLife = Rand.Next(minLife, maxLife) + power;
+        if (item.getType() != null && item.getType().contains("Dirty")) {
+            bandageLife = 0.0F;
+        }
+        if (targetPart.isGetBandageXp() && bandageLife > 0.0F && npc.getXp() != null) {
+            npc.getXp().AddXP(PerkFactory.Perks.Doctor, 5.0F);
+        }
+        targetPart.setBandaged(true, bandageLife, item.isAlcoholic(), item.getFullType());
+        if (item.isInfected()) {
+            targetPart.SetInfected(true);
+        }
         if (npc.getPrimaryHandItem() == item) {
             npc.setPrimaryHandItem(null);
         }

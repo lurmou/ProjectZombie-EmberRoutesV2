@@ -10,8 +10,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class EmberPostureMathTest {
-    private static final Set<String> ALLOWED_ON_BED_DIRS = Set.of(
-            "HeadLeft", "HeadRight", "FootLeft", "FootRight");
+    private static final Set<String> ALLOWED_ON_BED_DIRS = Set.of("HeadLeft", "HeadRight");
 
     @Test
     void singleBedFourFacingsMatchVanillaSnapAndHeadOrientation() {
@@ -109,7 +108,7 @@ class EmberPostureMathTest {
         assertEquals(0.5F, EmberPostureMath.smoothstep01(0.5F), 1e-6F);
         assertEquals(1.0F, EmberPostureMath.smoothstep01(1.5F), 1e-6F);
 
-        // 模拟原版 FootRight（复用 Right.x，无床尾爬行，仅进床 0.43 格且偏移 0.15 格）与补位叠加
+        // 模拟原版爬床（仅进床 0.43 格且偏移 0.15 格）与平滑居中补位叠加
         float targetX = 100.50F;
         float targetY = 200.50F;
         float curX = 101.30F;
@@ -182,14 +181,24 @@ class EmberPostureMathTest {
             BedFacing rightOut = EmberPostureMath.resolveOutwardSitDir(lie, "HeadRight");
             assertEquals("HeadLeft", EmberPostureMath.resolveOnBedSideFromSitDir(lie, leftOut));
             assertEquals("HeadRight", EmberPostureMath.resolveOnBedSideFromSitDir(lie, rightOut));
-            assertEquals(leftOut, EmberPostureMath.resolveOutwardSitDir(lie, "FootLeft"));
-            assertEquals(rightOut, EmberPostureMath.resolveOutwardSitDir(lie, "FootRight"));
+            assertNull(EmberPostureMath.resolveOutwardSitDir(lie, "FootLeft"));
+            assertNull(EmberPostureMath.resolveOutwardSitDir(lie, "FootRight"));
             assertNull(EmberPostureMath.resolveOutwardSitDir(lie, "Front"));
+
+            // 头睡床尾（卧向反转为 lie.opposite()）时：同一外侧坐缘必定精确镜像切换 HeadLeft <-> HeadRight，
+            // 且退出床面恢复坐姿仍返回同一外侧坐向（回到可达床尾外侧，不穿墙）。
+            BedFacing reversedLie = lie.opposite();
+            String reversedFromLeft = EmberPostureMath.resolveOnBedSideFromSitDir(reversedLie, leftOut);
+            String reversedFromRight = EmberPostureMath.resolveOnBedSideFromSitDir(reversedLie, rightOut);
+            assertEquals("HeadRight", reversedFromLeft);
+            assertEquals("HeadLeft", reversedFromRight);
+            assertEquals(leftOut, EmberPostureMath.resolveOutwardSitDir(reversedLie, reversedFromLeft));
+            assertEquals(rightOut, EmberPostureMath.resolveOutwardSitDir(reversedLie, reversedFromRight));
         }
 
         assertTrue(EmberPostureMath.isLeftSideOnBed("HeadLeft"));
-        assertTrue(EmberPostureMath.isLeftSideOnBed("FootLeft"));
         assertFalse(EmberPostureMath.isLeftSideOnBed("HeadRight"));
+        assertFalse(EmberPostureMath.isLeftSideOnBed("FootLeft"));
         assertFalse(EmberPostureMath.isLeftSideOnBed("FootRight"));
         assertFalse(EmberPostureMath.isLeftSideOnBed(null));
 
@@ -221,9 +230,20 @@ class EmberPostureMathTest {
         for (BedSlot slot : slots) {
             assertFalse(slot.approaches().isEmpty());
             for (BedApproach a : slot.approaches()) {
-                assertNotEquals("Foot", a.onBedDirection(), "Foot freezes PlayerGetUpState due to fromOnBed.xml bug");
-                assertTrue(ALLOWED_ON_BED_DIRS.contains(a.onBedDirection()));
-                assertEquals(facing, a.lieDir());
+                assertTrue(ALLOWED_ON_BED_DIRS.contains(a.onBedDirection()),
+                        "Only HeadLeft/HeadRight may be emitted, got " + a.onBedDirection());
+                if (a.headEntry()) {
+                    assertEquals(facing, a.lieDir());
+                    assertEquals(originX + slot.headGridX(), a.adjacentTargetTileX());
+                    assertEquals(originY + slot.headGridY(), a.adjacentTargetTileY());
+                } else {
+                    assertEquals(facing.opposite(), a.lieDir());
+                    assertEquals(originX + slot.footGridX(), a.adjacentTargetTileX());
+                    assertEquals(originY + slot.footGridY(), a.adjacentTargetTileY());
+                }
+                assertEquals(
+                        EmberPostureMath.resolveOnBedSideFromSitDir(a.lieDir(), a.beforeDir().opposite()),
+                        a.onBedDirection());
                 assertEquals(a.adjTileX(), (int) Math.floor(a.approachX()));
                 assertEquals(a.adjTileY(), (int) Math.floor(a.approachY()));
                 assertEquals(a.adjacentTargetTileX(), a.adjTileX() + a.beforeDir().dx);

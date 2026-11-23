@@ -384,6 +384,7 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public void OnDeath() {
+        detachAnimDebugTools();
         this.emberTrackSpeedScale = 1.0F;
         applyEmberTrackSpeedScale();
         brain.shutdown(brainContext);
@@ -478,5 +479,20 @@ public final class IsoNPC extends IsoPlayer {
         if (hasAnimationPlayer() && getAnimationPlayer() != null) {
             getAnimationPlayer().resetDeferredMovementAccum();
         }
+    }
+
+    /** 释放挂载到该 NPC 的原版动画调试监控器与录像器句柄，防止死亡/离屏/注销后泄漏。 */
+    public void detachAnimDebugTools() {
+        try {
+            if (getDebugMonitor() != null && getDebugMonitor().getTarget() == this) {
+                setDebugMonitor(null);
+            }
+        } catch (Throwable ignored) {}
+        try {
+            if (isAnimationRecorderActive()) {
+                setAnimRecorderActive(false, false);
+                closeAnimationRecorder();
+            }
+        } catch (Throwable ignored) {}
     }
 }

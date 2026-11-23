@@ -28,18 +28,17 @@ public abstract class BaseAction {
 
     public record ItemLocation(ItemContainer container, InventoryItem item) {}
 
-    private final double durationSimSec;
-    private final String performingActionAnim;
+    private double durationSimSec;
+    private String performingActionAnim;
     private String extraVarKey;
     private String extraVarValue;
     private String reportEventName;
     private InventoryItem overridePrimaryItem;
     private InventoryItem overrideSecondaryItem;
     private boolean handModelsConfigured;
-    private InventoryItem unpackedItem;
-    private ItemContainer unpackedFromContainer;
     private zombie.characters.CharacterTimedActions.BaseAction nativeAction;
     private long soundHandle = -1L;
+    private boolean loopSoundImmediateStop;
 
     private ActionStatus status = ActionStatus.IDLE;
     private double elapsedSimSec;
@@ -75,6 +74,14 @@ public abstract class BaseAction {
         return durationSimSec;
     }
 
+    protected final void setDurationSimSec(double durationSimSec) {
+        this.durationSimSec = Math.max(0.05, durationSimSec);
+    }
+
+    protected final void setPerformingActionAnim(String performingActionAnim) {
+        this.performingActionAnim = performingActionAnim;
+    }
+
     public final float getProgress01() {
         return (float) Math.min(1.0, Math.max(0.0, elapsedSimSec / durationSimSec));
     }
@@ -95,64 +102,38 @@ public abstract class BaseAction {
         this.handModelsConfigured = true;
     }
 
-    /**
-     * 严格对齐原版玩家背包掏取规则：
-     * 若目标物品位于随身嵌套背包而非主物品栏（{@code npc.getInventory()}），先将其转移至主物品栏，
-     * 并在动作结束或被打断时（若物品未被完全消耗）自动放回原背包。
-     */
-    protected final boolean unpackToMainInventoryIfNeeded(IsoNPC npc, ItemLocation loc) {
-        if (npc == null || loc == null || loc.item() == null) {
-            return false;
-        }
-        ItemContainer mainInv = npc.getInventory();
-        InventoryItem item = loc.item();
-        ItemContainer source = item.getContainer() != null ? item.getContainer() : loc.container();
-        if (mainInv == null || source == null) {
-            return false;
-        }
-        if (source == mainInv) {
-            return true;
-        }
-        try {
-            source.DoRemoveItem(item);
-            source.setDrawDirty(true);
-            mainInv.AddItem(item);
-            mainInv.setDrawDirty(true);
-            this.unpackedItem = item;
-            this.unpackedFromContainer = source;
-            return true;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private void returnUnpackedItemIfRemaining(IsoNPC npc) {
-        InventoryItem item = this.unpackedItem;
-        ItemContainer dest = this.unpackedFromContainer;
-        this.unpackedItem = null;
-        this.unpackedFromContainer = null;
-        if (npc == null || item == null || dest == null) {
-            return;
-        }
-        ItemContainer mainInv = npc.getInventory();
-        if (mainInv == null || dest == mainInv || !mainInv.contains(item)) {
-            return;
-        }
-        try {
-            mainInv.DoRemoveItem(item);
-            mainInv.setDrawDirty(true);
-            dest.AddItem(item);
-            dest.setDrawDirty(true);
-        } catch (Throwable ignored) {
-        }
-    }
-
     protected final void playActionSound(IsoNPC npc, String soundName) {
         if (npc == null || soundName == null || soundName.isEmpty() || npc.getEmitter() == null) {
             return;
         }
         try {
+            this.loopSoundImmediateStop = false;
             this.soundHandle = npc.getEmitter().playSound(soundName);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 播放需要 {@code emitter.stopSound()} 硬停的循环动作音效（对齐 {@code ISInventoryTransferAction} 的 {@code RummageInInventory}）。 */
+    protected final void playLoopingActionSound(IsoNPC npc, String soundName) {
+        if (npc == null || soundName == null || soundName.isEmpty() || npc.getEmitter() == null) {
+            return;
+        }
+        try {
+            this.loopSoundImmediateStop = true;
+            this.soundHandle = npc.getEmitter().playSound(soundName);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 播放单次容器拿取/放入音效，不覆盖主动作循环音句柄。 */
+    protected final void playOneShotSound(IsoNPC npc, String soundName) {
+        if (npc == null || soundName == null || soundName.isEmpty() || npc.getEmitter() == null) {
+            return;
+        }
+        try {
+            if (!npc.getEmitter().isPlaying(soundName)) {
+                npc.getEmitter().playSound(soundName);
+            }
         } catch (Throwable ignored) {
         }
     }
@@ -175,8 +156,8 @@ public abstract class BaseAction {
         this.handModelsConfigured = false;
         this.overridePrimaryItem = null;
         this.overrideSecondaryItem = null;
-        this.unpackedItem = null;
-        this.unpackedFromContainer = null;
+        this.soundHandle = -1L;
+        this.loopSoundImmediateStop = false;
         if (ctx != null) {
             ctx.activeAction = this;
         }
@@ -260,6 +241,13 @@ public abstract class BaseAction {
             act.stopOnRun = false;
             act.stopOnAim = false;
 
+            Stack<zombie.characters.CharacterTimedActions.BaseAction> stack = npc.getCharacterActions();
+            if (stack != null) {
+                stack.clear();
+                stack.push(act);
+            }
+            this.nativeAction = act;
+
             if (extraVarKey != null && !extraVarKey.isEmpty() && extraVarValue != null) {
                 act.setAnimVariable(extraVarKey, extraVarValue);
             }
@@ -269,13 +257,6 @@ public abstract class BaseAction {
             if (handModelsConfigured) {
                 act.setOverrideHandModels(overridePrimaryItem, overrideSecondaryItem);
             }
-
-            Stack<zombie.characters.CharacterTimedActions.BaseAction> stack = npc.getCharacterActions();
-            if (stack != null) {
-                stack.clear();
-                stack.push(act);
-            }
-            this.nativeAction = act;
 
             if (reportEventName != null && !reportEventName.isEmpty()) {
                 npc.reportEvent(reportEventName);
@@ -298,13 +279,16 @@ public abstract class BaseAction {
         }
         if (this.soundHandle != -1L && npc.getEmitter() != null) {
             try {
-                if (npc.getEmitter().isPlaying(this.soundHandle)) {
+                if (this.loopSoundImmediateStop) {
+                    npc.getEmitter().stopSound(this.soundHandle);
+                } else if (npc.getEmitter().isPlaying(this.soundHandle)) {
                     npc.stopOrTriggerSound(this.soundHandle);
                 }
             } catch (Throwable ignored) {
             }
             this.soundHandle = -1L;
         }
+        this.loopSoundImmediateStop = false;
         zombie.characters.CharacterTimedActions.BaseAction act = this.nativeAction;
         this.nativeAction = null;
         if (act != null) {
@@ -327,7 +311,6 @@ public abstract class BaseAction {
             npc.clearVariable(extraVarKey);
         }
         npc.setVariable("IsPerformingAnAction", false);
-        returnUnpackedItemIfRemaining(npc);
     }
 
     /** 递归扫描 NPC 主背包与嵌套随身容器，零重复查找首个满足条件的真物品原件及所属容器。 */

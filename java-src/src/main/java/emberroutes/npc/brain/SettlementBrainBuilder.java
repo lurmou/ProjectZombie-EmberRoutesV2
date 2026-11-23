@@ -9,10 +9,15 @@ import emberroutes.warehouse.SmartObjectRegistry;
 import emberroutes.warehouse.SmartSlot.SlotKind;
 import emberroutes.warehouse.SmartSlot.SmartSlotLease;
 import emberroutes.warehouse.WarehouseFastIndex;
+import java.util.List;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import zombie.characters.CharacterStat;
+import zombie.inventory.InventoryItem;
+import zombie.inventory.ItemContainer;
 import zombie.iso.IsoCell;
+import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
 import zombie.iso.IsoWorld;
 
@@ -39,16 +44,19 @@ public final class SettlementBrainBuilder {
         StateNode bandageNode = new SurvivalActionNode(
                 "BANDAGE",
                 BandageSelfAction::new,
+                BandageSelfAction::findBestBandage,
                 ctx -> ctx.bleeding && BandageSelfAction.findBestBandage(ctx.npc) != null,
                 ctx -> ctx.bleeding && BandageSelfAction.findBestBandage(ctx.npc) != null);
         StateNode eatNode = new SurvivalActionNode(
                 "EAT",
                 EatFoodAction::new,
+                EatFoodAction::findBestEdibleFood,
                 ctx -> ctx.urgentNeed == UrgentNeed.EAT && EatFoodAction.findBestEdibleFood(ctx.npc) != null,
                 ctx -> ctx.hunger > NeedsPolicy.HUNGER_EXIT && EatFoodAction.findBestEdibleFood(ctx.npc) != null);
         StateNode drinkNode = new SurvivalActionNode(
                 "DRINK",
                 DrinkWaterAction::new,
+                DrinkWaterAction::findCleanWaterContainer,
                 ctx -> ctx.urgentNeed == UrgentNeed.DRINK && DrinkWaterAction.findCleanWaterContainer(ctx.npc) != null,
                 ctx -> ctx.thirst > NeedsPolicy.THIRST_EXIT && DrinkWaterAction.findCleanWaterContainer(ctx.npc) != null);
         StateNode sleepNode = new SleepSlotNode();
@@ -185,21 +193,35 @@ public final class SettlementBrainBuilder {
         }
     }
 
-    /** 复用型确定性定时生存动作叶（供 {@code BANDAGE / EAT / DRINK} 共享，零重复逻辑）。 */
+    /** 复用型确定性定时生存动作叶（供 {@code BANDAGE / EAT / DRINK} 共享，严格按原版 {@code TransferItemOnSelf} 取放背包物品）。 */
     private static final class SurvivalActionNode extends StateNode {
+        private enum SurvivalPhase {
+            IDLE,
+            UNPACKING,
+            EXECUTING,
+            REPACKING
+        }
+
         private final Supplier<BaseAction> factory;
+        private final Function<IsoNPC, BaseAction.ItemLocation> itemFinder;
         private final Predicate<BrainContext> enterGuard;
         private final Predicate<BrainContext> continueGuard;
+        private SurvivalPhase phase = SurvivalPhase.IDLE;
+        private SelfInventoryTransferAction transferAction;
+        private InventoryItem unpackedItem;
+        private ItemContainer unpackedFromBag;
         private BaseAction action;
-        private boolean actionStarted;
+        private boolean failed;
 
         SurvivalActionNode(
                 String id,
                 Supplier<BaseAction> factory,
+                Function<IsoNPC, BaseAction.ItemLocation> itemFinder,
                 Predicate<BrainContext> enterGuard,
                 Predicate<BrainContext> continueGuard) {
             super(id, null, null, 0.0, true);
             this.factory = factory;
+            this.itemFinder = itemFinder;
             this.enterGuard = enterGuard;
             this.continueGuard = continueGuard;
         }
@@ -211,11 +233,11 @@ public final class SettlementBrainBuilder {
 
         @Override
         public boolean canContinue(BrainContext ctx) {
-            if (ctx.npc == null) {
+            if (ctx.npc == null || failed) {
                 return false;
             }
-            if (actionStarted && action != null && action.getStatus() == BaseAction.ActionStatus.FAILED) {
-                return false;
+            if (phase == SurvivalPhase.REPACKING && transferAction != null && transferAction.isRunning()) {
+                return true;
             }
             return continueGuard.test(ctx);
         }
@@ -223,8 +245,12 @@ public final class SettlementBrainBuilder {
         @Override
         public void onEnter(BrainContext ctx, StateScope scope) {
             ctx.working = false;
-            this.action = factory.get();
-            this.actionStarted = false;
+            this.phase = SurvivalPhase.IDLE;
+            this.transferAction = null;
+            this.unpackedItem = null;
+            this.unpackedFromBag = null;
+            this.action = null;
+            this.failed = false;
             if (ctx.npc != null) {
                 ctx.npc.getLocomotion().stop(ctx.npc);
                 if (ctx.npc.getPosture().isBlockingLocomotion()) {
@@ -232,33 +258,139 @@ public final class SettlementBrainBuilder {
                 }
             }
             scope.defer(() -> {
+                if (this.transferAction != null) {
+                    this.transferAction.interrupt(ctx, "SCOPE_EXIT");
+                    this.transferAction = null;
+                }
                 if (this.action != null) {
                     this.action.interrupt(ctx, "SCOPE_EXIT");
                     this.action = null;
                 }
+                this.unpackedItem = null;
+                this.unpackedFromBag = null;
+                this.phase = SurvivalPhase.IDLE;
             });
         }
 
         @Override
         public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
-            if (ctx.npc == null || action == null) {
+            if (ctx.npc == null || failed) {
                 return;
             }
-            if (!actionStarted) {
-                if (ctx.npc.getPosture().isActive()) {
-                    ctx.requestStandUp(false);
-                    return;
+            if (phase == SurvivalPhase.IDLE && ctx.npc.getPosture().isActive()) {
+                ctx.requestStandUp(false);
+                return;
+            }
+            switch (phase) {
+                case IDLE -> startNextCycle(ctx);
+                case UNPACKING -> {
+                    if (transferAction == null) {
+                        failed = true;
+                        return;
+                    }
+                    transferAction.tick(ctx, dtSim);
+                    if (transferAction.isRunning()) {
+                        return;
+                    }
+                    boolean ok = transferAction.getStatus() == BaseAction.ActionStatus.COMPLETED;
+                    transferAction = null;
+                    if (!ok) {
+                        unpackedItem = null;
+                        unpackedFromBag = null;
+                        failed = true;
+                        return;
+                    }
+                    phase = SurvivalPhase.EXECUTING;
+                    action = factory.get();
+                    action.start(ctx);
                 }
-                action.start(ctx);
-                actionStarted = true;
+                case EXECUTING -> {
+                    if (action == null) {
+                        failed = true;
+                        return;
+                    }
+                    action.tick(ctx, dtSim);
+                    if (action.isRunning()) {
+                        return;
+                    }
+                    BaseAction.ActionStatus st = action.getStatus();
+                    action = null;
+                    if (st == BaseAction.ActionStatus.FAILED) {
+                        failed = true;
+                        return;
+                    }
+                    ItemContainer mainInv = ctx.npc.getInventory();
+                    if (unpackedItem != null
+                            && unpackedFromBag != null
+                            && mainInv != null
+                            && mainInv.contains(unpackedItem)) {
+                        boolean stillNeededSameItem = false;
+                        if (continueGuard.test(ctx)) {
+                            BaseAction.ItemLocation nextLoc = itemFinder.apply(ctx.npc);
+                            stillNeededSameItem = nextLoc != null && nextLoc.item() == unpackedItem;
+                        }
+                        if (!stillNeededSameItem) {
+                            if (unpackedFromBag.hasRoomFor(ctx.npc, unpackedItem)
+                                    && unpackedFromBag.isItemAllowed(unpackedItem)) {
+                                phase = SurvivalPhase.REPACKING;
+                                transferAction = new SelfInventoryTransferAction(List.of(
+                                        new SelfInventoryTransferAction.TransferEntry(
+                                                unpackedItem, mainInv, unpackedFromBag)));
+                                unpackedItem = null;
+                                unpackedFromBag = null;
+                                transferAction.start(ctx);
+                                return;
+                            }
+                            unpackedItem = null;
+                            unpackedFromBag = null;
+                        }
+                    } else {
+                        unpackedItem = null;
+                        unpackedFromBag = null;
+                    }
+                    if (continueGuard.test(ctx)) {
+                        startNextCycle(ctx);
+                    } else {
+                        phase = SurvivalPhase.IDLE;
+                    }
+                }
+                case REPACKING -> {
+                    if (transferAction == null) {
+                        phase = SurvivalPhase.IDLE;
+                        return;
+                    }
+                    transferAction.tick(ctx, dtSim);
+                    if (transferAction.isRunning()) {
+                        return;
+                    }
+                    transferAction = null;
+                    if (continueGuard.test(ctx)) {
+                        startNextCycle(ctx);
+                    } else {
+                        phase = SurvivalPhase.IDLE;
+                    }
+                }
             }
-            if (action.isRunning()) {
-                action.tick(ctx, dtSim);
+        }
+
+        private void startNextCycle(BrainContext ctx) {
+            IsoNPC npc = ctx.npc;
+            ItemContainer mainInv = npc != null ? npc.getInventory() : null;
+            BaseAction.ItemLocation loc = itemFinder.apply(npc);
+            if (mainInv == null || loc == null || loc.item() == null) {
+                failed = true;
+                return;
             }
-            if (actionStarted
-                    && action != null
-                    && action.getStatus() == BaseAction.ActionStatus.COMPLETED
-                    && continueGuard.test(ctx)) {
+            ItemContainer src = loc.item().getContainer() != null ? loc.item().getContainer() : loc.container();
+            if (src != null && src != mainInv) {
+                this.unpackedItem = loc.item();
+                this.unpackedFromBag = src;
+                this.phase = SurvivalPhase.UNPACKING;
+                this.transferAction = new SelfInventoryTransferAction(List.of(
+                        new SelfInventoryTransferAction.TransferEntry(loc.item(), src, mainInv)));
+                this.transferAction.start(ctx);
+            } else {
+                this.phase = SurvivalPhase.EXECUTING;
                 this.action = factory.get();
                 this.action.start(ctx);
             }
@@ -319,6 +451,8 @@ public final class SettlementBrainBuilder {
 
         protected abstract boolean checkSlotStillNeeded(BrainContext ctx);
 
+        protected abstract boolean isPostureStateCompatible(NpcPostureController.PostureState state);
+
         protected void onBeforeRelease(IsoNPC npc) {}
 
         @Override
@@ -326,7 +460,9 @@ public final class SettlementBrainBuilder {
             if (ctx.npc == null || failed || lease == null || !lease.isValid()) {
                 return false;
             }
-            if (postureActivated && !ctx.npc.getPosture().isActive()) {
+            if (postureActivated
+                    && (!ctx.npc.getPosture().isActive()
+                            || !isPostureStateCompatible(ctx.npc.getPosture().getState()))) {
                 return false;
             }
             return checkSlotStillNeeded(ctx);
@@ -360,7 +496,9 @@ public final class SettlementBrainBuilder {
             });
             scope.defer(() -> {
                 onBeforeRelease(npc);
-                ctx.requestStandUp(ctx.threatDetected);
+                if (isPostureStateCompatible(npc.getPosture().getState())) {
+                    ctx.requestStandUp(ctx.threatDetected);
+                }
             });
 
             IsoObject worldObj = SmartObjectRegistry.resolveWorldObject(acquired.getSlot(), cell);
@@ -412,15 +550,29 @@ public final class SettlementBrainBuilder {
         protected boolean checkSlotStillNeeded(BrainContext ctx) {
             return ctx.fatigue > NeedsPolicy.FATIGUE_EXIT;
         }
+
+        @Override
+        protected boolean isPostureStateCompatible(NpcPostureController.PostureState state) {
+            return switch (state) {
+                case APPROACHING_SEAT, ENTERING_SEAT, SEAT_BRIDGE_WAIT, SEATED,
+                     APPROACHING_BED, ENTERING_BED, ON_BED_AWAKE, SLEEPING,
+                     WAKING_BED, EXITING_BED_TO_SIT -> true;
+                default -> false;
+            };
+        }
     }
 
     private static final class ReturnToolNode extends StateNode {
+        private String sourceContainerKey;
         private int targetX;
         private int targetY;
         private int targetZ;
+        private int standX;
+        private int standY;
         private boolean hasTarget;
         private boolean moveIssued;
         private BaseAction.ItemLocation targetLoc;
+        private BatchContainerTransferAction transferAction;
 
         ReturnToolNode() {
             super("RETURN_BORROWED_TOOL", null, null, 0.0, true);
@@ -439,8 +591,10 @@ public final class SettlementBrainBuilder {
         @Override
         public void onEnter(BrainContext ctx, StateScope scope) {
             ctx.working = false;
+            sourceContainerKey = null;
             moveIssued = false;
             hasTarget = false;
+            transferAction = null;
             targetLoc = ReturnToolAction.findBorrowedTool(ctx.npc);
             if (targetLoc == null || !targetLoc.item().hasModData()) {
                 ctx.hasBorrowedTool = false;
@@ -453,11 +607,27 @@ public final class SettlementBrainBuilder {
                 ctx.hasBorrowedTool = false;
                 return;
             }
+            this.sourceContainerKey = (String) raw;
             targetX = xyz[0];
             targetY = xyz[1];
             targetZ = xyz[2];
+            standX = targetX;
+            standY = targetY;
+            IsoCell cell = IsoWorld.instance != null ? IsoWorld.instance.currentCell : null;
+            IsoGridSquare targetSq = cell != null ? cell.getGridSquare(targetX, targetY, targetZ) : null;
+            if (targetSq != null && ctx.npc != null) {
+                int mask = SmartObjectRegistry.computeStandDirMask(targetSq);
+                int[] best = SmartObjectRegistry.pickBestStandTileFromMask(
+                        targetX, targetY, mask, ctx.npc.getX(), ctx.npc.getY());
+                standX = best[0];
+                standY = best[1];
+            }
             hasTarget = true;
             scope.defer(() -> {
+                if (this.transferAction != null) {
+                    this.transferAction.interrupt(ctx, "RETURN_TOOL_EXIT");
+                    this.transferAction = null;
+                }
                 if (ctx.npc != null && !ctx.npc.isDead()) {
                     ctx.npc.getLocomotion().stop(ctx.npc);
                 }
@@ -469,31 +639,91 @@ public final class SettlementBrainBuilder {
             if (!hasTarget || ctx.npc == null) {
                 return;
             }
-            targetLoc = ReturnToolAction.findBorrowedTool(ctx.npc);
+            IsoNPC npc = ctx.npc;
+            IsoCell cell = IsoWorld.instance != null ? IsoWorld.instance.currentCell : null;
+            IsoGridSquare targetSq = cell != null ? cell.getGridSquare(targetX, targetY, targetZ) : null;
+            double distToContainer = Math.hypot((targetX + 0.5) - npc.getX(), (targetY + 0.5) - npc.getY());
+
+            if (this.transferAction != null) {
+                this.transferAction.tick(ctx, dtSim);
+                if (this.transferAction.isRunning()) {
+                    return;
+                }
+                List<zombie.inventory.InventoryItem> transferred = this.transferAction.getTransferredItems();
+                if (!transferred.isEmpty()) {
+                    for (int i = 0, n = transferred.size(); i < n; i++) {
+                        transferred.get(i).getModData().rawset(ReturnToolAction.MODDATA_BORROWED_FROM_KEY, null);
+                    }
+                } else if (targetLoc != null) {
+                    boolean canDepositDirectly = targetSq != null
+                            && SmartObjectRegistry.canReachSquare(npc.getCurrentSquare(), targetSq)
+                            && distToContainer <= 1.50;
+                    if (canDepositDirectly) {
+                        ReturnToolAction.tryDepositToSourceSquare(npc, targetLoc, targetX, targetY, targetZ);
+                    }
+                    if (targetLoc.item() != null && targetLoc.item().hasModData()) {
+                        targetLoc.item().getModData().rawset(ReturnToolAction.MODDATA_BORROWED_FROM_KEY, null);
+                    }
+                }
+                this.transferAction = null;
+                ctx.hasBorrowedTool = (ReturnToolAction.findBorrowedTool(npc) != null);
+                hasTarget = ctx.hasBorrowedTool;
+                return;
+            }
+
+            targetLoc = ReturnToolAction.findBorrowedTool(npc);
             if (targetLoc == null) {
                 ctx.hasBorrowedTool = false;
                 return;
             }
-            IsoNPC npc = ctx.npc;
             int curZ = EmberTargetProjector.levelOf(npc.getZ());
-            double dist = Math.hypot((targetX + 0.5) - npc.getX(), (targetY + 0.5) - npc.getY());
-            if (curZ == targetZ && dist <= 2.2) {
+            double distToStand = Math.hypot((standX + 0.5) - npc.getX(), (standY + 0.5) - npc.getY());
+            boolean canReach = curZ == targetZ
+                    && targetSq != null
+                    && SmartObjectRegistry.canReachSquare(npc.getCurrentSquare(), targetSq);
+            boolean closeEnough = canReach && (distToContainer <= 1.15
+                    || (distToStand <= 0.35 && distToContainer <= 1.50));
+            boolean settled = moveIssued
+                    && !npc.getLocomotion().isMoving()
+                    && !npc.getPosture().isBlockingLocomotion();
+            boolean settledReachable = settled
+                    && npc.getLocomotion().getStatus() == EmberLocomotionController.Status.ARRIVED
+                    && canReach
+                    && distToContainer <= 1.50;
+
+            if (closeEnough || settledReachable) {
+                npc.getLocomotion().stop(npc);
+                String destContainerId = ReturnToolAction.resolveReturnContainerId(
+                        sourceContainerKey, targetLoc.item(), targetX, targetY, targetZ);
+                if (destContainerId != null) {
+                    this.transferAction = new BatchContainerTransferAction(
+                            BatchContainerTransferAction.TransferMode.UNLOAD_TO_CONTAINER,
+                            destContainerId,
+                            -1,
+                            List.of(targetLoc.item()),
+                            1.0);
+                    this.transferAction.start(ctx);
+                    return;
+                }
                 ReturnToolAction.tryDepositToSourceSquare(npc, targetLoc, targetX, targetY, targetZ);
+                if (targetLoc.item() != null && targetLoc.item().hasModData()) {
+                    targetLoc.item().getModData().rawset(ReturnToolAction.MODDATA_BORROWED_FROM_KEY, null);
+                }
+                ctx.hasBorrowedTool = (ReturnToolAction.findBorrowedTool(npc) != null);
+                hasTarget = ctx.hasBorrowedTool;
+                return;
+            }
+            if (settled) {
+                if (targetLoc.item() != null && targetLoc.item().hasModData()) {
+                    targetLoc.item().getModData().rawset(ReturnToolAction.MODDATA_BORROWED_FROM_KEY, null);
+                }
                 ctx.hasBorrowedTool = (ReturnToolAction.findBorrowedTool(npc) != null);
                 hasTarget = ctx.hasBorrowedTool;
                 return;
             }
             if (!moveIssued) {
                 moveIssued = true;
-                ctx.requestMoveTo(targetX + 0.5, targetY + 0.5, targetZ, false);
-            } else {
-                EmberLocomotionController loco = npc.getLocomotion();
-                if (!loco.isMoving() && !npc.getPosture().isBlockingLocomotion()) {
-                    // 到达投影边缘但尚差半步或路径中断，直接尝试交付并清戳防死锁
-                    ReturnToolAction.tryDepositToSourceSquare(npc, targetLoc, targetX, targetY, targetZ);
-                    ctx.hasBorrowedTool = (ReturnToolAction.findBorrowedTool(npc) != null);
-                    hasTarget = ctx.hasBorrowedTool;
-                }
+                ctx.requestMoveTo(standX + 0.5, standY + 0.5, targetZ, false);
             }
         }
     }
@@ -504,6 +734,11 @@ public final class SettlementBrainBuilder {
         WorkDutyNode(WorkDutyProvider provider) {
             super("WORK_DUTY", null, null, 0.0, false);
             this.provider = provider;
+        }
+
+        @Override
+        public boolean isPreemptive(BrainContext ctx) {
+            return provider.isUrgentWork(ctx);
         }
 
         @Override
@@ -569,6 +804,14 @@ public final class SettlementBrainBuilder {
         @Override
         protected boolean checkSlotStillNeeded(BrainContext ctx) {
             return (ctx.simTime - enteredSimTime) < MAX_SESSION_SEC;
+        }
+
+        @Override
+        protected boolean isPostureStateCompatible(NpcPostureController.PostureState state) {
+            return switch (state) {
+                case APPROACHING_SEAT, ENTERING_SEAT, SEAT_BRIDGE_WAIT, SEATED -> true;
+                default -> false;
+            };
         }
 
         @Override

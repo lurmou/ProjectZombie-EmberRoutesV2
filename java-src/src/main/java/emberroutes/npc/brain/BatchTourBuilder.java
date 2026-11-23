@@ -8,6 +8,8 @@ import emberroutes.warehouse.SmartSlot.ContainerLease;
 import emberroutes.warehouse.SmartZoningPolicy;
 import emberroutes.warehouse.WarehouseFastIndex;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -83,6 +85,7 @@ public final class BatchTourBuilder {
         public final List<TourStop> dropOffs;
         public final TourAnchor tourTerminalAnchor;
         public final double totalWeight;
+        public final Map<InventoryItem, ItemContainer> loadTargetsByItem;
 
         public TourPlan(
                 String settlementId,
@@ -90,11 +93,26 @@ public final class BatchTourBuilder {
                 List<TourStop> dropOffs,
                 TourAnchor tourTerminalAnchor,
                 double totalWeight) {
+            this(settlementId, pickups, dropOffs, tourTerminalAnchor, totalWeight, Collections.emptyMap());
+        }
+
+        public TourPlan(
+                String settlementId,
+                List<TourStop> pickups,
+                List<TourStop> dropOffs,
+                TourAnchor tourTerminalAnchor,
+                double totalWeight,
+                Map<InventoryItem, ItemContainer> loadTargetsByItem) {
             this.settlementId = settlementId;
             this.pickups = pickups;
             this.dropOffs = dropOffs;
             this.tourTerminalAnchor = tourTerminalAnchor;
             this.totalWeight = totalWeight;
+            if (loadTargetsByItem != null && !loadTargetsByItem.isEmpty()) {
+                this.loadTargetsByItem = new IdentityHashMap<>(loadTargetsByItem);
+            } else {
+                this.loadTargetsByItem = Collections.emptyMap();
+            }
         }
 
         public int totalItemCount() {
@@ -108,10 +126,10 @@ public final class BatchTourBuilder {
 
     private BatchTourBuilder() {}
 
-    /** 批量取放读条阻尼时间曲线：{@code T(N) = BASE_TRANSFER_SEC + SQRT_TRANSFER_COEFF * sqrt(N)}。 */
+    /** 拍卖阶段转移耗时估算（按原版 {@code ISInventoryTransferAction} 平均单件 50 刻 / 30 刻·s⁻¹ 线性累加）。 */
     public static double computeDampedTransferDuration(int itemCount) {
         int n = Math.max(1, itemCount);
-        return BASE_TRANSFER_SEC + SQRT_TRANSFER_COEFF * Math.sqrt(n);
+        return n * (50.0 / VanillaActionTiming.TICKS_PER_SIM_SEC);
     }
 
     /** 贪心最近邻巡回排序（纯数据可单测，确保卸货折返总距离最短）。 */
@@ -145,6 +163,165 @@ public final class BatchTourBuilder {
         return ordered;
     }
 
+    private static double travelDist3D(double ax, double ay, int az, double bx, double by, int bz) {
+        return Math.hypot(bx - ax, by - ay) + Math.abs(bz - az) * 10.0;
+    }
+
+    /**
+     * 固定起点 {@code start} 与终点 {@code end} 的最短多点巡回路径（s-t Path TSP）：
+     * <ul>
+     *   <li>{@code n <= 7} 使用 Held-Karp 精确动态规划求全局最优；</li>
+     *   <li>{@code n > 7} 先贪心最近邻构造初解，再结合首尾边界进行 2-opt 局部消除交叉折返。</li>
+     * </ul>
+     */
+    public static <T> List<T> orderStopsShortestPath(
+            double startX, double startY, int startZ,
+            double endX, double endY, int endZ,
+            List<T> stops,
+            ToIntFunction<T> xFn,
+            ToIntFunction<T> yFn,
+            ToIntFunction<T> zFn) {
+        if (stops == null || stops.size() <= 1) {
+            return stops == null ? List.of() : new ArrayList<>(stops);
+        }
+        int n = stops.size();
+        double[] xs = new double[n];
+        double[] ys = new double[n];
+        int[] zs = new int[n];
+        for (int i = 0; i < n; i++) {
+            T s = stops.get(i);
+            xs[i] = xFn.applyAsInt(s) + 0.5;
+            ys[i] = yFn.applyAsInt(s) + 0.5;
+            zs[i] = zFn.applyAsInt(s);
+        }
+
+        double[] fromStart = new double[n];
+        double[] toEnd = new double[n];
+        double[][] pair = new double[n][n];
+        for (int i = 0; i < n; i++) {
+            fromStart[i] = travelDist3D(startX, startY, startZ, xs[i], ys[i], zs[i]);
+            toEnd[i] = travelDist3D(xs[i], ys[i], zs[i], endX, endY, endZ);
+            for (int j = i + 1; j < n; j++) {
+                double d = travelDist3D(xs[i], ys[i], zs[i], xs[j], ys[j], zs[j]);
+                pair[i][j] = d;
+                pair[j][i] = d;
+            }
+        }
+
+        int[] order = (n <= 7)
+                ? solveExactPathTsp(n, fromStart, toEnd, pair)
+                : solveTwoOptPathTsp(n, fromStart, toEnd, pair);
+
+        List<T> out = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            out.add(stops.get(order[i]));
+        }
+        return out;
+    }
+
+    private static int[] solveExactPathTsp(int n, double[] fromStart, double[] toEnd, double[][] pair) {
+        int size = 1 << n;
+        int fullMask = size - 1;
+        double[][] dp = new double[size][n];
+        int[][] parent = new int[size][n];
+        for (int m = 0; m < size; m++) {
+            for (int i = 0; i < n; i++) {
+                dp[m][i] = Double.POSITIVE_INFINITY;
+                parent[m][i] = -1;
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            dp[1 << i][i] = fromStart[i];
+        }
+        for (int mask = 1; mask <= fullMask; mask++) {
+            for (int last = 0; last < n; last++) {
+                if ((mask & (1 << last)) == 0) {
+                    continue;
+                }
+                double cur = dp[mask][last];
+                if (!Double.isFinite(cur)) {
+                    continue;
+                }
+                for (int nxt = 0; nxt < n; nxt++) {
+                    if ((mask & (1 << nxt)) != 0) {
+                        continue;
+                    }
+                    int nextMask = mask | (1 << nxt);
+                    double cand = cur + pair[last][nxt];
+                    if (cand < dp[nextMask][nxt]) {
+                        dp[nextMask][nxt] = cand;
+                        parent[nextMask][nxt] = last;
+                    }
+                }
+            }
+        }
+
+        int bestLast = 0;
+        double bestTotal = Double.POSITIVE_INFINITY;
+        for (int last = 0; last < n; last++) {
+            double total = dp[fullMask][last] + toEnd[last];
+            if (total < bestTotal) {
+                bestTotal = total;
+                bestLast = last;
+            }
+        }
+        int[] order = new int[n];
+        int curMask = fullMask;
+        int curNode = bestLast;
+        for (int pos = n - 1; pos >= 0; pos--) {
+            order[pos] = curNode;
+            int prev = parent[curMask][curNode];
+            curMask ^= (1 << curNode);
+            curNode = prev;
+        }
+        return order;
+    }
+
+    private static int[] solveTwoOptPathTsp(int n, double[] fromStart, double[] toEnd, double[][] pair) {
+        boolean[] used = new boolean[n];
+        int[] order = new int[n];
+        for (int step = 0; step < n; step++) {
+            int bestIdx = -1;
+            double bestDist = Double.MAX_VALUE;
+            for (int i = 0; i < n; i++) {
+                if (used[i]) {
+                    continue;
+                }
+                double d = (step == 0) ? fromStart[i] : pair[order[step - 1]][i];
+                if (d < bestDist) {
+                    bestDist = d;
+                    bestIdx = i;
+                }
+            }
+            order[step] = bestIdx;
+            used[bestIdx] = true;
+        }
+
+        for (int pass = 0; pass < 64; pass++) {
+            boolean improved = false;
+            for (int i = 0; i < n - 1; i++) {
+                for (int j = i + 1; j < n; j++) {
+                    double before = (i == 0 ? fromStart[order[0]] : pair[order[i - 1]][order[i]])
+                            + (j == n - 1 ? toEnd[order[n - 1]] : pair[order[j]][order[j + 1]]);
+                    double after = (i == 0 ? fromStart[order[j]] : pair[order[i - 1]][order[j]])
+                            + (j == n - 1 ? toEnd[order[i]] : pair[order[i]][order[j + 1]]);
+                    if (after + 1.0E-6 < before) {
+                        for (int l = i, r = j; l < r; l++, r--) {
+                            int tmp = order[l];
+                            order[l] = order[r];
+                            order[r] = tmp;
+                        }
+                        improved = true;
+                    }
+                }
+            }
+            if (!improved) {
+                break;
+            }
+        }
+        return order;
+    }
+
     /**
      * 为竞标获胜者构建「最多 2 源箱 + 3 同层目标箱」批巡回计划，并向 {@code scopeRegistrar}
      * 绑定出库租约、入库预留负重租约与 30s 物品软锁。
@@ -158,12 +335,37 @@ public final class BatchTourBuilder {
             float npcY,
             double simTime,
             Consumer<Runnable> scopeRegistrar) {
-        if (settlementId == null || primarySource == null || !primarySource.isActive() || npcId == null) {
+        double remainingCarry = Math.max(0.5, npcCarryCapacityRemaining);
+        SmartItemPicker.CarryBudget fallbackBudget = new SmartItemPicker.CarryBudget(
+                0.0, remainingCarry / SmartItemPicker.NO_DAMAGE_OVERLOAD_RATIO, Collections.emptyList(), false);
+        return buildHaulTour(
+                settlementId, primarySource, fallbackBudget, Collections.emptyList(),
+                npcId, npcX, npcY, simTime, scopeRegistrar);
+    }
+
+    /**
+     * 支持已装备减重背包分配的批量巡回计划构造器：优先按减重率将拾取物品指派入随身背包，并校验 50.0 主包瞬时硬上限。
+     */
+    public static TourPlan buildHaulTour(
+            String settlementId,
+            SmartSlot primarySource,
+            SmartItemPicker.CarryBudget carryBudget,
+            List<ItemContainer> bagContainers,
+            String npcId,
+            float npcX,
+            float npcY,
+            double simTime,
+            Consumer<Runnable> scopeRegistrar) {
+        if (settlementId == null || primarySource == null || !primarySource.isActive()
+                || npcId == null || carryBudget == null) {
             return null;
         }
         if (primarySource.getContainerRole() != ContainerRole.BUFFER_IN
                 || primarySource.getUnreservedOutItemCount() <= 0
                 || primarySource.isWithdrawnAt(simTime)) {
+            return null;
+        }
+        if (!carryBudget.canFitAnyMinWeight()) {
             return null;
         }
 
@@ -173,10 +375,10 @@ public final class BatchTourBuilder {
             return null;
         }
 
-        double remainingCarry = Math.max(0.5, npcCarryCapacityRemaining);
         Map<String, List<InventoryItem>> dropItemsByDestId = new LinkedHashMap<>();
         Map<String, Double> dropWeightByDestId = new LinkedHashMap<>();
         Map<String, SmartSlot> destSlotById = new LinkedHashMap<>();
+        Map<InventoryItem, ItemContainer> loadTargets = new IdentityHashMap<>();
         List<TourStop> provisionalPickups = new ArrayList<>(MAX_SOURCE_CONTAINERS);
 
         double totalTourWeight = 0.0;
@@ -208,7 +410,7 @@ public final class BatchTourBuilder {
                     continue;
                 }
                 double itemW = Math.max(0.05, item.getUnequippedWeight());
-                if (itemW > remainingCarry + 1.0E-4) {
+                if (!carryBudget.canFit(itemW)) {
                     continue;
                 }
 
@@ -230,9 +432,16 @@ public final class BatchTourBuilder {
                     continue;
                 }
 
+                int targetBagIdx = carryBudget.tryAssign(itemW);
+                if (targetBagIdx == Integer.MIN_VALUE) {
+                    continue;
+                }
+                if (targetBagIdx >= 0 && bagContainers != null && targetBagIdx < bagContainers.size()) {
+                    loadTargets.put(item, bagContainers.get(targetBagIdx));
+                }
+
                 pickedForSrc.add(item);
                 srcWeight += itemW;
-                remainingCarry -= itemW;
                 totalTourWeight += itemW;
 
                 destSlotById.putIfAbsent(dest.slotId, dest);
@@ -315,7 +524,8 @@ public final class BatchTourBuilder {
                 lastPickup.standX, lastPickup.standY, rawDrops, d -> d.standX, d -> d.standY);
         TourStop lastDrop = orderedDrops.get(orderedDrops.size() - 1);
         TourAnchor terminalAnchor = new TourAnchor(lastDrop.standX, lastDrop.standY, lastDrop.z, lastDrop.roomId);
-        return new TourPlan(settlementId, provisionalPickups, orderedDrops, terminalAnchor, totalTourWeight);
+        return new TourPlan(
+                settlementId, provisionalPickups, orderedDrops, terminalAnchor, totalTourWeight, loadTargets);
     }
 
     /** 寻找物品运行时备选存储箱（中途目标箱满仓时平滑切换用，排除指定跳过集合）。 */

@@ -19,7 +19,7 @@ import java.util.Map;
  */
 public final class DeliveryOrderManager {
     public static final double PLAYER_OUTSIDE_BUFFER_TILES = 15.0;
-    public static final double HANDOVER_RANGE_TILES = 2.5;
+    public static final double HANDOVER_RANGE_TILES = 1.40;
     public static final double PICKUP_OUT_PROTECTION_SEC = 60.0;
 
     public enum OrderStatus {
@@ -37,6 +37,7 @@ public final class DeliveryOrderManager {
         public final String fullType;
         public final int requestedCount;
         public final double createdSimTime;
+        public final String targetPickupOutContainerId;
         public int deliveredCount = 0;
         public OrderStatus status = OrderStatus.PENDING;
         public String assignedNpcId;
@@ -47,13 +48,17 @@ public final class DeliveryOrderManager {
                 int playerIndex,
                 String fullType,
                 int requestedCount,
-                double createdSimTime) {
+                double createdSimTime,
+                String targetPickupOutContainerId) {
             this.orderId = orderId;
             this.settlementId = settlementId;
             this.playerIndex = playerIndex;
             this.fullType = fullType;
             this.requestedCount = Math.max(1, requestedCount);
             this.createdSimTime = createdSimTime;
+            this.targetPickupOutContainerId = (targetPickupOutContainerId != null && !targetPickupOutContainerId.isBlank())
+                    ? targetPickupOutContainerId.trim()
+                    : null;
         }
 
         public int getRemainingCount() {
@@ -80,14 +85,45 @@ public final class DeliveryOrderManager {
 
     public static synchronized String submitOrder(
             String settlementId, int playerIndex, String fullType, int count, double simTime) {
+        return submitOrder(settlementId, playerIndex, fullType, count, simTime, null);
+    }
+
+    public static synchronized String submitOrder(
+            String settlementId,
+            int playerIndex,
+            String fullType,
+            int count,
+            double simTime,
+            String targetPickupOutContainerId) {
         if (settlementId == null || settlementId.isBlank() || fullType == null || fullType.isBlank() || count <= 0) {
             return null;
         }
         String orderId = "ord_" + (nextOrderSeq++);
-        DeliveryOrder order = new DeliveryOrder(orderId, settlementId, playerIndex, fullType, count, simTime);
+        DeliveryOrder order = new DeliveryOrder(
+                orderId, settlementId, playerIndex, fullType, count, simTime, targetPickupOutContainerId);
         ORDERS_BY_ID.put(orderId, order);
         SmartObjectRegistry.markAuctionDirty(settlementId);
         return orderId;
+    }
+
+    public static synchronized List<DeliveryOrder> listOrders(String settlementId) {
+        if (ORDERS_BY_ID.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<DeliveryOrder> all = new ArrayList<>();
+        for (DeliveryOrder o : ORDERS_BY_ID.values()) {
+            if (settlementId == null || settlementId.equals(o.settlementId)) {
+                all.add(o);
+            }
+        }
+        if (all.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<DeliveryOrder> recent = new ArrayList<>(Math.min(50, all.size()));
+        for (int i = all.size() - 1; i >= 0 && recent.size() < 50; i--) {
+            recent.add(all.get(i));
+        }
+        return recent;
     }
 
     public static synchronized boolean cancelOrder(String orderId) {
@@ -205,6 +241,23 @@ public final class DeliveryOrderManager {
         double distFromTerritory = WarehouseFastIndex.distanceToSettlement2D(
                 settlementId, playerX, playerY);
         return distFromTerritory > PLAYER_OUTSIDE_BUFFER_TILES;
+    }
+
+    /** 按容器 ID 查找据点内可用且容量充足的 {@code PICKUP_OUT} 提货交接箱。 */
+    public static SmartSlot findPickupOutSlotById(
+            String settlementId, String containerId, double requiredWeight, double simTime) {
+        if (settlementId == null || containerId == null || containerId.isBlank()) {
+            return null;
+        }
+        SmartSlot slot = SmartObjectRegistry.getContainerSlot(settlementId, containerId);
+        if (slot == null
+                || !slot.isActive()
+                || slot.getContainerRole() != ContainerRole.PICKUP_OUT
+                || slot.isFullCooldownAt(simTime)
+                || slot.getFreeInWeight() + 1.0E-4 < requiredWeight) {
+            return null;
+        }
+        return slot;
     }
 
     /** 寻找据点内最近且容量充足的 {@code PICKUP_OUT} 提货交接箱。 */

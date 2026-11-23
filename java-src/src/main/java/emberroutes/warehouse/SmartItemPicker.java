@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
@@ -331,6 +332,174 @@ public final class SmartItemPicker {
     }
 
     /**
+     * 跨订单共享的流式装包负重预算器（严格遵守原版 {@code HEAVY_LOAD} 不扣血上限与 50.0 主包瞬时硬上限）。
+     */
+    public static final class CarryBudget {
+        private double effUsed;
+        private final double noDamageLimit;
+        private final boolean unlimited;
+        private boolean preferBags;
+        private int assignedCount;
+        private final List<BagWorkState> bags;
+
+        public CarryBudget(
+                double currentEffectiveWeight,
+                double maxWeight,
+                List<EquippedBagSpec> equippedBags,
+                boolean preferBags) {
+            this.effUsed = Math.max(0.0, currentEffectiveWeight);
+            this.unlimited = Double.isInfinite(maxWeight);
+            this.noDamageLimit = this.unlimited ? Double.POSITIVE_INFINITY : computeNoDamageWeightLimit(maxWeight);
+            this.preferBags = preferBags;
+            if (equippedBags != null && !equippedBags.isEmpty()) {
+                List<BagWorkState> list = new ArrayList<>(equippedBags.size());
+                for (int i = 0, n = equippedBags.size(); i < n; i++) {
+                    EquippedBagSpec spec = equippedBags.get(i);
+                    if (spec != null && spec.freeCapacity() > 0.0) {
+                        list.add(new BagWorkState(spec));
+                    }
+                }
+                list.sort((a, b) -> {
+                    int cmp = Double.compare(a.weightFactor, b.weightFactor);
+                    if (cmp != 0) return cmp;
+                    cmp = Double.compare(b.freeCap, a.freeCap);
+                    return cmp != 0 ? cmp : Integer.compare(a.bagIndex, b.bagIndex);
+                });
+                this.bags = list;
+            } else {
+                this.bags = Collections.emptyList();
+            }
+        }
+
+        public void setPreferBags(boolean preferBags) {
+            this.preferBags = preferBags;
+        }
+
+        /**
+         * 仅查询当前预算是否还能装下指定重量的单件物品（不改变预算状态）。
+         */
+        public boolean canFit(double rawWeight) {
+            double w = Math.max(0.05, rawWeight);
+            if (unlimited) {
+                return true;
+            }
+            if (canFitMain(w) || findFittingBagIndex(w, false) >= 0) {
+                return true;
+            }
+            if (assignedCount == 0 && effUsed + w <= MAIN_INVENTORY_HARD_CAP + 1.0E-4) {
+                return true;
+            }
+            return false;
+        }
+
+        /**
+         * 尝试为单件物品分配装包容器：返回 {@code -1}（主物品栏）、{@code >= 0}（背包索引），
+         * 若本趟负重已满返回 {@code Integer.MIN_VALUE}。
+         */
+        public int tryAssign(double rawWeight) {
+            double w = Math.max(0.05, rawWeight);
+            if (unlimited) {
+                assignedCount++;
+                return -1;
+            }
+            if (!preferBags) {
+                if (tryAssignMain(w)) {
+                    return -1;
+                }
+                int bagIdx = tryAssignBags(w, false);
+                if (bagIdx >= 0) {
+                    return bagIdx;
+                }
+            } else {
+                int bagIdx = tryAssignBags(w, false);
+                if (bagIdx >= 0) {
+                    return bagIdx;
+                }
+                if (tryAssignMain(w)) {
+                    return -1;
+                }
+            }
+            if (assignedCount == 0 && effUsed + w <= MAIN_INVENTORY_HARD_CAP + 1.0E-4) {
+                int forcedBagIdx = tryAssignBags(w, true);
+                if (forcedBagIdx >= 0) {
+                    return forcedBagIdx;
+                }
+                effUsed += w;
+                assignedCount++;
+                return -1;
+            }
+            return Integer.MIN_VALUE;
+        }
+
+        private boolean canFitMain(double w) {
+            return effUsed + w <= noDamageLimit + 1.0E-4
+                    && effUsed + w <= MAIN_INVENTORY_HARD_CAP + 1.0E-4;
+        }
+
+        private boolean tryAssignMain(double w) {
+            if (canFitMain(w)) {
+                effUsed += w;
+                assignedCount++;
+                return true;
+            }
+            return false;
+        }
+
+        private int findFittingBagIndex(double w, boolean ignoreNoDamageLimit) {
+            if (effUsed + w > MAIN_INVENTORY_HARD_CAP + 1.0E-4) {
+                return -1;
+            }
+            for (int bi = 0, bn = bags.size(); bi < bn; bi++) {
+                BagWorkState b = bags.get(bi);
+                if (b.maxItemSize > 0.0 && w > b.maxItemSize + 1.0E-4) {
+                    continue;
+                }
+                if (b.freeCap + 1.0E-4 < w) {
+                    continue;
+                }
+                double effDelta = w * b.weightFactor;
+                if (ignoreNoDamageLimit || effUsed + effDelta <= noDamageLimit + 1.0E-4) {
+                    return bi;
+                }
+            }
+            return -1;
+        }
+
+        private int tryAssignBags(double w, boolean ignoreNoDamageLimit) {
+            int bi = findFittingBagIndex(w, ignoreNoDamageLimit);
+            if (bi < 0) {
+                return -1;
+            }
+            BagWorkState b = bags.get(bi);
+            b.freeCap -= w;
+            effUsed += w * b.weightFactor;
+            assignedCount++;
+            return b.bagIndex;
+        }
+
+        public boolean canFitAnyMinWeight() {
+            if (unlimited) {
+                return true;
+            }
+            if (assignedCount == 0) {
+                return effUsed + 0.05 <= MAIN_INVENTORY_HARD_CAP + 1.0E-4;
+            }
+            if (canFitMain(0.05)) {
+                return true;
+            }
+            return findFittingBagIndex(0.05, false) >= 0;
+        }
+
+        public double getEffUsed() {
+            return effUsed;
+        }
+
+        public int getAssignedCount() {
+            return assignedCount;
+        }
+    }
+
+    /**
      * 按差异化挑件策略从 {@link WarehouseFastIndex#getLoadedSourcesByType(String, String)} 挑选真实原件并加 30s 软锁（不限趟次负重上限）。
      */
     public static List<PickedItemRef> pickItemsForOrder(
@@ -457,6 +626,156 @@ public final class SmartItemPicker {
                     cand.z(),
                     cand.item(),
                     assignment.targetBagIndex()));
+        }
+        return picked;
+    }
+
+    /**
+     * 椭圆走廊选箱 + 同趟复用已选停靠箱 + 共享 {@link CarryBudget} 装包的流式挑件入口，
+     * 支撑多张同目的地提货单合并一趟批量取送。
+     */
+    public static synchronized List<PickedItemRef> pickItemsForOrderWithBudget(
+            String settlementId,
+            String fullType,
+            int neededCount,
+            String npcId,
+            float npcX,
+            float npcY,
+            int npcZ,
+            double destX,
+            double destY,
+            int destZ,
+            Set<String> preferredContainerIds,
+            double simTime,
+            CarryBudget budget,
+            Consumer<Runnable> scopeRegistrar) {
+        return pickItemsForOrderWithBudget(
+                settlementId,
+                fullType,
+                neededCount,
+                npcId,
+                npcX,
+                npcY,
+                npcZ,
+                destX,
+                destY,
+                destZ,
+                preferredContainerIds,
+                null,
+                simTime,
+                budget,
+                scopeRegistrar);
+    }
+
+    /**
+     * 椭圆走廊选箱 + 同趟复用已选停靠箱 + 本趟原件去重（{@code excludedItemKeys}）+ 共享 {@link CarryBudget} 装包的流式挑件入口，
+     * 支撑多张同目的地提货单合并一趟批量取送。
+     */
+    public static synchronized List<PickedItemRef> pickItemsForOrderWithBudget(
+            String settlementId,
+            String fullType,
+            int neededCount,
+            String npcId,
+            float npcX,
+            float npcY,
+            int npcZ,
+            double destX,
+            double destY,
+            int destZ,
+            Set<String> preferredContainerIds,
+            Set<Integer> excludedItemKeys,
+            double simTime,
+            CarryBudget budget,
+            Consumer<Runnable> scopeRegistrar) {
+        if (settlementId == null || fullType == null || neededCount <= 0 || npcId == null || budget == null) {
+            return Collections.emptyList();
+        }
+        purgeExpiredLocks(simTime);
+
+        List<WarehouseFastIndex.LoadedSource> sources =
+                WarehouseFastIndex.getLoadedSourcesByType(settlementId, fullType);
+        if (sources.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<ScoredCandidate> candidates = new ArrayList<>();
+        for (int si = 0, sn = sources.size(); si < sn; si++) {
+            WarehouseFastIndex.LoadedSource src = sources.get(si);
+            SmartSlot slot = SmartObjectRegistry.getContainerSlot(settlementId, src.containerId());
+            if (slot != null && (slot.getContainerRole() == ContainerRole.PICKUP_OUT
+                    || slot.isWithdrawnAt(simTime)
+                    || !slot.isActive())) {
+                continue;
+            }
+            WarehouseFastIndex.LiveContainerRef liveRef = WarehouseFastIndex.resolveLiveContainer(src.containerId());
+            if (liveRef == null || liveRef.container() == null) {
+                continue;
+            }
+            ItemContainer ic = liveRef.container();
+            List<InventoryItem> items = ic.getItems();
+            if (items == null || items.isEmpty()) {
+                continue;
+            }
+
+            boolean powered = ic.isPowered();
+            double distFromNpc = Math.hypot((src.x() + 0.5) - npcX, (src.y() + 0.5) - npcY)
+                    + Math.abs(src.z() - npcZ) * 10.0;
+            double distToDest = Math.hypot((src.x() + 0.5) - destX, (src.y() + 0.5) - destY)
+                    + Math.abs(src.z() - destZ) * 10.0;
+            double corridorDist = (distFromNpc + distToDest) * 0.5;
+            boolean alreadyPlannedStop = preferredContainerIds != null && preferredContainerIds.contains(src.containerId());
+
+            for (int ii = 0, in = items.size(); ii < in; ii++) {
+                InventoryItem item = items.get(ii);
+                if (item == null || item.isEquipped() || !fullType.equals(item.getFullType())) {
+                    continue;
+                }
+                int key = itemLockKey(item);
+                if (excludedItemKeys != null && excludedItemKeys.contains(Integer.valueOf(key))) {
+                    continue;
+                }
+                if (isItemSoftLockedByOther(key, npcId, simTime)) {
+                    continue;
+                }
+                double score = scoreCandidateItem(item, powered, corridorDist, src.count(), neededCount);
+                if (!Double.isFinite(score) || score == Double.NEGATIVE_INFINITY) {
+                    continue;
+                }
+                if (alreadyPlannedStop) {
+                    score += 300.0;
+                }
+                candidates.add(new ScoredCandidate(src.containerId(), src.x(), src.y(), src.z(), item, key, score));
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+        candidates.sort((a, b) -> Double.compare(b.score(), a.score()));
+
+        List<PickedItemRef> picked = new ArrayList<>(Math.min(neededCount, candidates.size()));
+        for (int i = 0, n = candidates.size(); i < n && picked.size() < neededCount; i++) {
+            ScoredCandidate cand = candidates.get(i);
+            double w = Math.max(0.05, cand.item().getUnequippedWeight());
+            int targetBagIdx = budget.tryAssign(w);
+            if (targetBagIdx == Integer.MIN_VALUE) {
+                continue;
+            }
+            if (!acquireItemSoftLock(
+                    cand.lockKey(), settlementId, npcId, simTime, DEFAULT_SOFT_LOCK_TTL_SEC, scopeRegistrar)) {
+                continue;
+            }
+            if (excludedItemKeys != null) {
+                excludedItemKeys.add(Integer.valueOf(cand.lockKey()));
+            }
+            picked.add(new PickedItemRef(
+                    settlementId,
+                    cand.containerId(),
+                    cand.x(),
+                    cand.y(),
+                    cand.z(),
+                    cand.item(),
+                    targetBagIdx));
         }
         return picked;
     }

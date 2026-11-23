@@ -2,6 +2,7 @@ package emberroutes.warehouse;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -671,6 +672,7 @@ public final class WarehouseFastIndex {
         String kind = "container";
         String customName;
         String status = "UNINITIALIZED";
+        SmartZoningPolicy.ContainerFilterRule lastRule = new SmartZoningPolicy.ContainerFilterRule();
 
         ContainerContribution(String containerId, int x, int y, int z) {
             this.containerId = containerId;
@@ -1071,6 +1073,11 @@ public final class WarehouseFastIndex {
 
     /** 根据稳定 {@code containerId}（{@code x:y:z#sprite:kind:ci#ord}）解析实时世界对象与容器。 */
     public static LiveContainerRef resolveLiveContainer(String containerId) {
+        return resolveLiveContainer(containerId, false);
+    }
+
+    /** 根据稳定 {@code containerId} 解析实时世界对象与容器（可选包含 {@code ER_Private} 私密容器）。 */
+    public static LiveContainerRef resolveLiveContainer(String containerId, boolean includePrivate) {
         if (containerId == null || containerId.isEmpty() || IsoWorld.instance == null) {
             return null;
         }
@@ -1109,7 +1116,7 @@ public final class WarehouseFastIndex {
         int matchedOrd = 0;
         for (int oi = 0, objSize = objects.size(); oi < objSize; oi++) {
             IsoObject obj = objects.get(oi);
-            if (!isEligibleStorageObject(obj) || isObjectPrivate(obj)) {
+            if (!isEligibleStorageObject(obj) || (!includePrivate && isObjectPrivate(obj))) {
                 continue;
             }
             String spriteName = resolveSpriteName(obj);
@@ -1130,6 +1137,180 @@ public final class WarehouseFastIndex {
             }
         }
         return null;
+    }
+
+    public static IsoObject resolveContainerObject(String containerId) {
+        LiveContainerRef ref = resolveLiveContainer(containerId, true);
+        return ref != null ? ref.object() : null;
+    }
+
+    public static String resolveObjectContainerId(IsoObject targetObj) {
+        if (targetObj == null || !isEligibleStorageObject(targetObj)) {
+            return null;
+        }
+        IsoGridSquare sq = targetObj.getSquare();
+        if (sq == null) {
+            return null;
+        }
+        PZArrayList<IsoObject> objects = sq.getObjects();
+        if (objects == null) {
+            return null;
+        }
+        Map<String, Integer> stackOrdinals = new HashMap<>();
+        int x = sq.getX(), y = sq.getY(), z = sq.getZ();
+        for (int oi = 0, objSize = objects.size(); oi < objSize; oi++) {
+            IsoObject obj = objects.get(oi);
+            if (!isEligibleStorageObject(obj)) {
+                continue;
+            }
+            String spriteName = resolveSpriteName(obj);
+            int contCount = resolveContainerCount(obj);
+            for (int ci = 0; ci < contCount; ci++) {
+                ItemContainer ic = resolveEligibleContainerAt(obj, ci);
+                if (ic == null) continue;
+                String sig = spriteName + ":" + resolveContainerKind(ic) + ":" + ci;
+                int ord = stackOrdinals.getOrDefault(sig, 0);
+                stackOrdinals.put(sig, ord + 1);
+                if (obj == targetObj) {
+                    return x + ":" + y + ":" + z + "#" + sig + "#" + ord;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static int roleSortRank(ContainerRole role, boolean isPrivate) {
+        if (isPrivate) return 3;
+        return switch (role) {
+            case PICKUP_OUT -> 0;
+            case BUFFER_IN -> 1;
+            case STORAGE -> 2;
+        };
+    }
+
+    /** 列出据点全量已纳管容器（含在场、离屏与私密），按角色与优先级排序供 UI 清单与配置向导使用。 */
+    public static KahluaTable listSettlementContainers(String settlementId) {
+        KahluaTable out = table();
+        if (settlementId == null || settlementId.isEmpty()) {
+            return out;
+        }
+        SettlementState s = SETTLEMENTS.get(settlementId);
+        if (s == null || s.containers.isEmpty()) {
+            return out;
+        }
+
+        record ContainerView(
+                ContainerContribution contrib,
+                SmartZoningPolicy.ContainerFilterRule rule,
+                boolean isPrivate,
+                boolean loaded,
+                String displayName) {}
+
+        List<ContainerView> list = new ArrayList<>(s.containers.size());
+        for (ContainerContribution c : s.containers.values()) {
+            boolean isPrivate = STATUS_PRIVATE.equals(c.status);
+            boolean loaded = STATUS_LOADED.equals(c.status);
+            if (!isPrivate && !loaded && !STATUS_OFFLINE_CACHED.equals(c.status)) {
+                continue;
+            }
+            SmartSlot slot = SmartObjectRegistry.getContainerSlot(settlementId, c.containerId);
+            SmartZoningPolicy.ContainerFilterRule rule = slot != null && slot.getFilterRule() != null
+                    ? slot.getFilterRule()
+                    : (c.lastRule != null ? c.lastRule : new SmartZoningPolicy.ContainerFilterRule());
+            String disp = (c.customName != null && !c.customName.isEmpty())
+                    ? c.customName
+                    : (c.kind != null && !c.kind.isEmpty() ? c.kind : "container");
+            list.add(new ContainerView(c, rule, isPrivate, loaded, disp));
+        }
+
+        list.sort((a, b) -> {
+            int rCmp = Integer.compare(
+                    roleSortRank(a.rule.role, a.isPrivate),
+                    roleSortRank(b.rule.role, b.isPrivate));
+            if (rCmp != 0) return rCmp;
+            int pCmp = Integer.compare(b.rule.priority, a.rule.priority);
+            if (pCmp != 0) return pCmp;
+            int nCmp = a.displayName.compareToIgnoreCase(b.displayName);
+            if (nCmp != 0) return nCmp;
+            int xCmp = Integer.compare(a.contrib.x, b.contrib.x);
+            if (xCmp != 0) return xCmp;
+            int yCmp = Integer.compare(a.contrib.y, b.contrib.y);
+            if (yCmp != 0) return yCmp;
+            return Integer.compare(a.contrib.z, b.contrib.z);
+        });
+
+        for (int i = 0; i < list.size(); i++) {
+            ContainerView v = list.get(i);
+            KahluaTable row = SmartZoningPolicy.ruleToKahluaTable(v.rule, v.isPrivate);
+            row.rawset("containerId", v.contrib.containerId);
+            row.rawset("displayName", v.displayName);
+            row.rawset("kind", v.contrib.kind);
+            row.rawset("x", Double.valueOf(v.contrib.x));
+            row.rawset("y", Double.valueOf(v.contrib.y));
+            row.rawset("z", Double.valueOf(v.contrib.z));
+            row.rawset("loaded", Boolean.valueOf(v.loaded));
+            row.rawset("status", v.contrib.status);
+            row.rawset("itemCount", Double.valueOf(v.contrib.count));
+            row.rawset("usedWeight", Double.valueOf(v.contrib.usedWeight));
+            row.rawset("capacity", Double.valueOf(v.contrib.capacity));
+            out.rawset(Double.valueOf(i + 1), row);
+        }
+        return out;
+    }
+
+    /** 枚举目标容器当前在场样本物品，供向导右键加白/排除快速操作。 */
+    public static KahluaTable getContainerSampleItems(IsoObject obj) {
+        KahluaTable out = table();
+        if (obj == null || !isEligibleStorageObject(obj)) {
+            return out;
+        }
+        final class SampleAgg {
+            final String fullType;
+            String displayName;
+            int count;
+            final String node;
+
+            SampleAgg(String fullType, String displayName, String node) {
+                this.fullType = fullType;
+                this.displayName = displayName;
+                this.node = node;
+            }
+        }
+        Map<String, SampleAgg> byType = new HashMap<>();
+        int contCount = resolveContainerCount(obj);
+        for (int ci = 0; ci < contCount; ci++) {
+            ItemContainer ic = resolveEligibleContainerAt(obj, ci);
+            if (ic == null) continue;
+            ArrayList<InventoryItem> items = ic.getItems();
+            if (items == null) continue;
+            for (int i = 0, n = items.size(); i < n; i++) {
+                InventoryItem itm = items.get(i);
+                if (!isEligibleItem(itm)) continue;
+                String ft = itm.getFullType();
+                if (ft == null || ft.isEmpty()) continue;
+                SampleAgg agg = byType.get(ft);
+                if (agg == null) {
+                    String dn = itm.getDisplayName();
+                    if (dn == null || dn.isEmpty()) dn = ft;
+                    agg = new SampleAgg(ft, dn, classifyItem(itm));
+                    byType.put(ft, agg);
+                }
+                agg.count++;
+            }
+        }
+        List<SampleAgg> sorted = new ArrayList<>(byType.values());
+        sorted.sort(Comparator.<SampleAgg>comparingInt(a -> a.count).reversed()
+                .thenComparing(a -> a.displayName, String.CASE_INSENSITIVE_ORDER));
+        for (int i = 0; i < sorted.size(); i++) {
+            SampleAgg a = sorted.get(i);
+            KahluaTable row = table();
+            row.rawset("fullType", a.fullType);
+            row.rawset("displayName", a.displayName);
+            row.rawset("count", Double.valueOf(a.count));
+            row.rawset("node", a.node);
+            out.rawset(Double.valueOf(i + 1), row);
+        }
+        return out;
     }
 
     private static String resolveSpriteName(IsoObject obj) {
@@ -1547,10 +1728,14 @@ public final class WarehouseFastIndex {
                     String cid = x + ":" + y + ":" + z + "#" + sig + "#" + ord;
                     seenIds.add(cid);
 
+                    SmartZoningPolicy.ContainerFilterRule zoneRule = SmartZoningPolicy.readRule(obj);
                     ContainerContribution existing = s.containers.get(cid);
                     if (markedPrivate) {
                         SmartObjectRegistry.onContainerRemoved(s.settlementId, cid);
                         if (existing != null && STATUS_PRIVATE.equals(existing.status)) {
+                            existing.lastRule = zoneRule != null
+                                    ? zoneRule.copy()
+                                    : new SmartZoningPolicy.ContainerFilterRule();
                             continue;
                         }
                         if (existing != null) {
@@ -1572,12 +1757,14 @@ public final class WarehouseFastIndex {
                         existing.kind = kind;
                         existing.customName = customName;
                         existing.status = STATUS_PRIVATE;
+                        existing.lastRule = zoneRule != null
+                                ? zoneRule.copy()
+                                : new SmartZoningPolicy.ContainerFilterRule();
                         s.aggregate.add(existing);
                         changed = true;
                         continue;
                     }
 
-                    SmartZoningPolicy.ContainerFilterRule zoneRule = SmartZoningPolicy.readRule(obj);
                     double cap = ic.getCapacity();
                     if (existing != null
                             && STATUS_LOADED.equals(existing.status)
@@ -1586,6 +1773,9 @@ public final class WarehouseFastIndex {
                             && Objects.equals(existing.kind, kind)
                             && Objects.equals(existing.customName, customName)
                             && existing.fingerprint.matchesContainer(ic)) {
+                        existing.lastRule = zoneRule != null
+                                ? zoneRule.copy()
+                                : new SmartZoningPolicy.ContainerFilterRule();
                         if (hasSmartZoneRuleChanged(s.settlementId, cid, zoneRule)) {
                             SmartObjectRegistry.onContainerScanned(
                                     s.settlementId, cid, sq, zoneRule, existing.count, cap, existing.usedWeight);
@@ -1604,6 +1794,9 @@ public final class WarehouseFastIndex {
                         s.containers.put(cid, existing);
                     }
 
+                    existing.lastRule = zoneRule != null
+                            ? zoneRule.copy()
+                            : new SmartZoningPolicy.ContainerFilterRule();
                     populateLoadedContribution(existing, ic, fp, cap, used, kind, customName);
                     s.aggregate.add(existing);
                     SmartObjectRegistry.onContainerScanned(

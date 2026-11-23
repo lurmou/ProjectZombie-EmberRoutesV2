@@ -435,6 +435,14 @@ public final class EmberRoutesBridge {
         return NpcManager.getPostureState(npcId);
     }
 
+    public static boolean isNpcAnimRecorderActive(String npcId) {
+        return NpcManager.isNpcAnimRecorderActive(npcId);
+    }
+
+    public static String toggleNpcAnimRecorder(String npcId) {
+        return NpcManager.toggleNpcAnimRecorder(npcId);
+    }
+
     public static boolean isSittableFurniture(IsoObject obj) {
         return NpcPostureController.isSittableFurniture(obj);
     }
@@ -543,11 +551,155 @@ public final class EmberRoutesBridge {
                 SmartObjectRegistry.getCurrentSimTime());
     }
 
+    public static String submitDeliveryOrderToBox(
+            String settlementId, double playerIndex, String fullType, double count, String targetContainerId) {
+        return DeliveryOrderManager.submitOrder(
+                settlementId,
+                (int) Math.round(playerIndex),
+                fullType,
+                (int) Math.round(count),
+                SmartObjectRegistry.getCurrentSimTime(),
+                targetContainerId);
+    }
+
     public static boolean cancelDeliveryOrder(String orderId) {
         return DeliveryOrderManager.cancelOrder(orderId);
     }
 
+    public static KahluaTable listDeliveryOrders(String settlementId) {
+        List<DeliveryOrderManager.DeliveryOrder> list = DeliveryOrderManager.listOrders(settlementId);
+        J2SEPlatform platform = J2SEPlatform.getInstance();
+        KahluaTable out = platform.newTable();
+        for (int i = 0; i < list.size(); i++) {
+            DeliveryOrderManager.DeliveryOrder o = list.get(i);
+            KahluaTable row = platform.newTable();
+            row.rawset("orderId", o.orderId);
+            row.rawset("settlementId", o.settlementId);
+            row.rawset("fullType", o.fullType);
+            row.rawset("requestedCount", Double.valueOf(o.requestedCount));
+            row.rawset("deliveredCount", Double.valueOf(o.deliveredCount));
+            row.rawset("status", o.status.name());
+            if (o.assignedNpcId != null) {
+                row.rawset("assignedNpcId", o.assignedNpcId);
+            }
+            if (o.targetPickupOutContainerId != null) {
+                row.rawset("targetPickupOutContainerId", o.targetPickupOutContainerId);
+            }
+            out.rawset(Double.valueOf(i + 1), row);
+        }
+        return out;
+    }
+
     public static String getLogisticsSummary(String settlementId) {
         return LogisticsWorkDutyProvider.getDebugSummary(settlementId);
+    }
+
+    // ==================== 8. EMB-18 据点总控、容器配置向导与 3D 定位 ====================
+
+    public static KahluaTable listSettlementContainers(String settlementId) {
+        return WarehouseFastIndex.listSettlementContainers(settlementId);
+    }
+
+    public static String resolveObjectContainerId(IsoObject obj) {
+        return WarehouseFastIndex.resolveObjectContainerId(obj);
+    }
+
+    public static KahluaTable getContainerRule(IsoObject obj) {
+        return SmartZoningPolicy.ruleToKahluaTable(
+                SmartZoningPolicy.readRule(obj),
+                WarehouseFastIndex.isObjectPrivate(obj));
+    }
+
+    public static boolean setContainerRule(IsoObject obj, KahluaTable ruleTable) {
+        if (obj == null || ruleTable == null) {
+            return false;
+        }
+        SmartZoningPolicy.ContainerFilterRule rule = SmartZoningPolicy.kahluaTableToRule(ruleTable);
+        boolean ok = SmartZoningPolicy.writeRule(obj, rule);
+        Object priv = ruleTable.rawget("isPrivate");
+        if (priv instanceof Boolean b) {
+            WarehouseFastIndex.setObjectPrivate(obj, b.booleanValue());
+        }
+        WarehouseFastIndex.flushDirtyQueue();
+        return ok;
+    }
+
+    public static KahluaTable getContainerRuleById(String settlementId, String containerId) {
+        IsoObject obj = WarehouseFastIndex.resolveContainerObject(containerId);
+        if (obj != null) {
+            return getContainerRule(obj);
+        }
+        return null;
+    }
+
+    public static boolean setContainerRuleById(String settlementId, String containerId, KahluaTable ruleTable) {
+        IsoObject obj = WarehouseFastIndex.resolveContainerObject(containerId);
+        return setContainerRule(obj, ruleTable);
+    }
+
+    public static boolean setContainerPrivateById(String settlementId, String containerId, boolean makePrivate) {
+        IsoObject obj = WarehouseFastIndex.resolveContainerObject(containerId);
+        if (obj == null) {
+            return false;
+        }
+        WarehouseFastIndex.setObjectPrivate(obj, makePrivate);
+        WarehouseFastIndex.flushDirtyQueue();
+        return true;
+    }
+
+    public static String autoConfigureContainerById(String settlementId, String containerId) {
+        IsoObject obj = WarehouseFastIndex.resolveContainerObject(containerId);
+        if (obj == null) {
+            return "UNLOADED";
+        }
+        String res = autoConfigureContainer(obj);
+        WarehouseFastIndex.flushDirtyQueue();
+        return res;
+    }
+
+    public static KahluaTable getContainerSampleItems(IsoObject obj) {
+        return WarehouseFastIndex.getContainerSampleItems(obj);
+    }
+
+    public static KahluaTable getContainerSampleItemsById(String settlementId, String containerId) {
+        IsoObject obj = WarehouseFastIndex.resolveContainerObject(containerId);
+        return WarehouseFastIndex.getContainerSampleItems(obj);
+    }
+
+    public static void setContainerHighlight(double x, double y, double z) {
+        TerritoryRenderer.setContainerHighlight(
+                (int) Math.floor(x), (int) Math.floor(y), (int) Math.floor(z));
+    }
+
+    public static void clearContainerHighlight() {
+        TerritoryRenderer.clearContainerHighlight();
+    }
+
+    public static KahluaTable listNpcRoster() {
+        List<NpcManager.NpcRosterEntry> entries = NpcManager.listRoster();
+        J2SEPlatform platform = J2SEPlatform.getInstance();
+        KahluaTable out = platform.newTable();
+        for (int i = 0; i < entries.size(); i++) {
+            NpcManager.NpcRosterEntry e = entries.get(i);
+            KahluaTable row = platform.newTable();
+            row.rawset("npcId", e.npcId());
+            row.rawset("displayName", e.displayName());
+            row.rawset("phasedIn", Boolean.valueOf(e.phasedIn()));
+            row.rawset("dead", Boolean.valueOf(e.dead()));
+            row.rawset("assignedSettlementId", e.assignedSettlementId());
+            row.rawset("brainMode", e.brainMode());
+            row.rawset("brainStatePath", e.brainStatePath());
+            row.rawset("postureState", e.postureState());
+            row.rawset("health", Double.valueOf(e.health()));
+            row.rawset("hunger", Double.valueOf(e.hunger()));
+            row.rawset("thirst", Double.valueOf(e.thirst()));
+            row.rawset("fatigue", Double.valueOf(e.fatigue()));
+            row.rawset("bleeding", Boolean.valueOf(e.bleeding()));
+            row.rawset("x", Double.valueOf(e.x()));
+            row.rawset("y", Double.valueOf(e.y()));
+            row.rawset("z", Double.valueOf(e.z()));
+            out.rawset(Double.valueOf(i + 1), row);
+        }
+        return out;
     }
 }

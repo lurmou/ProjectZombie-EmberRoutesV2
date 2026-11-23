@@ -37,6 +37,7 @@ import zombie.characters.SurvivorFactory.SurvivorType;
 import zombie.characters.WornItems.WornItem;
 import zombie.characters.WornItems.WornItems;
 import zombie.core.Core;
+import zombie.core.skinnedmodel.animation.debug.AnimationPlayerRecorder;
 import zombie.debug.DebugLog;
 import zombie.entity.ComponentType;
 import zombie.entity.components.fluids.Fluid;
@@ -128,6 +129,24 @@ public final class NpcManager {
             int itemCount,
             String postureState,
             String debugLine) {}
+
+    public record NpcRosterEntry(
+            String npcId,
+            String displayName,
+            boolean phasedIn,
+            boolean dead,
+            String assignedSettlementId,
+            String brainMode,
+            String brainStatePath,
+            String postureState,
+            double health,
+            double hunger,
+            double thirst,
+            double fatigue,
+            boolean bleeding,
+            double x,
+            double y,
+            double z) {}
 
     private static final Map<String, NpcRecord> records = new LinkedHashMap<>();
     private static final List<MoveEvent> pendingMoveEvents = new ArrayList<>();
@@ -282,6 +301,7 @@ public final class NpcManager {
             rec.liveNpc.getFollow().stop(rec.liveNpc, false, "DESPAWN");
             rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "DESPAWN");
             collectSettledMoveEventLocked(rec);
+            rec.liveNpc.detachAnimDebugTools();
             detachFromWorld(rec.liveNpc, currentCell());
             rec.liveNpc = null;
         }
@@ -314,6 +334,7 @@ public final class NpcManager {
         npc.getFollow().stop(npc, true, "OFFSCREEN");
         npc.getLocomotion().interrupt(npc, "OFFSCREEN");
         collectSettledMoveEventLocked(rec);
+        npc.detachAnimDebugTools();
         try {
             rec.offscreenSnapshot = NpcSnapshot.captureFrom(npc);
         } catch (Throwable t) {
@@ -888,6 +909,24 @@ public final class NpcManager {
         return npc.getPosture().commandStandUp(npc, urgent);
     }
 
+    public static synchronized boolean isNpcAnimRecorderActive(String npcId) {
+        IsoNPC npc = getLiveNpc(npcId);
+        return npc != null && npc.isAnimationRecorderActive();
+    }
+
+    public static synchronized String toggleNpcAnimRecorder(String npcId) {
+        IsoNPC npc = getLiveNpc(npcId);
+        if (npc == null || npc.isDead()) {
+            return "MISSING";
+        }
+        boolean next = !npc.isAnimationRecorderActive();
+        npc.setAnimRecorderActive(next, next);
+        if (!next) {
+            npc.closeAnimationRecorder();
+        }
+        return (next ? "ON -> " : "OFF -> ") + AnimationPlayerRecorder.getRecordingDir();
+    }
+
     public static synchronized int standUpAllNpcs(boolean urgent) {
         int count = 0;
         for (NpcRecord rec : records.values()) {
@@ -937,6 +976,7 @@ public final class NpcManager {
             }
             IsoNPC other = rec.liveNpc;
             if (matchesTargetFurniture(other.getPosture().getTargetObject(), target, matchSpriteGrid)
+                    || matchesTargetFurniture(other.getPosture().getSecondaryBedTile(), target, matchSpriteGrid)
                     || matchesTargetFurniture(other.getSitOnFurnitureObject(), target, matchSpriteGrid)
                     || (includeBed && matchesTargetFurniture(other.getBed(), target, matchSpriteGrid))) {
                 return true;
@@ -1277,6 +1317,66 @@ public final class NpcManager {
             );
         }
         return null;
+    }
+
+    public static synchronized List<NpcRosterEntry> listRoster() {
+        List<NpcRosterEntry> out = new ArrayList<>(records.size());
+        for (NpcRecord rec : records.values()) {
+            if (rec.deadRetired) {
+                continue;
+            }
+            String assignedId = rec.assignedSettlementId != null ? rec.assignedSettlementId : "";
+            if (rec.phasedIn && rec.liveNpc != null) {
+                IsoNPC npc = rec.liveNpc;
+                if (npc.isDead()) {
+                    continue;
+                }
+                double health = npc.getBodyDamage() != null ? npc.getBodyDamage().getOverallBodyHealth() : 100.0;
+                boolean bleeding = npc.getBodyDamage() != null && npc.getBodyDamage().getNumPartsBleeding() > 0;
+                double hunger = npc.getStats() != null ? npc.getStats().get(CharacterStat.HUNGER) : 0.0;
+                double thirst = npc.getStats() != null ? npc.getStats().get(CharacterStat.THIRST) : 0.0;
+                double fatigue = npc.getStats() != null ? npc.getStats().get(CharacterStat.FATIGUE) : 0.0;
+                String name = (npc.getUsername() != null && !npc.getUsername().isEmpty()) ? npc.getUsername() : rec.npcId;
+                out.add(new NpcRosterEntry(
+                        rec.npcId,
+                        name,
+                        true,
+                        false,
+                        assignedId,
+                        npc.getBrain().getMode().name(),
+                        npc.getBrain().getActivePathString(),
+                        npc.getPosture().getState().name(),
+                        health,
+                        hunger,
+                        thirst,
+                        fatigue,
+                        bleeding,
+                        npc.getX(),
+                        npc.getY(),
+                        npc.getZ()));
+            } else if (rec.offscreenSnapshot != null) {
+                NpcSnapshot s = rec.offscreenSnapshot;
+                String name = (s.displayName != null && !s.displayName.isEmpty()) ? s.displayName : rec.npcId;
+                out.add(new NpcRosterEntry(
+                        rec.npcId,
+                        name,
+                        false,
+                        false,
+                        assignedId,
+                        rec.brainMode.name(),
+                        "OFFSCREEN",
+                        "OFFSCREEN",
+                        100.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        false,
+                        s.x,
+                        s.y,
+                        s.z));
+            }
+        }
+        return out;
     }
 
     private static int resolveTestPresetIndex(String npcId) {

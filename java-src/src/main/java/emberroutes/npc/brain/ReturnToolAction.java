@@ -100,6 +100,49 @@ public final class ReturnToolAction {
         return true;
     }
 
+    /** 解析 {@code ER_BorrowedFrom} 对应的实时仓储容器 ID，优先匹配完整 containerId，其次回退同格首个可用仓储对象。 */
+    public static String resolveReturnContainerId(String sourceKey, InventoryItem item, int x, int y, int z) {
+        if (item == null || IsoWorld.instance == null) {
+            return null;
+        }
+        if (sourceKey != null && sourceKey.indexOf('#') > 0) {
+            WarehouseFastIndex.LiveContainerRef direct = WarehouseFastIndex.resolveLiveContainer(sourceKey);
+            if (direct != null
+                    && direct.container() != null
+                    && direct.container().hasRoomFor(null, item)
+                    && direct.container().isItemAllowed(item)) {
+                return sourceKey;
+            }
+        }
+        IsoCell cell = IsoWorld.instance.currentCell;
+        if (cell == null) {
+            return null;
+        }
+        IsoGridSquare sq = cell.getGridSquare(x, y, z);
+        if (sq == null || sq.getObjects() == null) {
+            return null;
+        }
+        PZArrayList<IsoObject> objs = sq.getObjects();
+        for (int i = 0, n = objs.size(); i < n; i++) {
+            IsoObject obj = objs.get(i);
+            if (!WarehouseFastIndex.isEligibleStorageObject(obj) || WarehouseFastIndex.isObjectPrivate(obj)) {
+                continue;
+            }
+            String cid = WarehouseFastIndex.resolveObjectContainerId(obj);
+            if (cid == null) {
+                continue;
+            }
+            WarehouseFastIndex.LiveContainerRef ref = WarehouseFastIndex.resolveLiveContainer(cid);
+            if (ref != null
+                    && ref.container() != null
+                    && ref.container().hasRoomFor(null, item)
+                    && ref.container().isItemAllowed(item)) {
+                return cid;
+            }
+        }
+        return null;
+    }
+
     private static ItemContainer findTargetStorageContainer(IsoGridSquare sq, InventoryItem item) {
         PZArrayList<IsoObject> objs = sq.getObjects();
         if (objs == null) {
