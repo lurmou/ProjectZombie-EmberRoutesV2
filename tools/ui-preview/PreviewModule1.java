@@ -137,9 +137,12 @@ public final class PreviewModule1 {
 
         Path transDir = repo.resolve("Contents/mods/EmberRoutes/42/media/lua/shared/Translate/" + lang);
         JSONObject dict = new JSONObject();
-        for (String jf : List.of("ContextMenu.json", "IG_UI.json")) {
-            JSONObject sub = new JSONObject(Files.readString(transDir.resolve(jf), StandardCharsets.UTF_8));
-            for (String k : sub.keySet()) dict.put(k, sub.getString(k));
+        for (String jf : List.of("ContextMenu.json", "IG_UI.json", "UI.json")) {
+            Path p = transDir.resolve(jf);
+            if (Files.isRegularFile(p)) {
+                JSONObject sub = new JSONObject(Files.readString(p, StandardCharsets.UTF_8));
+                for (String k : sub.keySet()) dict.put(k, sub.getString(k));
+            }
         }
 
         Object origGetText = LuaManager.env.rawget("getText");
@@ -477,6 +480,34 @@ public final class PreviewModule1 {
         jb.rawset("stopNpcFollow", (JavaFunction) (cf, n) -> cf.push(Boolean.FALSE));
         jb.rawset("isNpcFollowing", (JavaFunction) (cf, n) -> cf.push(Boolean.FALSE));
         jb.rawset("getNpcFollowState", (JavaFunction) (cf, n) -> cf.push("INACTIVE"));
+        jb.rawset("getNpcBrainMode", (JavaFunction) (cf, n) -> cf.push("SETTLEMENT"));
+        jb.rawset("getSquadTacticalConfig", (JavaFunction) (cf, n) -> {
+            KahluaTable cfg = LuaManager.platform.newTable();
+            cfg.rawset("formation", "WEDGE");
+            cfg.rawset("spacing", "STANDARD");
+            cfg.rawset("roe", "FREE_FIRE");
+            cfg.rawset("cqb", Boolean.FALSE);
+            cfg.rawset("orderMode", "FOLLOW");
+            cfg.rawset("autoVehicle", Boolean.TRUE);
+            cfg.rawset("vehicleOverride", "AUTO");
+            cfg.rawset("version", Double.valueOf(1));
+            cfg.rawset("anyInVehicle", Boolean.TRUE);
+            cfg.rawset("hasHoldAnchor", Boolean.FALSE);
+            return cf.push(cfg);
+        });
+        jb.rawset("setSquadFormation", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("setSquadSpacing", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("setSquadRoe", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("setSquadCqb", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("setSquadOrderMode", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("setSquadAutoVehicle", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("setSquadMemberRoe", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("setSquadMemberCqb", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("commandSquadVehicleToggle", (JavaFunction) (cf, n) -> cf.push("BOARDING"));
+        jb.rawset("commandMemberExitVehicle", (JavaFunction) (cf, n) -> cf.push(Boolean.TRUE));
+        jb.rawset("dismissSquadMember", (JavaFunction) (cf, n) -> cf.push("DISMISSED"));
+        jb.rawset("listSquadMembers", (JavaFunction) (cf, n) -> cf.push(LuaManager.platform.newTable()));
+        jb.rawset("getNpcPortraitTexture", (JavaFunction) (cf, n) -> cf.push(null));
         LuaManager.env.rawset("EmberRoutesJava", jb);
 
         String sceneCode = """
@@ -596,6 +627,7 @@ public final class PreviewModule1 {
             """);
 
         renderNpcInventoryPreview(outDir, lang);
+        renderSquadHudPreview(outDir, lang);
     }
 
     private static void renderPreviewFrames(Path outFile, boolean drawZonePolygon) throws Exception {
@@ -770,6 +802,122 @@ public final class PreviewModule1 {
             """);
     }
 
+    private static void renderSquadHudPreview(Path outDir, String lang) throws Exception {
+        boolean isCn = "CN".equals(lang);
+        KahluaTable mock = LuaManager.platform.newTable();
+        mock.rawset("noticeFull", isCn ? "目標載具乘客位已滿，無法繼續登車" : "Vehicle seats are all occupied");
+        KahluaTable members = LuaManager.platform.newTable();
+        Object[][] rows = {
+            {"npc_1", isCn ? "馬庫斯" : "Marcus Vance", isCn ? "尖兵壹號" : "Vanguard-1", true, 96.0, false, false, "MELEE", "MELEE", isCn ? "消防斧" : "Fire Axe", "FREE_FIRE", false, true, true, "FOLLOWING", false, -1},
+            {"npc_2", isCn ? "伊蓮娜" : "Elena Rostova", isCn ? "伊蓮娜" : "Elena", true, 54.0, false, true, "MEDIC", "UNARMED", "", "RETURN_FIRE", true, false, false, "HOLDING", false, -1},
+            {"npc_3", isCn ? "艾莉絲" : "Alice Mercer", isCn ? "渡鴉-2" : "Raven-2", true, 24.0, true, true, "RANGED", "FIREARM", isCn ? "M9手槍" : "M9 Pistol", "FREE_FIRE", false, false, false, "RIDING", true, 2},
+            {"npc_4", isCn ? "薩米爾" : "Samir Patel", isCn ? "薩米爾" : "Samir", false, 100.0, false, false, "SUPPORT", "MELEE", isCn ? "撬棍" : "Crowbar", "HOLD_FIRE", true, false, false, "OFFSCREEN", false, -1},
+            {"npc_5", isCn ? "諾亞" : "Noah Brooks", isCn ? "重錘" : "Anvil", true, 82.0, false, false, "MELEE", "MELEE", isCn ? "撬棍" : "Crowbar", "FREE_FIRE", false, true, false, "BOARDING", false, -1}
+        };
+        for (int i = 0; i < rows.length; i++) {
+            Object[] rd = rows[i];
+            KahluaTable m = LuaManager.platform.newTable();
+            m.rawset("npcId", rd[0]);
+            m.rawset("displayName", rd[1]);
+            m.rawset("shownName", rd[2]);
+            m.rawset("callsign", rd[2]);
+            m.rawset("phasedIn", rd[3]);
+            m.rawset("health", rd[4]);
+            m.rawset("bleeding", rd[5]);
+            m.rawset("injured", rd[6]);
+            m.rawset("tacticalRole", rd[7]);
+            m.rawset("weaponType", rd[8]);
+            m.rawset("weaponName", rd[9]);
+            m.rawset("effectiveRoe", rd[10]);
+            m.rawset("roeOverridden", rd[11]);
+            m.rawset("effectiveCqb", rd[12]);
+            m.rawset("cqbOverridden", rd[13]);
+            m.rawset("activityState", rd[14]);
+            m.rawset("inVehicle", rd[15]);
+            m.rawset("vehicleSeat", Double.valueOf(((Integer) rd[16]).doubleValue()));
+            m.rawset("pendingDismiss", Boolean.valueOf(i == 2));
+            members.rawset(Double.valueOf(i + 1), m);
+        }
+        mock.rawset("members", members);
+        LuaManager.env.rawset("__previewSquadMock", mock);
+
+        pcallLua("""
+            local EmberUI = require "EmberUI"
+            EmberUI.Theme.applyPreset("ae2")
+            local Kernel = require "EmberRoutes/Kernel"
+            require "EmberRoutes/Squad/SquadKeys"
+            require "EmberRoutes/Squad/SquadService"
+            local SquadHUD = require "EmberRoutes/UI/SquadHUD"
+            require "EmberRoutes/UI/SquadWheel"
+            Kernel.onWorldReady()
+
+            local mock = _G.__previewSquadMock
+            local fourMembers = { mock.members[1], mock.members[2], mock.members[3], mock.members[4] }
+            local pExpanded = SquadHUD.openPreview({
+                x = 60, y = 36,
+                collapsed = false,
+                config = {
+                    formation = "WEDGE",
+                    spacing = "STANDARD",
+                    roe = "FREE_FIRE",
+                    cqb = false,
+                    orderMode = "FOLLOW",
+                    autoVehicle = true,
+                    anyInVehicle = true,
+                },
+                members = fourMembers,
+            })
+            local pCollapsed = SquadHUD.openPreview({
+                x = 420, y = 36,
+                collapsed = true,
+                config = {
+                    formation = "RING",
+                    spacing = "WIDE",
+                    roe = "RETURN_FIRE",
+                    cqb = true,
+                    orderMode = "HOLD_POSITION",
+                    autoVehicle = false,
+                    anyInVehicle = false,
+                },
+                members = mock.members,
+            })
+            local pScrollNotice = SquadHUD.openPreview({
+                x = 780, y = 36,
+                collapsed = false,
+                noticeText = mock.noticeFull,
+                noticeIsError = true,
+                config = {
+                    formation = "COLUMN",
+                    spacing = "TIGHT",
+                    roe = "HOLD_FIRE",
+                    cqb = true,
+                    orderMode = "HOLD_POSITION",
+                    autoVehicle = true,
+                    anyInVehicle = false,
+                },
+                members = mock.members,
+            })
+            _G.__previewSquad1 = pExpanded
+            _G.__previewSquad2 = pCollapsed
+            _G.__previewSquad3 = pScrollNotice
+            _G.__previewSquadMock = nil
+            """);
+        waitForAssets();
+
+        renderPreviewFrames(outDir.resolve("preview-squad-hud-" + lang + ".png"), false);
+
+        pcallLua("""
+            local Kernel = require "EmberRoutes/Kernel"
+            Kernel.teardown()
+            assert(_G.__previewSquad1.disposed == true, "Kernel.teardown must close expanded SquadHUD")
+            assert(_G.__previewSquad2.disposed == true, "Kernel.teardown must close collapsed SquadHUD")
+            assert(_G.__previewSquad3.disposed == true, "Kernel.teardown must close scroll SquadHUD")
+            _G.__previewSquad1 = nil
+            _G.__previewSquad2 = nil
+            _G.__previewSquad3 = nil
+            """);
+    }
+
     private static final Map<Character, Character> PREVIEW_S2T = Map.ofEntries(
         Map.entry('余', '餘'), Map.entry('烬', '燼'), Map.entry('实', '實'), Map.entry('时', '時'),
         Map.entry('仓', '倉'), Map.entry('储', '儲'), Map.entry('与', '與'), Map.entry('划', '劃'),
@@ -810,7 +958,21 @@ public final class PreviewModule1 {
         Map.entry('还', '還'), Map.entry('运', '運'), Map.entry('过', '過'), Map.entry('达', '達'),
         Map.entry('给', '給'), Map.entry('级', '級'), Map.entry('组', '組'), Map.entry('织', '織'),
         Map.entry('统', '統'), Map.entry('维', '維'), Map.entry('网', '網'), Map.entry('络', '絡'),
-        Map.entry('称', '稱'), Map.entry('钉', '釘'), Map.entry('锯', '鋸'), Map.entry('锤', '錘')
+        Map.entry('称', '稱'), Map.entry('钉', '釘'), Map.entry('锯', '鋸'), Map.entry('锤', '錘'),
+        Map.entry('严', '嚴'), Map.entry('仅', '僅'), Map.entry('会', '會'), Map.entry('伤', '傷'),
+        Map.entry('准', '準'), Map.entry('击', '擊'), Map.entry('卫', '衛'), Map.entry('发', '發'),
+        Map.entry('围', '圍'), Map.entry('战', '戰'), Map.entry('术', '術'), Map.entry('独', '獨'), Map.entry('现', '現'),
+        Map.entry('紧', '緊'), Map.entry('纵', '縱'), Map.entry('续', '續'), Map.entry('职', '職'),
+        Map.entry('补', '補'), Map.entry('记', '記'), Map.entry('请', '請'), Map.entry('车', '車'),
+        Map.entry('辆', '輛'), Map.entry('阵', '陣'), Map.entry('隐', '隱'), Map.entry('显', '顯'),
+        Map.entry('驶', '駛'), Map.entry('驻', '駐'), Map.entry('稳', '穩'), Map.entry('队', '隊'),
+        Map.entry('悬', '懸'), Map.entry('义', '義'), Map.entry('莲', '蓮'), Map.entry('萨', '薩'),
+        Map.entry('尔', '爾'), Map.entry('条', '條'), Map.entry('试', '試'), Map.entry('误', '誤'),
+        Map.entry('认', '認'), Map.entry('许', '許'), Map.entry('词', '詞'), Map.entry('逻', '邏'),
+        Map.entry('联', '聯'), Map.entry('团', '團'), Map.entry('压', '壓'), Map.entry('极', '極'),
+        Map.entry('气', '氣'), Map.entry('简', '簡'), Map.entry('筛', '篩'), Map.entry('粮', '糧'),
+        Map.entry('纳', '納'), Map.entry('结', '結'), Map.entry('继', '繼'), Map.entry('缓', '緩'),
+        Map.entry('这', '這'), Map.entry('间', '間'), Map.entry('鲜', '鮮')
     );
 
     private static float isoX(float gx, float gy) {

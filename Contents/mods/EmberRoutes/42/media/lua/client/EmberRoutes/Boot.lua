@@ -5,9 +5,13 @@ require "EmberRoutes/Settlement/SettlementStore"
 require "EmberRoutes/Warehouse/WarehouseWatcher"
 require "EmberRoutes/Npc/NpcLocomotionPort"
 require "EmberRoutes/Npc/NpcRuntime"
+require "EmberRoutes/Squad/SquadKeys"
+require "EmberRoutes/Squad/SquadService"
 require "EmberRoutes/Compat/HaloTextGuard"
 require "EmberRoutes/UI/NpcMedicalPanel"
 require "EmberRoutes/UI/NpcInventoryPanel"
+require "EmberRoutes/UI/SquadHUD"
+require "EmberRoutes/UI/SquadWheel"
 require "EmberRoutes/UI/NpcContextMenu"
 require "EmberRoutes/UI/DebugContextMenu"
 
@@ -18,8 +22,11 @@ Kernel.setBootOrder({
     "warehouse",
     "npc-runtime",
     "npc-locomotion",
+    "squad-service",
     "npc-medical",
     "npc-inventory",
+    "squad-hud",
+    "squad-wheel",
     "npc-context-menu",
     "debug-context-menu",
 })

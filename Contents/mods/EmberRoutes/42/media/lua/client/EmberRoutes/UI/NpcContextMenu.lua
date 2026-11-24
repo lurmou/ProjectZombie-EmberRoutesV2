@@ -1,6 +1,8 @@
 local Kernel = require "EmberRoutes/Kernel"
 local NpcRuntime = require "EmberRoutes/Npc/NpcRuntime"
 local NpcLocomotionPort = require "EmberRoutes/Npc/NpcLocomotionPort"
+local SquadService = require "EmberRoutes/Squad/SquadService"
+local SquadHUD = require "EmberRoutes/UI/SquadHUD"
 local NpcMedicalPanel = require "EmberRoutes/UI/NpcMedicalPanel"
 local NpcInventoryPanel = require "EmberRoutes/UI/NpcInventoryPanel"
 
@@ -95,18 +97,32 @@ local function onFillWorldMenu(playerIndex, context, worldobjects, test)
             end
         end
 
-        if NpcLocomotionPort.isFollowing(entry.id) then
+        if NpcLocomotionPort.isFollowing(entry.id) or SquadService.isMemberInSquad(entry.id) then
             context:addOption(
                 getText("ContextMenu_ER_Npc_StopFollowFmt", name),
                 entry.id,
-                NpcLocomotionPort.stopFollow
+                function(id)
+                    local res = SquadService.dismissMember(id)
+                    if res == "PENDING_STOP" then
+                        SquadHUD.showNotice(getText("IGUI_ER_Squad_NoticePendingStop"), false)
+                    end
+                end
             )
+            if not SquadHUD.isOpen() then
+                context:addOption(
+                    getText("ContextMenu_ER_Squad_OpenHud"),
+                    entry.id,
+                    function()
+                        SquadHUD.open()
+                    end
+                )
+            end
         else
             context:addOption(
                 getText("ContextMenu_ER_Npc_FollowFmt", name),
                 entry.id,
                 function(id)
-                    NpcLocomotionPort.follow(id, { playerIndex = playerIndex })
+                    SquadService.addMember(id, playerIndex)
                 end
             )
         end
