@@ -3,6 +3,7 @@ package emberroutes.npc;
 import emberroutes.npc.brain.BrainContext;
 import emberroutes.npc.brain.BrainRouter;
 import emberroutes.npc.brain.TempPropHelper;
+import emberroutes.npc.brain.VehicleCoRideHelper;
 import emberroutes.npc.perception.NpcPerception;
 import java.util.List;
 import zombie.GameTime;
@@ -85,6 +86,17 @@ public final class IsoNPC extends IsoPlayer {
         if (getFitness() != null) {
             getFitness().init();
         }
+    }
+
+    @Override
+    public void registerECSComponents() {
+        super.registerECSComponents();
+        // 0-@Patch 屏蔽真玩家键鼠/手柄输入窜扰，避免同车或车旁集体抢 E / 瞄准 / 换弹 / 隐藏光标
+        this.setECSComponent(new NpcNullInputComponent());
+    }
+
+    public NpcNullInputComponent getNullInputComponent() {
+        return getCharacterInputComponent() instanceof NpcNullInputComponent n ? n : null;
     }
 
     public String getNpcId() {
@@ -465,7 +477,7 @@ public final class IsoNPC extends IsoPlayer {
             setAsleep(false);
         }
         if (getVehicle() != null) {
-            getVehicle().exit(this);
+            VehicleCoRideHelper.forceDetachFromVehicle(this, "DEATH");
         }
         NpcManager.onNpcDeath(this);
         LuaEventManager.triggerEvent("OnCharacterDeath", this);
@@ -515,7 +527,8 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     protected void doDeferredMovement() {
-        if (!attached || getCurrentSquare() == null || isDead() || posture.isSuppressingDeferredMovement()) {
+        if (!attached || getCurrentSquare() == null || isDead()
+                || getVehicle() != null || posture.isSuppressingDeferredMovement()) {
             discardRootMotion();
             return;
         }

@@ -35,11 +35,13 @@ public class BrainContext {
     public boolean working;
     public UrgentNeed urgentNeed = UrgentNeed.NONE;
 
-    // 借用工具归还与当前动作/小队目标状态
+    // 借用工具归还与当前动作/小队/载具协同目标状态
     public boolean hasBorrowedTool;
     public BaseAction activeAction;
     public int followPlayerIndex = 0;
     public int followSlot = -1;
+    public boolean pendingDismissAfterExit;
+    public boolean manualExitVehicleRequested;
 
     public BrainContext(String npcId) {
         this.npcId = npcId;

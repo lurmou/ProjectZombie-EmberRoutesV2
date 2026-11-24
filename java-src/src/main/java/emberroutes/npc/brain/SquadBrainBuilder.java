@@ -3,15 +3,16 @@ package emberroutes.npc.brain;
 /**
  * 构建 {@code BrainMode.SQUAD} 征召随从状态树（完全屏蔽据点床铺 / 座椅 / 工种分配）。
  *
- * <p>M3-① 落地随从队列跟随叶（经起身屏障启动跟随、退出时安全停随）；M4（{@code EMB-30}）将在前侧扩展
- * {@code VEHICLE_CO_RIDE / EMERGENCY_SELF_DEFENSE / COMBAT_ENGAGE}。
+ * <p>EMB-19（M4-①）前置扩展最高优 {@code VEHICLE_CO_RIDE} 自动上下车分支，与常规四阵型队列跟随 {@code FORMATION_FOLLOW}；
+ * {@code EMB-30} 将在右侧继续扩展 {@code EMERGENCY_SELF_DEFENSE / COMBAT_ENGAGE}。
  */
 public final class SquadBrainBuilder {
     private SquadBrainBuilder() {}
 
     public static StateTreeRunner createRunner() {
+        StateNode vehicleLeaf = new VehicleCoRideNode();
         StateNode followLeaf = new FormationFollowNode();
-        StateNode root = new RootNode("SQUAD", new StateNode[]{followLeaf});
+        StateNode root = new RootNode("SQUAD", new StateNode[]{vehicleLeaf, followLeaf});
         return new StateTreeRunner(root);
     }
 

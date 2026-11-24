@@ -574,10 +574,10 @@ public final class EmberLocomotionController {
             resetStuckMonitor(npc);
             return;
         }
-        npc.setEmberControlActive(true);
-        npc.setNativeSmoothPathUnlock(true);
-
         if (npc.getVehicle() != null || !npc.getCharacterActions().isEmpty()) {
+            if (npc.getVehicle() != null) {
+                npc.setEmberControlActive(false);
+            }
             npc.clearManualMovementClamp();
             npc.setEmberDesiredRunning(false);
             npc.setEmberDesiredSprinting(false);
@@ -588,6 +588,8 @@ public final class EmberLocomotionController {
             resetStuckMonitor(npc);
             return;
         }
+        npc.setEmberControlActive(true);
+        npc.setNativeSmoothPathUnlock(true);
 
         pollAsyncPathResult(npc);
 

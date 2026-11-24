@@ -42,7 +42,8 @@ public final class EmberFollowGaitControl {
         if (rank <= 0) {
             return 0.0F;
         }
-        return (rank & 1) == 1 ? -0.95F : 0.95F;
+        int tier = (rank - 1) / 2;
+        return ((rank & 1) == 1 ? -1.0F : 1.0F) * (0.95F + 0.35F * tier);
     }
 
     static float columnBack(int rank) {
@@ -51,15 +52,25 @@ public final class EmberFollowGaitControl {
     }
 
     static float effectiveDistToLeader(int rank, float distToLeader) {
+        return effectiveDistToLeader(slotBack(rank), distToLeader);
+    }
+
+    static float effectiveDistToLeader(float nominalRadius, float distToLeader) {
         if (!Float.isFinite(distToLeader)) {
             return 0.0F;
         }
-        float rankOffset = Math.max(0.0F, slotBack(rank) - slotBack(0));
+        float safeNom = Float.isFinite(nominalRadius) ? nominalRadius : 1.60F;
+        float rankOffset = Math.max(0.0F, safeNom - 1.60F);
         return Math.max(0.0F, distToLeader - rankOffset);
     }
 
     static float catchUpEnterDist(int rank) {
         return Math.max(CATCHUP_DIRECT_ENTER, columnBack(rank) + 4.0F);
+    }
+
+    static float catchUpEnterDist(float nominalRadius) {
+        float safeNom = Float.isFinite(nominalRadius) ? nominalRadius : 1.60F;
+        return Math.max(CATCHUP_DIRECT_ENTER, safeNom + 4.50F);
     }
 
     private static final float MAX_VALID_STEP_DIST = 2.50F;

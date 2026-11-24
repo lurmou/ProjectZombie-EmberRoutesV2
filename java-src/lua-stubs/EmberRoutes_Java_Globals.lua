@@ -417,3 +417,60 @@ function EmberRoutesJava.clearContainerHighlight() end
 ---@return table
 function EmberRoutesJava.listNpcRoster() end
 
+---@return table
+function EmberRoutesJava.getSquadTacticalConfig() end
+
+---@param raw string
+---@return boolean
+function EmberRoutesJava.setSquadFormation(raw) end
+
+---@param raw string
+---@return boolean
+function EmberRoutesJava.setSquadSpacing(raw) end
+
+---@param raw string
+---@return boolean
+function EmberRoutesJava.setSquadRoe(raw) end
+
+---@param enabled boolean
+---@return boolean
+function EmberRoutesJava.setSquadCqb(enabled) end
+
+---@param raw string
+---@param playerIndex number
+---@return boolean
+function EmberRoutesJava.setSquadOrderMode(raw, playerIndex) end
+
+---@param enabled boolean
+---@return boolean
+function EmberRoutesJava.setSquadAutoVehicle(enabled) end
+
+---@param npcId string
+---@param rawOrNil string
+---@return boolean
+function EmberRoutesJava.setSquadMemberRoe(npcId, rawOrNil) end
+
+---@param npcId string
+---@param boolOrNil any
+---@return boolean
+function EmberRoutesJava.setSquadMemberCqb(npcId, boolOrNil) end
+
+---@param playerIndex number
+---@return string
+function EmberRoutesJava.commandSquadVehicleToggle(playerIndex) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.commandMemberExitVehicle(npcId) end
+
+---@param npcId string
+---@return string
+function EmberRoutesJava.dismissSquadMember(npcId) end
+
+---@return table
+function EmberRoutesJava.listSquadMembers() end
+
+---@param npcId string
+---@return any
+function EmberRoutesJava.getNpcPortraitTexture(npcId) end
+
