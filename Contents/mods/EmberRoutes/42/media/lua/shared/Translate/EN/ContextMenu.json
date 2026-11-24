@@ -26,6 +26,8 @@
     "ContextMenu_ER_M2_StopFollowAll": "Stop Following (All NPCs)",
     "ContextMenu_ER_Npc_FollowFmt": "Follow Me | %1",
     "ContextMenu_ER_Npc_StopFollowFmt": "Hold Position | %1",
+    "ContextMenu_ER_Npc_SetGuardFmt": "Assign as Settlement Guard | %1",
+    "ContextMenu_ER_Npc_ClearGuardFmt": "Clear Settlement Guard | %1",
     "ContextMenu_ER_Squad_OpenHud": "Show Squad HUD",
     "ContextMenu_ER_Npc_MedicalCheckFmt": "Medical Check | %1",
     "ContextMenu_ER_Npc_OpenInventoryFmt": "Open Backpack | %1",

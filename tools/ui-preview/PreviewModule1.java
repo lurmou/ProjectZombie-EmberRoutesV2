@@ -808,11 +808,13 @@ public final class PreviewModule1 {
         mock.rawset("noticeFull", isCn ? "目標載具乘客位已滿，無法繼續登車" : "Vehicle seats are all occupied");
         KahluaTable members = LuaManager.platform.newTable();
         Object[][] rows = {
-            {"npc_1", isCn ? "馬庫斯" : "Marcus Vance", isCn ? "尖兵壹號" : "Vanguard-1", true, 96.0, false, false, "MELEE", "MELEE", isCn ? "消防斧" : "Fire Axe", "FREE_FIRE", false, true, true, "FOLLOWING", false, -1},
-            {"npc_2", isCn ? "伊蓮娜" : "Elena Rostova", isCn ? "伊蓮娜" : "Elena", true, 54.0, false, true, "MEDIC", "UNARMED", "", "RETURN_FIRE", true, false, false, "HOLDING", false, -1},
-            {"npc_3", isCn ? "艾莉絲" : "Alice Mercer", isCn ? "渡鴉-2" : "Raven-2", true, 24.0, true, true, "RANGED", "FIREARM", isCn ? "M9手槍" : "M9 Pistol", "FREE_FIRE", false, false, false, "RIDING", true, 2},
-            {"npc_4", isCn ? "薩米爾" : "Samir Patel", isCn ? "薩米爾" : "Samir", false, 100.0, false, false, "SUPPORT", "MELEE", isCn ? "撬棍" : "Crowbar", "HOLD_FIRE", true, false, false, "OFFSCREEN", false, -1},
-            {"npc_5", isCn ? "諾亞" : "Noah Brooks", isCn ? "重錘" : "Anvil", true, 82.0, false, false, "MELEE", "MELEE", isCn ? "撬棍" : "Crowbar", "FREE_FIRE", false, true, false, "BOARDING", false, -1}
+            {"npc_1", isCn ? "馬庫斯" : "Marcus Vance", isCn ? "尖兵壹號" : "Vanguard-1", true, 96.0, false, false, "MELEE", "MELEE", isCn ? "消防斧" : "Fire Axe", "FREE_FIRE", false, true, true, "COMBAT", false, -1},
+            {"npc_2", isCn ? "伊蓮娜" : "Elena Rostova", isCn ? "伊蓮娜" : "Elena", true, 54.0, false, true, "MEDIC", "UNARMED", "", "RETURN_FIRE", true, false, false, "FIRST_AID", false, -1},
+            {"npc_3", isCn ? "艾莉絲" : "Alice Mercer", isCn ? "渡鴉-2" : "Raven-2", true, 78.0, false, false, "RANGED", "FIREARM", isCn ? "M9手槍" : "M9 Pistol", "FREE_FIRE", false, false, false, "RELOADING", false, -1},
+            {"npc_4", isCn ? "諾亞" : "Noah Brooks", isCn ? "重錘" : "Anvil", true, 82.0, false, false, "RANGED", "FIREARM", isCn ? "霰彈槍" : "Shotgun", "FREE_FIRE", false, true, true, "CQB_SWEEP", false, -1},
+            {"npc_5", isCn ? "萊恩" : "Ryan Mercer", isCn ? "後衛" : "Rearguard", true, 36.0, true, true, "SUPPORT", "MELEE", isCn ? "撬棍" : "Crowbar", "RETURN_FIRE", true, false, false, "RETREATING", false, -1},
+            {"npc_6", isCn ? "克萊爾" : "Claire Red", isCn ? "渡鴉-3" : "Raven-3", true, 88.0, false, false, "RANGED", "FIREARM", isCn ? "M9手槍" : "M9 Pistol", "FREE_FIRE", false, false, false, "RIDING", true, 2},
+            {"npc_7", isCn ? "薩米爾" : "Samir Patel", isCn ? "薩米爾" : "Samir", false, 100.0, false, false, "SUPPORT", "MELEE", isCn ? "撬棍" : "Crowbar", "HOLD_FIRE", true, false, false, "OFFSCREEN", false, -1}
         };
         for (int i = 0; i < rows.length; i++) {
             Object[] rd = rows[i];
@@ -881,6 +883,7 @@ public final class PreviewModule1 {
                 },
                 members = mock.members,
             })
+            local scrollMembers = { mock.members[5], mock.members[6], mock.members[7], mock.members[1], mock.members[2] }
             local pScrollNotice = SquadHUD.openPreview({
                 x = 780, y = 36,
                 collapsed = false,
@@ -895,7 +898,7 @@ public final class PreviewModule1 {
                     autoVehicle = true,
                     anyInVehicle = false,
                 },
-                members = mock.members,
+                members = scrollMembers,
             })
             _G.__previewSquad1 = pExpanded
             _G.__previewSquad2 = pCollapsed

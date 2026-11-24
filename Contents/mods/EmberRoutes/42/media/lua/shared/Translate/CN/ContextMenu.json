@@ -26,6 +26,8 @@
     "ContextMenu_ER_M2_StopFollowAll": "全员停止跟随",
     "ContextMenu_ER_Npc_FollowFmt": "跟随我 | %1",
     "ContextMenu_ER_Npc_StopFollowFmt": "原地待命 | %1",
+    "ContextMenu_ER_Npc_SetGuardFmt": "设为据点守卫 | %1",
+    "ContextMenu_ER_Npc_ClearGuardFmt": "取消据点守卫 | %1",
     "ContextMenu_ER_Squad_OpenHud": "显示随从小队面板",
     "ContextMenu_ER_Npc_MedicalCheckFmt": "医疗检查 | %1",
     "ContextMenu_ER_Npc_OpenInventoryFmt": "查看背包 | %1",

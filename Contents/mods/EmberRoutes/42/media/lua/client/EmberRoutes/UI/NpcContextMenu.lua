@@ -125,6 +125,15 @@ local function onFillWorldMenu(playerIndex, context, worldobjects, test)
                     SquadService.addMember(id, playerIndex)
                 end
             )
+            local isGuard = NpcRuntime.isGuardDuty(entry.id)
+            local guardKey = isGuard and "ContextMenu_ER_Npc_ClearGuardFmt" or "ContextMenu_ER_Npc_SetGuardFmt"
+            context:addOption(
+                getText(guardKey, name),
+                entry.id,
+                function(id)
+                    NpcRuntime.setGuardDuty(id, not isGuard)
+                end
+            )
         end
 
         local invOpt = context:addOption(
