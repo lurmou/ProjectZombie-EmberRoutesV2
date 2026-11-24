@@ -4,6 +4,8 @@ import emberroutes.npc.brain.BrainContext;
 import emberroutes.npc.brain.BrainRouter;
 import emberroutes.npc.brain.TempPropHelper;
 import emberroutes.npc.brain.VehicleCoRideHelper;
+import emberroutes.npc.combat.CombatHookContext;
+import emberroutes.npc.combat.NpcVirtualAim;
 import emberroutes.npc.perception.NpcPerception;
 import java.util.List;
 import zombie.GameTime;
@@ -13,10 +15,13 @@ import zombie.ai.states.PlayerStrafeState;
 import zombie.characters.IsoGameCharacter;
 import zombie.characters.IsoPlayer;
 import zombie.characters.SurvivorDesc;
+import zombie.core.physics.BallisticsController;
 import zombie.core.skinnedmodel.advancedanimation.AdvancedAnimator;
 import zombie.core.skinnedmodel.advancedanimation.AnimLayer;
 import zombie.core.skinnedmodel.advancedanimation.LiveAnimNode;
 import zombie.core.skinnedmodel.animation.AnimationTrack;
+import zombie.inventory.InventoryItem;
+import zombie.inventory.types.HandWeapon;
 import zombie.iso.IsoCamera;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoGridSquare;
@@ -24,6 +29,7 @@ import zombie.iso.IsoMovingObject;
 import zombie.iso.Vector2;
 import zombie.iso.sprite.IsoReticle;
 import zombie.iso.sprite.IsoReticleMode;
+import zombie.ui.UIManager;
 
 /**
  * 余烬商路非玩家槽 NPC 物理躯壳（IsoPlayer 子类）：
@@ -42,10 +48,15 @@ public final class IsoNPC extends IsoPlayer {
     private final NpcPerception perception;
     private final BrainRouter brain = new BrainRouter();
     private final BrainContext brainContext;
+    private final NpcVirtualAim virtualAim = new NpcVirtualAim();
+    private final BallisticsController.AimingVectorParameters npcAimingVectorParams =
+            new BallisticsController.AimingVectorParameters();
+    private final Vector2 virtualAimTempVec = new Vector2();
 
     private boolean attached;
     private boolean runningMode;
     private boolean forceLocalForRootMotion;
+    private boolean forceLocalForCombat;
 
     private volatile boolean nativeSmoothPathUnlock = true;
     private boolean emberControlActive;
@@ -309,7 +320,35 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public boolean isLocalPlayer() {
-        return forceLocalForRootMotion;
+        return forceLocalForRootMotion || forceLocalForCombat;
+    }
+
+    public boolean isForceLocalForCombat() {
+        return forceLocalForCombat;
+    }
+
+    public void setForceLocalForCombat(boolean forceLocalForCombat) {
+        this.forceLocalForCombat = forceLocalForCombat;
+    }
+
+    public NpcVirtualAim getVirtualAim() {
+        return virtualAim;
+    }
+
+    public boolean hasVirtualAim() {
+        return virtualAim.isActive();
+    }
+
+    public void clearVirtualAim() {
+        virtualAim.clear();
+    }
+
+    public int getVirtualReticleScreenX() {
+        return emberroutes.npc.combat.B42CombatRuntime.projectReticleScreenX(virtualAim);
+    }
+
+    public int getVirtualReticleScreenY() {
+        return emberroutes.npc.combat.B42CombatRuntime.projectReticleScreenY(virtualAim);
     }
 
     @Override
@@ -385,10 +424,29 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public boolean isStrafing() {
-        if (locomotion.isPrecisionShortStrafing()) {
+        if (locomotion.isPrecisionShortStrafing() || locomotion.isCombatAimStrafing()) {
             return true;
         }
         return super.isStrafing();
+    }
+
+    @Override
+    public boolean isWeaponReady() {
+        if (isHandModelOverriddenByCurrentCharacterAction()) {
+            return false;
+        }
+        InventoryItem primary = getPrimaryHandItem();
+        HandWeapon hw = (primary instanceof HandWeapon w) ? w : bareHands;
+        if (getUseHandWeapon() != hw) {
+            setUseHandWeapon(hw);
+        }
+        if (hw != null && hw.isAimedFirearm()) {
+            if (primaryHandModel == null || primaryHandModel.modelScript == null) {
+                return true;
+            }
+            return super.isWeaponReady();
+        }
+        return true;
     }
 
     @Override
@@ -425,11 +483,46 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public Vector2 getAimVector(Vector2 vec) {
+        if (virtualAim.isActive()) {
+            return vec.set(virtualAim.getAimDirX(), virtualAim.getAimDirY());
+        }
         return vec.set(getForwardDirectionX(), getForwardDirectionY());
     }
 
     @Override
     public void setAngleFromAim() {
+        if (virtualAim.isActive()) {
+            Vector2 dir = virtualAimTempVec.set(virtualAim.getAimDirX(), virtualAim.getAimDirY());
+            if (dir.getLengthSquared() > 1.0E-6F) {
+                dir.normalize();
+                BallisticsController bc = getBallisticsController();
+                if (bc != null && bc.updateAimingVector(this, npcAimingVectorParams)) {
+                    setTargetVerticalAimAngle(npcAimingVectorParams.desiredForwardPitchRads * (180.0F / (float) Math.PI));
+                } else {
+                    setTargetVerticalAimAngle(virtualAim.getPitchDegrees());
+                }
+                setForwardDirection(dir);
+                setDirectionAngle(virtualAim.getAimYawDeg());
+            }
+        }
+    }
+
+    /** 释放战斗态全部瞬态控制权与 C++ 弹道控制器（死亡/离屏/注销/重制统一收口）。 */
+    public void cleanupCombatResources() {
+        clearVirtualAim();
+        setIsAiming(false);
+        setForceLocalForCombat(false);
+        NpcNullInputComponent input = getNullInputComponent();
+        if (input != null) {
+            input.clearCombatIntents();
+        }
+        locomotion.clearCombatMove(this);
+        try {
+            BallisticsController bc = getBallisticsController();
+            if (bc != null) {
+                bc.releaseController();
+            }
+        } catch (Throwable ignored) {}
     }
 
     @Override
@@ -472,6 +565,7 @@ public final class IsoNPC extends IsoPlayer {
         posture.forceImmediateReset(this, "DEATH", true);
         follow.stop(this, "DEATH");
         locomotion.interrupt(this, "DEATH");
+        cleanupCombatResources();
         StopAllActionQueue();
         if (isAsleep()) {
             setAsleep(false);
@@ -499,6 +593,11 @@ public final class IsoNPC extends IsoPlayer {
         IsoGameCharacter cameraBefore = IsoCamera.getCameraCharacter();
         IsoReticle reticle = IsoReticle.getInstance(getIndex());
         IsoReticleMode reticleBefore = reticle != null ? reticle.getTargetReticleMode() : null;
+        int savedGameSpeed = -1;
+        if (UIManager.speedControls != null) {
+            savedGameSpeed = UIManager.speedControls.getCurrentGameSpeed();
+        }
+        CombatHookContext.enterNpcUpdate();
         try {
             if (!isDead()) {
                 posture.beforeUpdate(this);
@@ -512,7 +611,13 @@ public final class IsoNPC extends IsoPlayer {
             inPreMovementRatesPhase = true;
             super.update();
         } finally {
+            CombatHookContext.exitNpcUpdate();
             inPreMovementRatesPhase = false;
+            if (savedGameSpeed > 0
+                    && UIManager.speedControls != null
+                    && UIManager.speedControls.getCurrentGameSpeed() != savedGameSpeed) {
+                UIManager.speedControls.SetCurrentGameSpeed(savedGameSpeed);
+            }
             IsoPlayer.setInstance(playerBefore);
             if (cameraBefore == null) {
                 IsoCamera.clearCameraCharacter();

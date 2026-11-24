@@ -15,6 +15,7 @@ import zombie.iso.Vector2;
  */
 public final class NpcNullInputComponent extends CharacterInputComponent {
     private boolean combatStompIntent;
+    private boolean combatMeleeButtonIntent;
 
     public void setCombatStompIntent(boolean combatStompIntent) {
         this.combatStompIntent = combatStompIntent;
@@ -22,6 +23,19 @@ public final class NpcNullInputComponent extends CharacterInputComponent {
 
     public boolean isCombatStompIntent() {
         return combatStompIntent;
+    }
+
+    public void setCombatMeleeButtonIntent(boolean combatMeleeButtonIntent) {
+        this.combatMeleeButtonIntent = combatMeleeButtonIntent;
+    }
+
+    public boolean isCombatMeleeButtonIntent() {
+        return combatMeleeButtonIntent;
+    }
+
+    public void clearCombatIntents() {
+        this.combatStompIntent = false;
+        this.combatMeleeButtonIntent = false;
     }
 
     @Override
@@ -137,7 +151,7 @@ public final class NpcNullInputComponent extends CharacterInputComponent {
 
     @Override
     public boolean isMeleeButtonDown() {
-        return false;
+        return combatMeleeButtonIntent;
     }
 
     @Override
