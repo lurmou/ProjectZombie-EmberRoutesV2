@@ -335,13 +335,36 @@ class EmberFollowMathTest {
             fy[i] = leaderY - 1.0F * back + 0.0F * side;
         }
 
-        // 1A. 180° 掉头朝北 (0, -1)：原最末尾应接管最前排，且全局 2D 分配线段无交叉
-        int[] ranksNorth = EmberFormationMatcher.assignRanks(
+        // 1A. 180° 掉头朝北 (0, -1)：外翼展开型楔阵就地换向保持 0 交叉；领袖越过队尾反穿时原最末尾接管最前排且 0 交叉
+        int[] ranksNorthInPlace = EmberFormationMatcher.assignRanks(
                 n, fx, fy, fz, onStairs, null, leaderX, leaderY, 0.0F, 0.0F, -1.0F);
-        assertValidPermutation(ranksNorth, n);
-        assertTrue(ranksNorth[9] <= 2 && ranksNorth[8] <= 2 && ranksNorth[7] <= 2,
-                "Rear-most followers when facing South should take front-most ranks (0..2) after 180° turn");
-        assertNoSegmentCrossings(n, fx, fy, leaderX, leaderY, 0.0F, -1.0F, ranksNorth);
+        assertValidPermutation(ranksNorthInPlace, n);
+        assertNoSegmentCrossings(n, fx, fy, leaderX, leaderY, 0.0F, -1.0F, ranksNorthInPlace);
+
+        int[] ranksNorthPassed = EmberFormationMatcher.assignRanks(
+                n, fx, fy, fz, onStairs, null, leaderX, 91.5F, 0.0F, 0.0F, -1.0F);
+        assertValidPermutation(ranksNorthPassed, n);
+        assertTrue(ranksNorthPassed[9] <= 2 && ranksNorthPassed[8] <= 2 && ranksNorthPassed[7] <= 2,
+                "Rear-most followers should take front-most ranks (0..2) when leader reverses past the rear");
+        assertNoSegmentCrossings(n, fx, fy, leaderX, 91.5F, 0.0F, -1.0F, ranksNorthPassed);
+
+        // 共线纵队 (COLUMN) 180° 就地掉头：最末尾稳拿前排 0..2
+        float[] colX = new float[n];
+        float[] colY = new float[n];
+        float[] colZ = new float[n];
+        float[] colScratch = new float[2];
+        for (int i = 0; i < n; i++) {
+            EmberFormationMatcher.slotOffset(FormationType.COLUMN, i, n, 1.0F, colScratch);
+            colX[i] = leaderX;
+            colY[i] = leaderY - colScratch[0];
+        }
+        int[] colNorth = EmberFormationMatcher.assignRanks(
+                n, colX, colY, colZ, onStairs, null, null,
+                FormationType.COLUMN, FormationSpacing.STANDARD, true,
+                leaderX, leaderY, 0.0F, 0.0F, -1.0F);
+        assertValidPermutation(colNorth, n);
+        assertTrue(colNorth[9] <= 2 && colNorth[8] <= 2 && colNorth[7] <= 2,
+                "Column rear-most followers should take front-most ranks (0..2) on 180° reversal");
 
         // 1B. 90° 转弯朝东 (1, 0)：验证全局双射与零交叉
         int[] ranksEast = EmberFormationMatcher.assignRanks(

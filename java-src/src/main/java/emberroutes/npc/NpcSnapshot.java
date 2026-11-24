@@ -20,6 +20,7 @@ import zombie.inventory.types.WeaponType;
 import zombie.iso.IsoWorld;
 import zombie.scripting.objects.ItemBodyLocation;
 import zombie.scripting.objects.ResourceLocation;
+import zombie.vehicles.BaseVehicle;
 
 /**
  * NPC 全量二进制原件快照（外观、描述、数值状态、身体损伤、经验特质、ModData、背包与嵌套容器、穿戴/挂载/主副手持索引）。
@@ -211,7 +212,15 @@ public final class NpcSnapshot {
         NpcSnapshot s = new NpcSnapshot();
         s.npcId = npc.getNpcId();
         s.displayName = npc.getDescriptor() != null ? npc.getDescriptor().getForename() : npc.getUsername();
-        if (npc.getPosture().hasSafeStandPos()) {
+        BaseVehicle seatedVeh = npc.getVehicle();
+        if (seatedVeh != null) {
+            // 热存盘时保持乘员留在车内，但快照坐标写为车门外安全站立点（读档复生绝不嵌进车身或高空坠落）
+            org.joml.Vector3f safePos = emberroutes.npc.brain.VehicleCoRideHelper.computeSafeOutsidePoint(
+                    seatedVeh, seatedVeh.getSeat(npc), npc);
+            s.x = safePos.x;
+            s.y = safePos.y;
+            s.z = safePos.z;
+        } else if (npc.getPosture().hasSafeStandPos()) {
             s.x = npc.getPosture().getSafeStandX();
             s.y = npc.getPosture().getSafeStandY();
             s.z = npc.getPosture().getSafeStandZ();

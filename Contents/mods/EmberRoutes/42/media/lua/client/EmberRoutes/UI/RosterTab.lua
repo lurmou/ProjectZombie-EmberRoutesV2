@@ -5,6 +5,7 @@ local CachedList = require "EmberUI/Widgets/CachedList"
 
 local CategoryCatalog = require "EmberRoutes/UI/CategoryCatalog"
 local NpcRuntime = require "EmberRoutes/Npc/NpcRuntime"
+local SquadService = require "EmberRoutes/Squad/SquadService"
 local NpcInventoryPanel = require "EmberRoutes/UI/NpcInventoryPanel"
 local NpcMedicalPanel = require "EmberRoutes/UI/NpcMedicalPanel"
 
@@ -165,8 +166,11 @@ end
 
 function TabCtrl:onToggleBrainMode()
     if not self.selectedNpc then return end
-    local nextMode = (self.selectedNpc.brainMode == "SQUAD") and "SETTLEMENT" or "SQUAD"
-    NpcRuntime.setBrainMode(self.selectedNpc.npcId, nextMode)
+    if self.selectedNpc.brainMode == "SQUAD" then
+        SquadService.dismissMember(self.selectedNpc.npcId)
+    else
+        SquadService.addMember(self.selectedNpc.npcId, 0)
+    end
     self:refreshRoster()
 end
 
@@ -180,7 +184,7 @@ end
 function TabCtrl:onOpenInventory()
     if not self.selectedNpc then return end
     local player = getSpecificPlayer and getSpecificPlayer(0)
-    local npcObj = NpcRuntime.getObject(self.selectedNpc.npcId)
+    local npcObj = NpcRuntime.getLiveObject(self.selectedNpc.npcId)
     if player and npcObj then
         NpcInventoryPanel.open(player, npcObj)
     end
@@ -189,7 +193,7 @@ end
 function TabCtrl:onOpenMedical()
     if not self.selectedNpc then return end
     local player = getSpecificPlayer and getSpecificPlayer(0)
-    local npcObj = NpcRuntime.getObject(self.selectedNpc.npcId)
+    local npcObj = NpcRuntime.getLiveObject(self.selectedNpc.npcId)
     if player and npcObj then
         NpcMedicalPanel.open(player, npcObj)
     end

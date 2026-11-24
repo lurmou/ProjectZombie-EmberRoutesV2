@@ -1,8 +1,15 @@
 package emberroutes;
 
+import emberroutes.npc.FormationSpacing;
+import emberroutes.npc.FormationType;
 import emberroutes.npc.IsoNPC;
 import emberroutes.npc.NpcManager;
+import emberroutes.npc.NpcPortraitBakery;
 import emberroutes.npc.NpcPostureController;
+import emberroutes.npc.RulesOfEngagement;
+import emberroutes.npc.SquadTacticalConfig;
+import emberroutes.npc.SquadTacticalConfig.OrderMode;
+import emberroutes.npc.SquadTacticalConfig.VehicleCommandMode;
 import emberroutes.npc.brain.DeliveryOrderManager;
 import emberroutes.npc.brain.LogisticsWorkDutyProvider;
 import emberroutes.warehouse.ContainerDirtyQueue;
@@ -17,6 +24,7 @@ import java.util.List;
 import se.krka.kahlua.j2se.J2SEPlatform;
 import se.krka.kahlua.vm.KahluaTable;
 import se.krka.kahlua.vm.KahluaTableIterator;
+import zombie.core.textures.Texture;
 import zombie.inventory.ItemContainer;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoObject;
@@ -701,5 +709,139 @@ public final class EmberRoutesBridge {
             out.rawset(Double.valueOf(i + 1), row);
         }
         return out;
+    }
+
+    // ==================== 9. EMB-19 小队战术指挥、编队与载具协同 ====================
+
+    public static KahluaTable getSquadTacticalConfig() {
+        KahluaTable out = J2SEPlatform.getInstance().newTable();
+        out.rawset("formation", SquadTacticalConfig.getFormation().name());
+        out.rawset("spacing", SquadTacticalConfig.getSpacing().name());
+        out.rawset("roe", SquadTacticalConfig.getDefaultRoe().name());
+        out.rawset("cqb", Boolean.valueOf(SquadTacticalConfig.isDefaultCqb()));
+        out.rawset("orderMode", SquadTacticalConfig.getOrderMode().name());
+        out.rawset("autoVehicle", Boolean.valueOf(SquadTacticalConfig.isAutoVehicle()));
+        out.rawset("vehicleOverride", SquadTacticalConfig.getVehicleOverride().name());
+        out.rawset("version", Double.valueOf(SquadTacticalConfig.getVersion()));
+        out.rawset("anyInVehicle", Boolean.valueOf(NpcManager.isAnySquadMemberInVehicle()));
+        out.rawset("hasHoldAnchor", Boolean.valueOf(SquadTacticalConfig.hasHoldAnchor()));
+        return out;
+    }
+
+    public static boolean setSquadFormation(String raw) {
+        FormationType parsed = FormationType.fromString(raw, null);
+        return parsed != null && SquadTacticalConfig.setFormation(parsed);
+    }
+
+    public static boolean setSquadSpacing(String raw) {
+        FormationSpacing parsed = FormationSpacing.fromString(raw, null);
+        return parsed != null && SquadTacticalConfig.setSpacing(parsed);
+    }
+
+    public static boolean setSquadRoe(String raw) {
+        RulesOfEngagement parsed = RulesOfEngagement.fromString(raw, null);
+        return parsed != null && SquadTacticalConfig.setDefaultRoe(parsed);
+    }
+
+    public static boolean setSquadCqb(boolean enabled) {
+        return SquadTacticalConfig.setDefaultCqb(enabled);
+    }
+
+    public static boolean setSquadOrderMode(String raw, double playerIndex) {
+        OrderMode parsed = OrderMode.fromString(raw, null);
+        if (parsed == null) {
+            return false;
+        }
+        if (parsed == OrderMode.HOLD_POSITION) {
+            NpcManager.computeAndSetHoldAnchor((int) Math.round(playerIndex));
+            return true;
+        }
+        if (SquadTacticalConfig.getVehicleOverride() == VehicleCommandMode.FORCE_EXIT) {
+            SquadTacticalConfig.clearManualVehicleOverride();
+        }
+        return SquadTacticalConfig.setOrderMode(OrderMode.FOLLOW);
+    }
+
+    public static boolean setSquadAutoVehicle(boolean enabled) {
+        return SquadTacticalConfig.setAutoVehicle(enabled);
+    }
+
+    public static boolean setSquadMemberRoe(String npcId, String rawOrNil) {
+        if (npcId == null || npcId.isEmpty()) {
+            return false;
+        }
+        if (rawOrNil == null || rawOrNil.isBlank() || "INHERIT".equalsIgnoreCase(rawOrNil.trim())) {
+            SquadTacticalConfig.setMemberRoeOverride(npcId, null);
+            return true;
+        }
+        RulesOfEngagement parsed = RulesOfEngagement.fromString(rawOrNil, null);
+        if (parsed == null) {
+            return false;
+        }
+        SquadTacticalConfig.setMemberRoeOverride(npcId, parsed);
+        return true;
+    }
+
+    public static boolean setSquadMemberCqb(String npcId, Object boolOrNil) {
+        if (npcId == null || npcId.isEmpty()) {
+            return false;
+        }
+        if (boolOrNil == null) {
+            SquadTacticalConfig.setMemberCqbOverride(npcId, null);
+            return true;
+        }
+        if (boolOrNil instanceof Boolean b) {
+            SquadTacticalConfig.setMemberCqbOverride(npcId, b);
+            return true;
+        }
+        return false;
+    }
+
+    public static String commandSquadVehicleToggle(double playerIndex) {
+        return NpcManager.commandSquadVehicleToggle((int) Math.round(playerIndex));
+    }
+
+    public static boolean commandMemberExitVehicle(String npcId) {
+        return NpcManager.commandMemberExitVehicle(npcId);
+    }
+
+    public static String dismissSquadMember(String npcId) {
+        return NpcManager.requestDismissFromSquad(npcId);
+    }
+
+    public static KahluaTable listSquadMembers() {
+        List<NpcManager.SquadMemberView> list = NpcManager.listSquadMembers();
+        J2SEPlatform platform = J2SEPlatform.getInstance();
+        KahluaTable out = platform.newTable();
+        for (int i = 0; i < list.size(); i++) {
+            NpcManager.SquadMemberView m = list.get(i);
+            KahluaTable row = platform.newTable();
+            row.rawset("npcId", m.npcId());
+            row.rawset("displayName", m.displayName());
+            row.rawset("phasedIn", Boolean.valueOf(m.phasedIn()));
+            row.rawset("health", Double.valueOf(m.health()));
+            row.rawset("bleeding", Boolean.valueOf(m.bleeding()));
+            row.rawset("injured", Boolean.valueOf(m.injured()));
+            row.rawset("tacticalRole", m.tacticalRole());
+            row.rawset("weaponType", m.weaponType());
+            row.rawset("weaponName", m.weaponName());
+            row.rawset("effectiveRoe", m.effectiveRoe());
+            row.rawset("roeOverridden", Boolean.valueOf(m.roeOverridden()));
+            row.rawset("effectiveCqb", Boolean.valueOf(m.effectiveCqb()));
+            row.rawset("cqbOverridden", Boolean.valueOf(m.cqbOverridden()));
+            row.rawset("activityState", m.activityState());
+            row.rawset("inVehicle", Boolean.valueOf(m.inVehicle()));
+            row.rawset("vehicleSeat", Double.valueOf(m.vehicleSeat()));
+            row.rawset("pendingDismiss", Boolean.valueOf(m.pendingDismiss()));
+            row.rawset("x", Double.valueOf(m.x()));
+            row.rawset("y", Double.valueOf(m.y()));
+            row.rawset("z", Double.valueOf(m.z()));
+            out.rawset(Double.valueOf(i + 1), row);
+        }
+        return out;
+    }
+
+    public static Texture getNpcPortraitTexture(String npcId) {
+        return NpcPortraitBakery.getPortraitTexture(npcId);
     }
 }
