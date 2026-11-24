@@ -21,6 +21,12 @@ public final class EmberPostureMath {
     public static final float BED_LYING_UNDERSIDE_WORLD_Y = 0.44F;
     public static final float SEATING_BASE_OFFSET_WORLD_Y = 0.35F;
     public static final float MAX_BED_RENDER_LIFT_Z = 0.45F;
+    /** 对齐原版 {@code PathFindBehavior2.update()} 末段到达判定半径（格）。 */
+    public static final float PRECISION_ARRIVE_RADIUS = 0.05F;
+    /** 对齐原版 {@code PathFindBehavior2.isStrafing()} 无瞄准短距侧移步距离阈值（{@code distSq < 0.25F}）。 */
+    public static final float PRECISION_SHORT_STRAFE_DIST = 0.50F;
+    /** 对齐原版 {@code PathFindBehavior2.update()} 停步余量收敛基础步长（{@code 0.005F * mult}）。 */
+    public static final float PRECISION_STOP_CREEP_BASE = 0.005F;
 
     public enum BedFacing {
         N(0, -1),
@@ -466,5 +472,57 @@ public final class EmberPostureMath {
             raw = Math.copySign(0.22F, signedAngleRad);
         }
         return raw;
+    }
+
+    /**
+     * 1:1 对齐原版 {@code PathFindBehavior2.update()} 终段根位移对齐与停步收敛：
+     * <ul>
+     *   <li>行进阶段（{@code stopping=false}）：取本帧动画根位移模长，严格沿直指锚点方向推进 {@code min(rawLen, dist)}；</li>
+     *   <li>停步余量阶段（{@code stopping=true}）：动画根位移未完全归零前，每帧按 {@code min(dist, 0.005F * mult)} 平稳抹平最后几厘米。</li>
+     * </ul>
+     */
+    public static float[] computePrecisionRootMotion(
+            float curX, float curY,
+            float targetX, float targetY,
+            float rawDx, float rawDy,
+            boolean stopping,
+            float gameTimeMultiplier) {
+        float dx = targetX - curX;
+        float dy = targetY - curY;
+        float dist = (float) Math.hypot(dx, dy);
+        if (!Float.isFinite(dist) || dist <= 1.0E-5F) {
+            return new float[]{0.0F, 0.0F};
+        }
+        float rawLen = (float) Math.hypot(rawDx, rawDy);
+        if (!Float.isFinite(rawLen) || rawLen <= 1.0E-5F) {
+            return new float[]{0.0F, 0.0F};
+        }
+        float step = stopping
+                ? Math.min(dist, PRECISION_STOP_CREEP_BASE * Math.max(0.1F, gameTimeMultiplier))
+                : Math.min(rawLen, dist);
+        return new float[]{(dx / dist) * step, (dy / dist) * step};
+    }
+
+    /**
+     * 在多候选并发可见性图寻路回包后，按 C++ 路径终节点匹配最接近的合法入座/停靠候选索引；超出容差返回 {@code -1}。
+     */
+    public static int matchNearestPrecisionCandidate(
+            float endX, float endY, float[] pathXs, float[] pathYs, int count, float maxDistSq) {
+        if (pathXs == null || pathYs == null || count <= 0) {
+            return -1;
+        }
+        int limit = Math.min(count, Math.min(pathXs.length, pathYs.length));
+        int bestIdx = -1;
+        float bestDistSq = maxDistSq;
+        for (int i = 0; i < limit; i++) {
+            float dx = pathXs[i] - endX;
+            float dy = pathYs[i] - endY;
+            float dSq = dx * dx + dy * dy;
+            if (dSq <= bestDistSq) {
+                bestDistSq = dSq;
+                bestIdx = i;
+            }
+        }
+        return bestIdx;
     }
 }

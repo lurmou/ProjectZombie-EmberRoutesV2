@@ -30,6 +30,7 @@ public final class EmberCorridor {
         WAYPOINT,
         PORTAL_ENTRY,
         PORTAL_EXIT,
+        PRECISION_APPROACH,
         STAIR,
         GOAL
     }
@@ -63,6 +64,7 @@ public final class EmberCorridor {
         public boolean isBarrier() {
             return kind == NodeKind.PORTAL_ENTRY
                     || kind == NodeKind.PORTAL_EXIT
+                    || kind == NodeKind.PRECISION_APPROACH
                     || kind == NodeKind.STAIR
                     || kind == NodeKind.GOAL;
         }
@@ -82,6 +84,7 @@ public final class EmberCorridor {
             CorridorNode activePortal) {}
 
     private final List<CorridorNode> nodes;
+    private final boolean precisionGoal;
     private int index;
     private float segStartX;
     private float segStartY;
@@ -89,12 +92,22 @@ public final class EmberCorridor {
     private int lastLevel = Integer.MIN_VALUE;
 
     private EmberCorridor(List<CorridorNode> nodes, float startX, float startY, int startZ) {
+        this(nodes, startX, startY, startZ, false);
+    }
+
+    private EmberCorridor(
+            List<CorridorNode> nodes, float startX, float startY, int startZ, boolean precisionGoal) {
         this.nodes = nodes;
+        this.precisionGoal = precisionGoal;
         this.index = 0;
         this.segStartX = startX;
         this.segStartY = startY;
         this.segStartZ = startZ;
         this.lastLevel = startZ;
+    }
+
+    public boolean isPrecisionGoal() {
+        return precisionGoal;
     }
 
     /** 构造同层净空直达走廊（0 帧延迟快通）。 */
@@ -106,13 +119,24 @@ public final class EmberCorridor {
         if (escapeStart != null && escapeStart.adjusted()) {
             list.add(simpleNode(escapeStart.x(), escapeStart.y(), escapeStart.z(), NodeKind.ESCAPE));
         }
-        float dx = goalX - startX;
-        float dy = goalY - startY;
-        float len = (float) Math.hypot(dx, dy);
-        float nx = len > 1.0E-4F ? dx / len : 1.0F;
-        float ny = len > 1.0E-4F ? dy / len : 0.0F;
-        list.add(new CorridorNode(goalX, goalY, goalZ, NodeKind.GOAL, nx, ny, 0, 0, 0, 0));
-        return new EmberCorridor(list, startX, startY, startZ);
+        appendGoal(list, goalX, goalY, goalZ, startX, startY);
+        return new EmberCorridor(list, startX, startY, startZ, false);
+    }
+
+    /** 构造精密锚点同层直达走廊：先过可达入口点再沿直线停靠真实锚点。 */
+    public static EmberCorridor buildDirectPrecision(
+            float startX, float startY, int startZ,
+            EmberTargetProjector.ProjectedPoint escapeStart,
+            float pathX, float pathY,
+            float exactGoalX, float exactGoalY, int exactGoalZ) {
+        List<CorridorNode> list = new ArrayList<>(4);
+        if (escapeStart != null && escapeStart.adjusted()) {
+            list.add(simpleNode(escapeStart.x(), escapeStart.y(), escapeStart.z(), NodeKind.ESCAPE));
+        }
+        float refX = list.isEmpty() ? startX : list.get(list.size() - 1).x;
+        float refY = list.isEmpty() ? startY : list.get(list.size() - 1).y;
+        appendPrecisionTail(list, exactGoalX, exactGoalY, exactGoalZ, pathX, pathY, refX, refY);
+        return new EmberCorridor(list, startX, startY, startZ, true);
     }
 
     public boolean isAtFinalGoal() {
@@ -140,12 +164,31 @@ public final class EmberCorridor {
             float[] rawXyz,
             EmberTargetProjector.ProjectedPoint escapeStart,
             float exactGoalX, float exactGoalY, int exactGoalZ) {
+        Path scratch = toScratchPath(rawXyz);
+        return scratch == null ? null : fromNativePath(actor, scratch, escapeStart, exactGoalX, exactGoalY, exactGoalZ);
+    }
+
+    /** 从后台线程寻路结果编译精密停靠门户走廊：末尾显式经由 {@code (pathX, pathY)} 收敛至 {@code (exactGoalX, exactGoalY)}。 */
+    public static EmberCorridor fromRawCoordsPrecision(
+            IsoPlayer actor,
+            float[] rawXyz,
+            EmberTargetProjector.ProjectedPoint escapeStart,
+            float pathX, float pathY,
+            float exactGoalX, float exactGoalY, int exactGoalZ) {
+        Path scratch = toScratchPath(rawXyz);
+        return scratch == null
+                ? null
+                : fromNativePathInternal(
+                        actor, scratch, escapeStart, true, pathX, pathY, exactGoalX, exactGoalY, exactGoalZ);
+    }
+
+    private static Path toScratchPath(float[] rawXyz) {
         if (rawXyz == null || rawXyz.length < 3) return null;
         Path scratch = new Path();
         for (int i = 0; i + 2 < rawXyz.length; i += 3) {
             scratch.addNode(rawXyz[i], rawXyz[i + 1], rawXyz[i + 2]);
         }
-        return fromNativePath(actor, scratch, escapeStart, exactGoalX, exactGoalY, exactGoalZ);
+        return scratch;
     }
 
     /** 将原版 C++ PathfindNative 返回的节点序列编译为门户走廊。 */
@@ -154,9 +197,20 @@ public final class EmberCorridor {
             Path rawPath,
             EmberTargetProjector.ProjectedPoint escapeStart,
             float exactGoalX, float exactGoalY, int exactGoalZ) {
+        return fromNativePathInternal(
+                actor, rawPath, escapeStart, false, exactGoalX, exactGoalY, exactGoalX, exactGoalY, exactGoalZ);
+    }
+
+    private static EmberCorridor fromNativePathInternal(
+            IsoPlayer actor,
+            Path rawPath,
+            EmberTargetProjector.ProjectedPoint escapeStart,
+            boolean precisionMode,
+            float pathX, float pathY,
+            float exactGoalX, float exactGoalY, int exactGoalZ) {
         if (rawPath == null || rawPath.isEmpty()) return null;
         int n = rawPath.size();
-        List<CorridorNode> out = new ArrayList<>(n + 4);
+        List<CorridorNode> out = new ArrayList<>(n + 5);
 
         float actorX = actor != null ? actor.getX() : rawPath.getNode(0).x;
         float actorY = actor != null ? actor.getY() : rawPath.getNode(0).y;
@@ -212,7 +266,11 @@ public final class EmberCorridor {
                             continue;
                         }
                     } else {
-                        appendGoal(out, exactGoalX, exactGoalY, exactGoalZ, exitX, exitY);
+                        if (precisionMode) {
+                            appendPrecisionTail(out, exactGoalX, exactGoalY, exactGoalZ, pathX, pathY, exitX, exitY);
+                        } else {
+                            appendGoal(out, exactGoalX, exactGoalY, exactGoalZ, exitX, exitY);
+                        }
                         break;
                     }
                     i += 2;
@@ -230,7 +288,11 @@ public final class EmberCorridor {
             if (i == n - 1) {
                 float refX = out.isEmpty() ? actorX : out.get(out.size() - 1).x;
                 float refY = out.isEmpty() ? actorY : out.get(out.size() - 1).y;
-                appendGoal(out, exactGoalX, exactGoalY, exactGoalZ, refX, refY);
+                if (precisionMode) {
+                    appendPrecisionTail(out, exactGoalX, exactGoalY, exactGoalZ, pathX, pathY, refX, refY);
+                } else {
+                    appendGoal(out, exactGoalX, exactGoalY, exactGoalZ, refX, refY);
+                }
             } else {
                 float dx = rawPath.getNode(i + 1).x - cur.x;
                 float dy = rawPath.getNode(i + 1).y - cur.y;
@@ -244,9 +306,13 @@ public final class EmberCorridor {
         }
 
         if (out.isEmpty()) {
-            appendGoal(out, exactGoalX, exactGoalY, exactGoalZ, actorX, actorY);
+            if (precisionMode) {
+                appendPrecisionTail(out, exactGoalX, exactGoalY, exactGoalZ, pathX, pathY, actorX, actorY);
+            } else {
+                appendGoal(out, exactGoalX, exactGoalY, exactGoalZ, actorX, actorY);
+            }
         }
-        EmberCorridor corridor = new EmberCorridor(out, actorX, actorY, actorZ);
+        EmberCorridor corridor = new EmberCorridor(out, actorX, actorY, actorZ, precisionMode);
         corridor.advanceInitialNodes(actorX, actorY, actorZ);
         return corridor;
     }
@@ -317,10 +383,13 @@ public final class EmberCorridor {
                 float dx = cur.x - x;
                 float dy = cur.y - y;
                 float dist = (float) Math.hypot(dx, dy);
-                float rIn = EmberParams.ARRIVE_RADIUS;
+                float rIn = precisionGoal ? EmberPostureMath.PRECISION_ARRIVE_RADIUS : EmberParams.ARRIVE_RADIUS;
                 if (dist <= rIn) {
                     index = nodes.size();
                     return true;
+                }
+                if (precisionGoal) {
+                    return false;
                 }
                 float segDx = cur.x - segStartX;
                 float segDy = cur.y - segStartY;
@@ -508,6 +577,11 @@ public final class EmberCorridor {
                 float lat = Math.abs(dx * node.normalY - dy * node.normalX);
                 yield dist <= 0.20F || (fwd >= 0.0F && lat <= 0.60F);
             }
+            case PRECISION_APPROACH -> {
+                float fwd = dx * node.normalX + dy * node.normalY;
+                float lat = Math.abs(dx * node.normalY - dy * node.normalX);
+                yield dist <= 0.14F || (fwd >= -0.02F && lat <= 0.20F);
+            }
             case STAIR -> {
                 if (dist <= 0.32F) {
                     yield true;
@@ -684,5 +758,24 @@ public final class EmberCorridor {
         float nx = len > 1.0E-4F ? dx / len : 1.0F;
         float ny = len > 1.0E-4F ? dy / len : 0.0F;
         out.add(new CorridorNode(gx, gy, gz, NodeKind.GOAL, nx, ny, 0, 0, 0, 0));
+    }
+
+    private static void appendPrecisionTail(
+            List<CorridorNode> out,
+            float exactGoalX, float exactGoalY, int exactGoalZ,
+            float pathX, float pathY,
+            float refX, float refY) {
+        if (Math.hypot(exactGoalX - pathX, exactGoalY - pathY) > EmberPostureMath.PRECISION_ARRIVE_RADIUS
+                && Math.hypot(pathX - refX, pathY - refY) > 0.12F) {
+            float dx = exactGoalX - pathX;
+            float dy = exactGoalY - pathY;
+            float len = (float) Math.hypot(dx, dy);
+            float nx = len > 1.0E-4F ? dx / len : 1.0F;
+            float ny = len > 1.0E-4F ? dy / len : 0.0F;
+            out.add(new CorridorNode(pathX, pathY, exactGoalZ, NodeKind.PRECISION_APPROACH, nx, ny, 0, 0, 0, 0));
+            appendGoal(out, exactGoalX, exactGoalY, exactGoalZ, pathX, pathY);
+        } else {
+            appendGoal(out, exactGoalX, exactGoalY, exactGoalZ, refX, refY);
+        }
     }
 }

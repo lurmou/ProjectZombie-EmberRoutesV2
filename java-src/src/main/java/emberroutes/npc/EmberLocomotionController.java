@@ -1,16 +1,20 @@
 package emberroutes.npc;
 
+import java.util.List;
 import zombie.GameTime;
 import zombie.ai.AIBrainPlayerControlVars;
 import zombie.ai.astar.Mover;
+import zombie.ai.states.PlayerStrafeState;
 import zombie.characters.IsoPlayer;
 import zombie.characters.component.AIComponent;
 import zombie.iso.IsoGridSquare;
+import zombie.iso.Vector2;
 import zombie.pathfind.IPathfinder;
 import zombie.pathfind.Path;
 import zombie.pathfind.PathFindBehavior2;
 import zombie.pathfind.PathNode;
 import zombie.pathfind.PolygonalMap2;
+import zombie.pathfind.nativeCode.PathFindRequest;
 import zombie.pathfind.nativeCode.PathfindNative;
 
 /**
@@ -37,11 +41,20 @@ public final class EmberLocomotionController {
         SPRINT
     }
 
+    /**
+     * 精密锚点停靠候选目标：
+     * {@code (pathX, pathY)} 为可见性图可达站位（实心家具按原版外推 0.30 格），
+     * {@code (exactX, exactY)} 为 {@code SeatingManager} 等原版状态进入时的真实精确落点。
+     */
+    public record PrecisionTarget(
+            float pathX, float pathY, float exactX, float exactY, int z, int tag, IsoGridSquare ignoreSquare) {}
+
     private static final float STUCK_CHECK_WINDOW_SEC = 0.55F;
     private static final float STUCK_MIN_DISP = 0.14F;
     private static final int MAX_REPATH_RETRIES = 3;
     private static final int MAX_PATH_SUBMITS_PER_FRAME = 2;
     private static final long FAILED_GOAL_COOLDOWN_MS = 800L;
+    private static final long PRECISION_STOP_MAX_MS = 350L;
 
     private static volatile int framePathSubmitsRemaining = MAX_PATH_SUBMITS_PER_FRAME;
     private static volatile long frameBudgetResetMs;
@@ -109,6 +122,16 @@ public final class EmberLocomotionController {
     private long moveSeq;
     private long settledSeq;
 
+    private boolean precisionMode;
+    private PrecisionTarget[] precisionCandidates;
+    private PrecisionTarget activePrecisionTarget;
+    private int resolvedPrecisionTag = -1;
+    private IsoGridSquare ignoreCollisionSquare;
+    private boolean precisionShortStrafing;
+    private boolean precisionStopping;
+    private long precisionStopStartedMs;
+    private final Vector2 scratchDeferred = new Vector2();
+
     String formatCorridorNode() {
         return corridor != null ? corridor.formatCurrentNode() : "NONE";
     }
@@ -133,6 +156,18 @@ public final class EmberLocomotionController {
 
     public synchronized String getLastReason() {
         return lastReason;
+    }
+
+    public synchronized int getResolvedPrecisionTag() {
+        return resolvedPrecisionTag;
+    }
+
+    public boolean shouldIgnoreCollisionWithSquare(IsoGridSquare square) {
+        return square != null && precisionMode && ignoreCollisionSquare != null && ignoreCollisionSquare == square;
+    }
+
+    public boolean isPrecisionShortStrafing() {
+        return active && precisionMode && precisionShortStrafing && !precisionStopping;
     }
 
     public static void beginFramePathBudget() {
@@ -212,6 +247,7 @@ public final class EmberLocomotionController {
     }
 
     public void holdFollowIdle(IsoNPC npc, boolean sneaking) {
+        clearPrecisionState(npc, true);
         active = false;
         arrivedLatched = false;
         cruiseMode = false;
@@ -248,18 +284,12 @@ public final class EmberLocomotionController {
         liveReasonTag = "HOLD";
     }
 
-    public long moveTo(IsoNPC npc, double rawX, double rawY, double rawZ, boolean running) {
-        if (npc == null || npc.isDead()) {
-            return -1L;
-        }
-
-        final long seq;
-        synchronized (this) {
-            seq = ++moveSeq;
-        }
-
+    private void prepareExplicitTripVars(IsoNPC npc, Gait gait, boolean running) {
         npc.setRunningMode(running);
-        this.desiredGait = running ? Gait.RUN : Gait.WALK;
+        if (!running) {
+            npc.setSneaking(false);
+        }
+        this.desiredGait = gait;
         this.desiredWalkSpeedCap = -1.0F;
         this.desiredTrackSpeedScale = 1.0F;
         this.cruiseMode = false;
@@ -269,6 +299,20 @@ public final class EmberLocomotionController {
         this.steerLeaderMoving = false;
         portalActuator.setPortalPolicy(true, true, 0.0F);
         portalActuator.setLeaderPortalGate(false, 0.0F, 0.0F, 0);
+    }
+
+    public long moveTo(IsoNPC npc, double rawX, double rawY, double rawZ, boolean running) {
+        if (npc == null || npc.isDead()) {
+            return -1L;
+        }
+        clearPrecisionState(npc, true);
+
+        final long seq;
+        synchronized (this) {
+            seq = ++moveSeq;
+        }
+
+        prepareExplicitTripVars(npc, running ? Gait.RUN : Gait.WALK, running);
 
         EmberTargetProjector.ProjectedPoint goalProj =
                 EmberTargetProjector.projectGoal(npc, (float) rawX, (float) rawY, (float) rawZ);
@@ -322,6 +366,105 @@ public final class EmberLocomotionController {
     }
 
     /**
+     * 1:1 对齐原版 {@code PathFindBehavior2.pathToSitOnFurniture} 的精密锚点停靠：
+     * <ol>
+     *   <li>支持向后台 {@code PathfindNative} 提交多候选可达点 {@code targetXyz}，自动选择实际可达且路网最短一侧；</li>
+     *   <li>若目标位于实心家具格内，自动经过外部可达点再由 {@code shouldIgnoreCollisionWithSquare} 放行进座；</li>
+     *   <li>终段支持原版 {@code < 0.50F} 无瞄准短距侧移步，并按 {@code 0.05F} 到达半径 + {@code 0.005F} 停步收敛。</li>
+     * </ol>
+     */
+    public long moveToExact(
+            IsoNPC npc, List<PrecisionTarget> candidates, IsoGridSquare ignoreSquare) {
+        if (npc == null || npc.isDead() || candidates == null || candidates.isEmpty()) {
+            return -1L;
+        }
+
+        final long seq;
+        synchronized (this) {
+            seq = ++moveSeq;
+        }
+
+        clearPrecisionState(npc, true);
+        PrecisionTarget[] candArray = candidates.toArray(new PrecisionTarget[0]);
+        PrecisionTarget primary = candArray[0];
+
+        prepareExplicitTripVars(npc, Gait.WALK, false);
+
+        this.precisionMode = true;
+        this.precisionCandidates = candArray;
+        lockActivePrecisionTarget(primary);
+        this.corridor = null;
+        this.active = true;
+        this.arrivedLatched = false;
+        this.repathStreak = 0;
+
+        npc.setEmberControlActive(true);
+        npc.setNativeSmoothPathUnlock(true);
+        cancelVanillaPathBehavior(npc);
+        contextSteering.reset();
+
+        synchronized (this) {
+            this.status = Status.MOVING;
+            this.lastReason = "MOVING_EXACT";
+        }
+        resetStuckMonitor(npc);
+
+        int curZ = EmberTargetProjector.levelOf(npc.getZ());
+        PrecisionTarget alreadyDocked = null;
+        float bestDockDist = EmberPostureMath.PRECISION_ARRIVE_RADIUS;
+        for (PrecisionTarget c : candArray) {
+            if (c.z() == curZ) {
+                float d = (float) Math.hypot(c.exactX() - npc.getX(), c.exactY() - npc.getY());
+                if (d <= bestDockDist) {
+                    bestDockDist = d;
+                    alreadyDocked = c;
+                }
+            }
+        }
+        if (alreadyDocked != null) {
+            lockActivePrecisionTarget(alreadyDocked);
+            latchArrived(npc);
+            return seq;
+        }
+
+        EmberTargetProjector.ProjectedPoint startProj = EmberTargetProjector.projectStartIfTrapped(npc);
+        this.pendingEscapeStart = startProj;
+
+        if ((startProj == null || !startProj.adjusted()) && PolygonalMap2.instance != null) {
+            PrecisionTarget bestDirect = null;
+            float bestDirectDist = Float.MAX_VALUE;
+            for (PrecisionTarget c : candArray) {
+                if (c.z() != curZ) {
+                    continue;
+                }
+                if (!PolygonalMap2.instance.lineClearCollide(
+                        npc.getX(), npc.getY(), c.pathX(), c.pathY(), curZ, npc, false, true)) {
+                    float d = (float) Math.hypot(c.exactX() - npc.getX(), c.exactY() - npc.getY());
+                    if (d < bestDirectDist) {
+                        bestDirectDist = d;
+                        bestDirect = c;
+                    }
+                }
+            }
+            if (bestDirect != null) {
+                lockActivePrecisionTarget(bestDirect);
+                cancelAsyncRequest(npc);
+                this.corridor = EmberCorridor.buildDirectPrecision(
+                        npc.getX(), npc.getY(), curZ, null,
+                        bestDirect.pathX(), bestDirect.pathY(),
+                        bestDirect.exactX(), bestDirect.exactY(), bestDirect.z());
+                activateShortStrafeIfEligible(npc);
+                return seq;
+            }
+        }
+
+        EmberTargetProjector.ProjectedPoint effectiveStart =
+                startProj != null ? startProj : new EmberTargetProjector.ProjectedPoint(npc.getX(), npc.getY(), curZ, false);
+        submitAsyncPathRequestInternal(npc, effectiveStart, primary.pathX(), primary.pathY(), primary.z(), candArray);
+        return seq;
+    }
+
+    /**
      * 双缓冲动态改标（专用于连续跟随）：
      * 发起新异步路径请求时不清空现有 corridor，等后台 C++ PathfindNative 回包再原子热切，避免改标顿步；
      * 不递增 moveSeq（不触发静默点对点回调误报）。
@@ -340,6 +483,7 @@ public final class EmberLocomotionController {
         if (npc == null || npc.isDead()) {
             return false;
         }
+        clearPrecisionState(npc, true);
 
         EmberTargetProjector.ProjectedPoint goalProj =
                 EmberTargetProjector.projectGoal(npc, rawX, rawY, rawZ);
@@ -447,6 +591,27 @@ public final class EmberLocomotionController {
 
         pollAsyncPathResult(npc);
 
+        if (precisionStopping && active && precisionMode) {
+            npc.setPrecisionDockClamp(goalX, goalY, goalZ, true);
+            npc.setEmberDesiredRunning(false);
+            npc.setEmberDesiredSprinting(false);
+            npc.setEmberWalkSpeedCap(-1.0F);
+            npc.setEmberTrackSpeedScale(1.0F);
+            applyZeroMoveInput(npc);
+            npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
+            npc.getDeferredMovement(scratchDeferred);
+            float remDist = (float) Math.hypot(goalX - npc.getX(), goalY - npc.getY());
+            long elapsed = System.currentTimeMillis() - precisionStopStartedMs;
+            if ((scratchDeferred.getLength() <= 1.0E-4F && remDist <= EmberPostureMath.PRECISION_ARRIVE_RADIUS)
+                    || elapsed >= PRECISION_STOP_MAX_MS) {
+                precisionStopping = false;
+                precisionShortStrafing = false;
+                npc.clearPrecisionDockClamp();
+                latchArrived(npc);
+            }
+            return;
+        }
+
         if (pendingDeferredRetarget && active && !asyncInFlight && tryConsumeFramePathBudget()) {
             pendingDeferredRetarget = false;
             EmberTargetProjector.ProjectedPoint sp = EmberTargetProjector.projectStartIfTrapped(npc);
@@ -507,6 +672,21 @@ public final class EmberLocomotionController {
                 inRunGear = false;
                 liveReasonTag = "CRUISE_END";
                 applyIdleHold(npc, false);
+            } else if (precisionMode) {
+                npc.getDeferredMovement(scratchDeferred);
+                precisionShortStrafing = false;
+                if (scratchDeferred.getLength() > 1.0E-4F) {
+                    precisionStopping = true;
+                    precisionStopStartedMs = System.currentTimeMillis();
+                    npc.setPrecisionDockClamp(goalX, goalY, goalZ, true);
+                    npc.setEmberDesiredRunning(false);
+                    npc.setEmberDesiredSprinting(false);
+                    applyZeroMoveInput(npc);
+                    npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
+                } else {
+                    npc.clearPrecisionDockClamp();
+                    latchArrived(npc);
+                }
             } else {
                 latchArrived(npc);
             }
@@ -587,8 +767,10 @@ public final class EmberLocomotionController {
             }
         }
 
-        EmberContextSteering.SteerOutput avoid =
-                contextSteering.evaluate(npc, rawDirX, rawDirY, steerLeader, steerLeaderMoving);
+        boolean bypassAvoidForPrecisionDock = precisionMode && corridor.isAtFinalGoal() && sample.distToGoal() <= 0.65F;
+        EmberContextSteering.SteerOutput avoid = bypassAvoidForPrecisionDock
+                ? new EmberContextSteering.SteerOutput(rawDirX, rawDirY, 1.0F, false)
+                : contextSteering.evaluate(npc, rawDirX, rawDirY, steerLeader, steerLeaderMoving);
         if (avoid.yielding()) {
             if (nearStairs) {
                 long nowMs = System.currentTimeMillis();
@@ -773,10 +955,25 @@ public final class EmberLocomotionController {
         this.liveAnimScalar = animSpeedScalar;
         this.liveTurnGain = turnGain;
 
+        if (precisionMode && corridor.isAtFinalGoal()) {
+            if (!precisionShortStrafing && sample.distToGoal() <= 0.45F && absErrRad > Math.toRadians(35.0)) {
+                precisionShortStrafing = true;
+            }
+            if (precisionShortStrafing || sample.distToGoal() <= 0.60F) {
+                npc.setPrecisionDockClamp(goalX, goalY, goalZ, false);
+            } else {
+                npc.clearPrecisionDockClamp();
+            }
+        } else if (precisionMode) {
+            npc.clearPrecisionDockClamp();
+        }
+
         driveNativeCharacter(
                 npc, steerX, steerY, wantSneak, inRunOnlyGear, inSprintGear,
                 animSpeedScalar, turnGain, desiredWalkSpeedCap, desiredTrackSpeedScale);
-        if (EmberParams.END_CLAMP_ENABLED) {
+        if (precisionMode) {
+            npc.clearManualMovementClamp();
+        } else if (EmberParams.END_CLAMP_ENABLED) {
             npc.setManualMovementClamp(sample.clampX(), sample.clampY(), sample.clampZ(), sample.clampIsGoal());
         } else {
             npc.clearManualMovementClamp();
@@ -845,6 +1042,7 @@ public final class EmberLocomotionController {
     }
 
     private void stopInternal(IsoNPC npc) {
+        clearPrecisionState(npc, false);
         active = false;
         arrivedLatched = false;
         cruiseMode = false;
@@ -884,6 +1082,12 @@ public final class EmberLocomotionController {
     private void submitAsyncPathRequest(
             IsoNPC npc, EmberTargetProjector.ProjectedPoint startPt,
             float targetX, float targetY, int targetZ) {
+        submitAsyncPathRequestInternal(npc, startPt, targetX, targetY, targetZ, null);
+    }
+
+    private void submitAsyncPathRequestInternal(
+            IsoNPC npc, EmberTargetProjector.ProjectedPoint startPt,
+            float targetX, float targetY, int targetZ, PrecisionTarget[] candidates) {
         boolean useNative = PathfindNative.useNativeCode && PathfindNative.instance != null;
         if (!useNative && PolygonalMap2.instance == null) {
             failTrip(npc, Status.NO_PATH, "NO_PATHFINDER");
@@ -939,7 +1143,14 @@ public final class EmberLocomotionController {
         };
 
         if (useNative) {
-            PathfindNative.instance.addRequest(cb, npc, sx, sy, sz, targetX, targetY, targetZ);
+            PathFindRequest req = PathfindNative.instance.addRequest(cb, npc, sx, sy, sz, targetX, targetY, targetZ);
+            if (req != null && candidates != null && candidates.length > 1) {
+                for (int i = 1; i < candidates.length; i++) {
+                    req.targetXyz.add(candidates[i].pathX());
+                    req.targetXyz.add(candidates[i].pathY());
+                    req.targetXyz.add((float) candidates[i].z());
+                }
+            }
         } else {
             PolygonalMap2.instance.addRequest(cb, npc, sx, sy, sz, targetX, targetY, targetZ);
         }
@@ -973,7 +1184,23 @@ public final class EmberLocomotionController {
             }
         }
         if (raw != null) {
-            EmberCorridor built = EmberCorridor.fromRawCoords(npc, raw, pendingEscapeStart, reqGoalX, reqGoalY, reqGoalZ);
+            EmberCorridor built;
+            if (precisionMode && precisionCandidates != null && precisionCandidates.length > 0 && raw.length >= 3) {
+                float endX = raw[raw.length - 3];
+                float endY = raw[raw.length - 2];
+                PrecisionTarget matched = resolveMatchedPrecisionCandidate(endX, endY, precisionCandidates);
+                lockActivePrecisionTarget(matched);
+                built = EmberCorridor.fromRawCoordsPrecision(
+                        npc, raw, pendingEscapeStart,
+                        matched.pathX(), matched.pathY(),
+                        matched.exactX(), matched.exactY(), matched.z());
+                if (built != null) {
+                    this.corridor = built;
+                    activateShortStrafeIfEligible(npc);
+                }
+            } else {
+                built = EmberCorridor.fromRawCoords(npc, raw, pendingEscapeStart, reqGoalX, reqGoalY, reqGoalZ);
+            }
             if (built != null) {
                 if (EmberStairDiag.ENABLED && EmberStairDiag.isNearStairs(npc)) {
                     String oldNode = this.corridor != null ? this.corridor.formatCurrentNode() : "NONE";
@@ -1009,10 +1236,21 @@ public final class EmberLocomotionController {
             return;
         }
         corridor = null;
+        precisionShortStrafing = false;
+        precisionStopping = false;
+        if (npc != null) {
+            npc.clearPrecisionDockClamp();
+        }
         applyZeroMoveInput(npc);
         npc.setEmberTrackSpeedScale(1.0F);
         npc.setEmberMotionState(false, 0.30F, EmberParams.TURN_GAIN);
-        submitAsyncPathRequest(npc, EmberTargetProjector.projectStartIfTrapped(npc), goalX, goalY, goalZ);
+        EmberTargetProjector.ProjectedPoint startPt = EmberTargetProjector.projectStartIfTrapped(npc);
+        if (precisionMode && precisionCandidates != null && precisionCandidates.length > 0) {
+            PrecisionTarget primary = precisionCandidates[0];
+            submitAsyncPathRequestInternal(npc, startPt, primary.pathX(), primary.pathY(), primary.z(), precisionCandidates);
+        } else {
+            submitAsyncPathRequest(npc, startPt, goalX, goalY, goalZ);
+        }
     }
 
     private void latchArrived(IsoNPC npc) {
@@ -1027,6 +1265,8 @@ public final class EmberLocomotionController {
         corridor = null;
         smoothedThrottle = 0.0F;
         inRunGear = false;
+        precisionShortStrafing = false;
+        precisionStopping = false;
         resetDiagObservers();
         liveReasonTag = "ARRIVED";
         applyIdleHold(npc, true);
@@ -1038,6 +1278,7 @@ public final class EmberLocomotionController {
     }
 
     private void failTrip(IsoNPC npc, Status failStatus, String reason) {
+        clearPrecisionState(npc, false);
         active = false;
         arrivedLatched = false;
         cruiseMode = false;
@@ -1057,6 +1298,62 @@ public final class EmberLocomotionController {
             lastReason = reason;
             settledSeq = moveSeq;
         }
+    }
+
+    private void clearPrecisionState(IsoNPC npc, boolean resetResolvedTag) {
+        this.precisionMode = false;
+        this.precisionCandidates = null;
+        this.activePrecisionTarget = null;
+        this.ignoreCollisionSquare = null;
+        this.precisionShortStrafing = false;
+        this.precisionStopping = false;
+        this.precisionStopStartedMs = 0L;
+        if (resetResolvedTag) {
+            synchronized (this) {
+                this.resolvedPrecisionTag = -1;
+            }
+        }
+        if (npc != null) {
+            npc.clearPrecisionDockClamp();
+        }
+    }
+
+    private void lockActivePrecisionTarget(PrecisionTarget target) {
+        this.activePrecisionTarget = target;
+        if (target.ignoreSquare() != null) {
+            this.ignoreCollisionSquare = target.ignoreSquare();
+        }
+        this.goalX = target.exactX();
+        this.goalY = target.exactY();
+        this.goalZ = target.z();
+        synchronized (this) {
+            this.resolvedPrecisionTag = target.tag();
+        }
+    }
+
+    private void activateShortStrafeIfEligible(IsoNPC npc) {
+        if (!precisionMode || corridor == null || npc == null) {
+            return;
+        }
+        if (corridor.getNodeCount() == 1
+                && corridor.isAtFinalGoal()
+                && Math.hypot(goalX - npc.getX(), goalY - npc.getY()) < EmberPostureMath.PRECISION_SHORT_STRAFE_DIST) {
+            this.precisionShortStrafing = true;
+            npc.setPrecisionDockClamp(goalX, goalY, goalZ, false);
+        }
+    }
+
+    private static PrecisionTarget resolveMatchedPrecisionCandidate(
+            float endX, float endY, PrecisionTarget[] candidates) {
+        int n = candidates.length;
+        float[] xs = new float[n];
+        float[] ys = new float[n];
+        for (int i = 0; i < n; i++) {
+            xs[i] = candidates[i].pathX();
+            ys[i] = candidates[i].pathY();
+        }
+        int matched = EmberPostureMath.matchNearestPrecisionCandidate(endX, endY, xs, ys, n, 2.25F);
+        return candidates[matched >= 0 ? matched : 0];
     }
 
     public String getLiveDebugLine(IsoNPC npc) {
@@ -1096,6 +1393,10 @@ public final class EmberLocomotionController {
         cancelVanillaPathBehavior(npc);
         if (!npc.isAiming() && !npc.isStrafing()) {
             npc.setDirectionAngle((float) Math.toDegrees(Math.atan2(dirY, dirX)));
+        }
+        if (npc.isStrafing()) {
+            npc.set(PlayerStrafeState.STRAFE_SPEED, 1.0F);
+            npc.setVariable("StrafeSpeed", 1.0F);
         }
         npc.playerMoveDir.set(dirX, dirY);
         npc.setJustMoved(true);

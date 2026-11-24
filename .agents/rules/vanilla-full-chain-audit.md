@@ -28,6 +28,11 @@ description: 原版 B42 引擎全链路前置通读铁律：固化本地完整 J
 - **严禁被动按症状挤牙膏**：在写任何一行设计或代码前，必须从引擎帧入口自顶向下把**整条端到端调用树**一次性画全并核实所有分支。
   - *示例（角色每帧生命周期）*：`preupdate()` -> `update()` -> `updateInternal1()` -> `updateInternal2()`（输入冲刷、`MoveVars`、`AIComponent.postUpdatePlayer`）-> `IsoLivingCharacter.update()` -> `IsoGameCharacter.update()`（`updateMovementRates` / `calculateWalkSpeed` -> `applyDeltas` / `getTurnDelta` -> `updateAnimPlayer` -> `doDeferredMovement` / `getDeferredMovement`）-> `postupdate()`。
 - **未读完全链路不得下结论或动手写代码**：凡未核查原版同场景（如真玩家键鼠/右键“移动至”/原版 TimedAction）完整执行链的方案，一律视为准备不足。
+- **动工前必须先输出《原版全链路对照表》再写代码**：凡涉及任何原版机制的新模块开发、重构或对齐修复，在动笔改代码之前必须先向用户列出结构化对照表，至少逐项写清：
+  1. **机制/环节**（入口、门控/距离/遮挡校验、动作与动画事件、时长/消耗/副作用公式、正常结束与异常打断/卸载回收）；
+  2. **原版源码依据**（`zombie反编译源码` / `media/lua` / `media/AnimSets` 的具体文件、方法与行号）；
+  3. **本次拟实现方式**（直接复用原版类/方法，或因非玩家槽位等硬限制做 1:1 等价对齐）；
+  4. **是否存在刻意差异与原因**（凡有省略、近似或绕行，必须在表中明示并等用户确认，严禁未经核对凭经验抄近道）。
 - **骨骼/根位移开关必验全程关键帧**：凡启用 `m_DeferredBoneName`、`m_useDeferedRotation` 等直接改写骨骼变换或反旋转的引擎开关时，必须将引擎源码公式代入目标动画的**起点、中段、终点全程关键帧**逐段验算，严禁只对比首尾两帧就下结论。
 
 ## 3. 尊重原版玩法、复用原版链路与机制（严禁自作聪明抄近道，也不机械照抄错配参数）

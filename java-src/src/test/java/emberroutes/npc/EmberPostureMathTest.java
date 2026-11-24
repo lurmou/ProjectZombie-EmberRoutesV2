@@ -217,6 +217,49 @@ class EmberPostureMathTest {
         assertEquals(1.0F, EmberPostureMath.advanceAdapterProgress(0.95F, 0.08F, 0.80F), 1e-6F);
     }
 
+    @Test
+    void precisionRootMotionClampsOvershootRedirectsAndCreeps() {
+        // 1. 单步超射：严格钳位至剩余距离，零过冲
+        float[] clamped = EmberPostureMath.computePrecisionRootMotion(
+                10.0F, 20.0F, 10.03F, 20.04F, 0.08F, 0.00F, false, 1.0F);
+        assertEquals(0.03F, clamped[0], 1e-5F);
+        assertEquals(0.04F, clamped[1], 1e-5F);
+
+        // 2. 未到终点：保留原根位移模长 rawLen，但严格沿着指向目标的矢量推进
+        float[] redirected = EmberPostureMath.computePrecisionRootMotion(
+                10.0F, 20.0F, 10.0F, 20.30F, 0.03F, 0.04F, false, 1.0F);
+        assertEquals(0.0F, redirected[0], 1e-5F);
+        assertEquals(0.05F, redirected[1], 1e-5F);
+
+        // 3. 停步微调阶段（stopping=true）：仅在根位移非零时按 min(dist, 0.005F * mult) 抹平剩余偏差
+        float[] creep = EmberPostureMath.computePrecisionRootMotion(
+                10.0F, 20.0F, 10.04F, 20.0F, 0.02F, 0.0F, true, 1.0F);
+        assertEquals(EmberPostureMath.PRECISION_STOP_CREEP_BASE, creep[0], 1e-6F);
+        assertEquals(0.0F, creep[1], 1e-6F);
+
+        float[] creepFast = EmberPostureMath.computePrecisionRootMotion(
+                10.0F, 20.0F, 10.04F, 20.0F, 0.02F, 0.0F, true, 3.0F);
+        assertEquals(0.015F, creepFast[0], 1e-6F);
+        assertEquals(0.0F, creepFast[1], 1e-6F);
+
+        // 4. 根位移归零后停稳输出 (0, 0)
+        float[] settled = EmberPostureMath.computePrecisionRootMotion(
+                10.0F, 20.0F, 10.04F, 20.0F, 0.0F, 0.0F, true, 1.0F);
+        assertEquals(0.0F, settled[0], 1e-6F);
+        assertEquals(0.0F, settled[1], 1e-6F);
+    }
+
+    @Test
+    void matchNearestPrecisionCandidateSelectsClosestWithinTolerance() {
+        float[] xs = {6442.60F, 6441.70F, 6443.30F};
+        float[] ys = {5563.98F, 5563.58F, 5563.58F};
+
+        assertEquals(1, EmberPostureMath.matchNearestPrecisionCandidate(6441.68F, 5563.60F, xs, ys, 3, 2.25F));
+        assertEquals(0, EmberPostureMath.matchNearestPrecisionCandidate(6442.59F, 5563.99F, xs, ys, 3, 2.25F));
+        assertEquals(-1, EmberPostureMath.matchNearestPrecisionCandidate(6450.0F, 5570.0F, xs, ys, 3, 2.25F));
+        assertEquals(-1, EmberPostureMath.matchNearestPrecisionCandidate(6442.60F, 5563.98F, xs, ys, 0, 2.25F));
+    }
+
     private static List<BedSlot> verifyBedAllApproaches(
             BedFacing facing, int w, int h, int originX, int originY,
             int expectedSlots, int expectedSlot0Hx, int expectedSlot0Hy, int expectedSlot0Fx, int expectedSlot0Fy) {
