@@ -978,7 +978,7 @@ function SquadHudProto:onMouseWheel(del)
     if self.previewData or not self.view or not self.view.hasScrollbar then
         return false
     end
-    local nextOff = (self.scrollOffset or 0) - (del or 0)
+    local nextOff = (self.scrollOffset or 0) + (del or 0)
     nextOff = math.max(0, math.min(self.view.scrollMax or 0, nextOff))
     if nextOff ~= self.scrollOffset then
         self.scrollOffset = nextOff

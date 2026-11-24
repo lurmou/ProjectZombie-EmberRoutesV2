@@ -236,7 +236,7 @@ public final class EmberFormationMatcher {
     }
 
     /**
-     * 0-GC 原位四阵型动态双射求解器。
+     * 0-GC 原位四阵型动态双射求解器（按理想几何坐标匹配）。
      */
     public static void assignRanks(
             int count,
@@ -281,6 +281,67 @@ public final class EmberFormationMatcher {
             ws.slotY[s] = leaderY - uy * back + ux * side;
         }
 
+        solveWorldSlotAssignment(
+                count, followerX, followerY, followerZ, followerOnStairs,
+                prevAssignedRank, followerRoles, fmt, ignoreSticky,
+                leaderZ, ws.slotX, ws.slotY, null, outRanks, ws);
+    }
+
+    /**
+     * 0-GC 实位双射求解器：直接对 {@link SquadSlotSolver} 解算出的“连通/互斥/避障世界坐标槽位”执行匈牙利零交叉分配，
+     * 并对直线被车辆或墙体阻隔的槽位叠加越障绕行惩罚。
+     */
+    public static void assignRanksToWorldSlots(
+            int count,
+            float[] followerX,
+            float[] followerY,
+            float[] followerZ,
+            boolean[] followerOnStairs,
+            int[] prevAssignedRank,
+            TacticalRole[] followerRoles,
+            FormationType formation,
+            boolean ignoreSticky,
+            float leaderZ,
+            float[] worldSlotX,
+            float[] worldSlotY,
+            SquadSlotSolver.TerrainProbe obstacleProbe,
+            int[] outRanks,
+            RectangularHungarianWorkspace workspace) {
+        if (count <= 0 || outRanks == null || outRanks.length < count
+                || worldSlotX == null || worldSlotY == null
+                || worldSlotX.length < count || worldSlotY.length < count) {
+            return;
+        }
+        if (count == 1) {
+            outRanks[0] = 0;
+            return;
+        }
+
+        RectangularHungarianWorkspace ws = workspace != null ? workspace : new RectangularHungarianWorkspace(count);
+        ws.ensureCapacity(count);
+        FormationType fmt = formation != null ? formation : FormationType.WEDGE;
+        solveWorldSlotAssignment(
+                count, followerX, followerY, followerZ, followerOnStairs,
+                prevAssignedRank, followerRoles, fmt, ignoreSticky,
+                leaderZ, worldSlotX, worldSlotY, obstacleProbe, outRanks, ws);
+    }
+
+    private static void solveWorldSlotAssignment(
+            int count,
+            float[] followerX,
+            float[] followerY,
+            float[] followerZ,
+            boolean[] followerOnStairs,
+            int[] prevAssignedRank,
+            TacticalRole[] followerRoles,
+            FormationType fmt,
+            boolean ignoreSticky,
+            float leaderZ,
+            float[] slotX,
+            float[] slotY,
+            SquadSlotSolver.TerrainProbe obstacleProbe,
+            int[] outRanks,
+            RectangularHungarianWorkspace ws) {
         int leaderFloor = levelOf(leaderZ);
         for (int i = 0; i < count; i++) {
             ws.deficits[i] = computeProgressDeficit(
@@ -299,14 +360,18 @@ public final class EmberFormationMatcher {
             TacticalRole role = (followerRoles != null && i < followerRoles.length) ? followerRoles[i] : null;
             double[] row = ws.workCost[i];
             for (int s = 0; s < count; s++) {
-                double dx = fx - ws.slotX[s];
-                double dy = fy - ws.slotY[s];
+                float sx = slotX[s];
+                float sy = slotY[s];
+                double dx = fx - sx;
+                double dy = fy - sy;
                 double distSq = dx * dx + dy * dy;
                 double distCost = Math.sqrt(distSq) + 1.0E-5 * distSq;
                 double tierCost = (double) deficit * (double) (count - 1 - s) * TIER_SLOPE_WEIGHT;
                 double sticky = (prevRank == s) ? STICKY_BONUS : 0.0;
                 double rBias = roleBias(fmt, role, s, count);
-                row[s] = distCost + tierCost + sticky + rBias;
+                double obsPenalty = (obstacleProbe != null && deficit == 0.0F && !obstacleProbe.isSegmentClear(fx, fy, sx, sy))
+                        ? SquadSlotSolver.OBSTACLE_CROSSING_PENALTY : 0.0;
+                row[s] = distCost + tierCost + sticky + rBias + obsPenalty;
             }
         }
 

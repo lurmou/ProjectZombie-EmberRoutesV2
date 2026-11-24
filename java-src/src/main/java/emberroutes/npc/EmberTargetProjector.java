@@ -132,6 +132,83 @@ public final class EmberTargetProjector {
         return PolygonalMap2.instance.canStandAt(x, y, z, actor, false, true);
     }
 
+    /**
+     * 严苛阵型站立校验（传 {@code closeToWalls = false} 启用原版 0.30 格墙体/闭合门/实体障碍安全边距，
+     * 并叠加多边形载具包围框与禁停楼梯格过滤，杜绝贴墙角或灌木门缝内产生永远无法精确抵达的假落点）。
+     */
+    public static boolean canStandFormationSlot(IsoPlayer actor, float x, float y, int z) {
+        if (!Float.isFinite(x) || !Float.isFinite(y)) {
+            return false;
+        }
+        int tx = (int) Math.floor(x);
+        int ty = (int) Math.floor(y);
+        IsoGridSquare sq = getSquare(tx, ty, z);
+        if (sq == null || !sq.TreatAsSolidFloor() || sq.isSolid() || sq.isSolidTrans() || sq.HasStairs()) {
+            return false;
+        }
+        if (EmberStairDiag.isStairOrExitTile(tx, ty, z)) {
+            return false;
+        }
+        if (PolygonalMap2.instance == null) {
+            return true;
+        }
+        return PolygonalMap2.instance.canStandAt(x, y, z, actor, false, false);
+    }
+
+    /** 是否为无树木/无灌木的开阔地面（对齐 B42 SquareUpdateTask 灌木通行代价比对）。 */
+    public static boolean isOpenGround(float x, float y, int z) {
+        IsoGridSquare sq = getSquare((int) Math.floor(x), (int) Math.floor(y), z);
+        return sq != null && !sq.HasTree() && !sq.hasBush();
+    }
+
+    /** 校验连续线段在阵型严格边距与载具多边形下是否净空。 */
+    public static boolean isFormationSegmentClear(IsoPlayer actor, float x1, float y1, float x2, float y2, int z) {
+        return PolygonalMap2.instance == null
+                || !PolygonalMap2.instance.lineClearCollide(x1, y1, x2, y2, z, actor, false, false);
+    }
+
+    /** 校验两相邻格在连通分量扩展中是否可无翻越/无穿墙/无切角安全步进（含载具与围栏过滤）。 */
+    public static boolean canStepFormationTile(IsoPlayer actor, int fromTx, int fromTy, int toTx, int toTy, int z) {
+        int dx = toTx - fromTx;
+        int dy = toTy - fromTy;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1 || (dx == 0 && dy == 0)) {
+            return false;
+        }
+        if (!canStepSingleEdge(actor, fromTx, fromTy, toTx, toTy, z)) {
+            return false;
+        }
+        if (dx != 0 && dy != 0) {
+            int c1x = fromTx + dx;
+            int c1y = fromTy;
+            int c2x = fromTx;
+            int c2y = fromTy + dy;
+            return canStepSingleEdge(actor, fromTx, fromTy, c1x, c1y, z)
+                    && canStepSingleEdge(actor, c1x, c1y, toTx, toTy, z)
+                    && canStepSingleEdge(actor, fromTx, fromTy, c2x, c2y, z)
+                    && canStepSingleEdge(actor, c2x, c2y, toTx, toTy, z);
+        }
+        return true;
+    }
+
+    private static boolean canStepSingleEdge(IsoPlayer actor, int fromTx, int fromTy, int toTx, int toTy, int z) {
+        IsoGridSquare fromSq = getSquare(fromTx, fromTy, z);
+        IsoGridSquare toSq = getSquare(toTx, toTy, z);
+        if (fromSq == null || toSq == null) {
+            return false;
+        }
+        if (fromSq.isBlockedTo(toSq) || toSq.isBlockedTo(fromSq)
+                || fromSq.isHoppableTo(toSq) || toSq.isHoppableTo(fromSq)
+                || fromSq.isWindowTo(toSq) || toSq.isWindowTo(fromSq)) {
+            return false;
+        }
+        float cx = toTx + 0.5F;
+        float cy = toTy + 0.5F;
+        if (!canStandFormationSlot(actor, cx, cy, z)) {
+            return false;
+        }
+        return isFormationSegmentClear(actor, fromTx + 0.5F, fromTy + 0.5F, cx, cy, z);
+    }
+
     private static boolean isWallBetween(IsoGridSquare a, IsoGridSquare b) {
         if (a == null || b == null || a.getZ() != b.getZ()) return true;
         int dx = b.getX() - a.getX();

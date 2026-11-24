@@ -76,14 +76,36 @@ public final class EmberFollowController {
     private float yieldGoalY;
     private int yieldGoalZ;
 
+    private static final float[] TRAIL_SIDE_SQUEEZE = {1.0F, 0.50F, 0.0F};
+
     private long lastAppliedConfigVersion = -1L;
     private boolean outsideVehicleForming;
+    private float assignedSlotX;
+    private float assignedSlotY;
+    private int assignedSlotZ = Integer.MIN_VALUE;
+    private boolean hasAssignedWorldSlot;
+    private boolean plannedSlotValidated;
+    private boolean congestionSettled;
+    private float settledAnchorX;
+    private float settledAnchorY;
+    private int settledAnchorZ = Integer.MIN_VALUE;
+    private float settleWatchX;
+    private float settleWatchY;
+    private float settleStallSec;
+    private boolean settleWatchValid;
     private final float[] trailScratch = new float[4];
     private final float[] slotScratch = new float[2];
 
     private long diagLastQueueMs;
     private long diagLastHoldMs;
     private long diagLastRetargetMs;
+
+    private void resetCongestionSettle() {
+        congestionSettled = false;
+        settledAnchorZ = Integer.MIN_VALUE;
+        settleStallSec = 0.0F;
+        settleWatchValid = false;
+    }
 
     static boolean updateHysteresis(boolean current, float dist, float enterDist, float exitDist) {
         if (!Float.isFinite(dist)) {
@@ -104,6 +126,9 @@ public final class EmberFollowController {
         this.leaderPlayerIndex = (playerIndex >= 0 && playerIndex < IsoPlayer.MAX) ? playerIndex : 0;
         this.requestedSlot = slot;
         this.assignedRank = -1;
+        this.hasAssignedWorldSlot = false;
+        this.assignedSlotZ = Integer.MIN_VALUE;
+        this.plannedSlotValidated = false;
         this.state = FollowState.FOLLOWING;
         this.holding = false;
         this.catchUpDirectLatched = false;
@@ -122,6 +147,7 @@ public final class EmberFollowController {
         this.yieldUntilMs = 0L;
         this.lastAppliedConfigVersion = -1L;
         this.outsideVehicleForming = false;
+        resetCongestionSettle();
         this.gaitControl.reset();
     }
 
@@ -133,6 +159,9 @@ public final class EmberFollowController {
         boolean wasEnabled = this.enabled || this.state != FollowState.INACTIVE;
         this.enabled = false;
         this.assignedRank = -1;
+        this.hasAssignedWorldSlot = false;
+        this.assignedSlotZ = Integer.MIN_VALUE;
+        this.plannedSlotValidated = false;
         this.holding = false;
         this.catchUpDirectLatched = false;
         this.hasPlannedTarget = false;
@@ -144,6 +173,7 @@ public final class EmberFollowController {
         this.accumNpcStep = 0.0F;
         this.outsideVehicleForming = false;
         this.lastAppliedConfigVersion = -1L;
+        resetCongestionSettle();
         this.gaitControl.reset();
         this.state = FollowState.INACTIVE;
         if (wasEnabled && stopMotion && npc != null) {
@@ -175,6 +205,30 @@ public final class EmberFollowController {
         this.assignedRank = assignedRank;
     }
 
+    boolean hasAssignedWorldSlot() {
+        return hasAssignedWorldSlot;
+    }
+
+    float getAssignedSlotX() {
+        return assignedSlotX;
+    }
+
+    float getAssignedSlotY() {
+        return assignedSlotY;
+    }
+
+    int getAssignedSlotZ() {
+        return assignedSlotZ;
+    }
+
+    void setAssignedSlot(int assignedRank, float x, float y, int z, boolean valid) {
+        this.assignedRank = assignedRank;
+        this.assignedSlotX = x;
+        this.assignedSlotY = y;
+        this.assignedSlotZ = z;
+        this.hasAssignedWorldSlot = valid;
+    }
+
     float getLastDirX() {
         return lastDirX;
     }
@@ -197,8 +251,11 @@ public final class EmberFollowController {
             lastAppliedConfigVersion = cfgVer;
             holding = false;
             hasPlannedTarget = false;
+            plannedSlotValidated = false;
+            hasAssignedWorldSlot = false;
             nextPlanMs = 0L;
             lastRetargetMs = 0L;
+            resetCongestionSettle();
         }
 
         EmberLocomotionController loco = npc.getLocomotion();
@@ -210,6 +267,7 @@ public final class EmberFollowController {
             speedWindowDt = 0.0F;
             accumLeaderStep = 0.0F;
             accumNpcStep = 0.0F;
+            resetCongestionSettle();
             loco.setFollowSteerHint(leader, false);
             return;
         }
@@ -229,6 +287,7 @@ public final class EmberFollowController {
             outsideVehicleForming = false;
             if (npc.getCurrentSquare() == null) {
                 holding = false;
+                resetCongestionSettle();
                 gaitControl.reset();
                 loco.setFollowSteerHint(null, false);
                 state = FollowState.WAITING;
@@ -246,6 +305,7 @@ public final class EmberFollowController {
             if (leader == null || leader.isDead() || leader.getCell() != npc.getCell()) {
                 holding = false;
                 outsideVehicleForming = false;
+                resetCongestionSettle();
                 prevSampleLeaderZ = Integer.MIN_VALUE;
                 prevSampleNpcZ = Integer.MIN_VALUE;
                 speedWindowDt = 0.0F;
@@ -264,6 +324,7 @@ public final class EmberFollowController {
                 if (!outsideVehicleForming || leaderVeh.getSquare() == null) {
                     holding = false;
                     yieldUntilMs = 0L;
+                    resetCongestionSettle();
                     prevSampleLeaderZ = Integer.MIN_VALUE;
                     prevSampleNpcZ = Integer.MIN_VALUE;
                     speedWindowDt = 0.0F;
@@ -284,6 +345,7 @@ public final class EmberFollowController {
                 outsideVehicleForming = false;
                 if (leader.getCurrentSquare() == null) {
                     holding = false;
+                    resetCongestionSettle();
                     gaitControl.reset();
                     loco.setFollowSteerHint(null, false);
                     state = FollowState.WAITING;
@@ -465,11 +527,26 @@ public final class EmberFollowController {
         EmberFollowGaitControl.Gear gear = gaitControl.updateGear(sneakIntent, effectiveDistToLeader, vCmd, now);
         EmberLocomotionController.Gait desiredGait = mapGearToGait(gear);
 
+        if (congestionSettled) {
+            boolean staySettled = !leaderMoving && sameFloor && !onStairs
+                    && settledAnchorZ == lz
+                    && Math.hypot(lx - settledAnchorX, ly - settledAnchorY) <= 0.60F
+                    && EmberTargetProjector.canStandClean(npc, npc.getX(), npc.getY(), nz);
+            if (staySettled) {
+                holding = true;
+                state = FollowState.WAITING;
+                loco.holdFollowIdle(npc, sneakIntent);
+                return;
+            }
+            resetCongestionSettle();
+        }
+
         boolean wasHolding = holding;
         boolean allowStairAreaHold = !onStairs && (!nearStairs || distToAnchor <= 1.25F);
+        boolean canHoldSlot = plannedSlotValidated || clearLosToAnchor;
         if (allowStairAreaHold && !leaderMoving && sameFloor && hasPlannedTarget && plannedTargetZ == nz
                 && updateHoldHysteresis(holding, distToSlot, HOLD_ENTER_DIST, HOLD_EXIT_DIST)
-                && clearLosToAnchor) {
+                && canHoldSlot) {
             logHoldNearStair(npc, myRank, "STOP_HOLD", lx, ly, lz, distToSlot, clearLosToAnchor, now);
             holding = true;
             state = FollowState.WAITING;
@@ -497,6 +574,45 @@ public final class EmberFollowController {
                 loco.holdFollowIdle(npc, sneakIntent);
                 return;
             }
+        }
+
+        if (!leaderMoving && sameFloor && !onStairs) {
+            if (!settleWatchValid) {
+                settleWatchX = npc.getX();
+                settleWatchY = npc.getY();
+                settleStallSec = 0.0F;
+                settleWatchValid = true;
+            } else {
+                float moved = (float) Math.hypot(npc.getX() - settleWatchX, npc.getY() - settleWatchY);
+                if (moved >= 0.18F) {
+                    settleWatchX = npc.getX();
+                    settleWatchY = npc.getY();
+                    settleStallSec = 0.0F;
+                } else {
+                    settleStallSec += simDt;
+                }
+            }
+            EmberLocomotionController.Status locoSt = loco.getStatus();
+            boolean locoFailed = (locoSt == EmberLocomotionController.Status.STUCK
+                    || locoSt == EmberLocomotionController.Status.NO_PATH) && !loco.isMoving();
+            boolean shouldSettle = (locoFailed && settleStallSec >= 0.35F && distToAnchor <= 6.50F)
+                    || (settleStallSec >= 1.20F && (distToSlot <= 3.00F || distToAnchor <= 5.50F));
+            int curTx = (int) Math.floor(npc.getX());
+            int curTy = (int) Math.floor(npc.getY());
+            if (shouldSettle
+                    && !EmberStairDiag.isStairOrExitTile(curTx, curTy, nz)
+                    && EmberTargetProjector.canStandClean(npc, npc.getX(), npc.getY(), nz)) {
+                congestionSettled = true;
+                settledAnchorX = lx;
+                settledAnchorY = ly;
+                settledAnchorZ = lz;
+                holding = true;
+                state = FollowState.WAITING;
+                loco.holdFollowIdle(npc, sneakIntent);
+                return;
+            }
+        } else {
+            resetCongestionSettle();
         }
 
         holding = false;
@@ -588,6 +704,7 @@ public final class EmberFollowController {
             boolean sameFloor, float distToAnchor, int myRank, int squadCount,
             FormationType formation, FormationSpacing spacing,
             boolean isHoldMode, boolean outsideVehMode, float minVehSafeRadius, float nominalRadius) {
+        plannedSlotValidated = false;
         float catchUpEnter = EmberFollowGaitControl.catchUpEnterDist(nominalRadius);
         float catchUpExit = catchUpEnter - (EmberFollowGaitControl.CATCHUP_DIRECT_ENTER - EmberFollowGaitControl.CATCHUP_DIRECT_EXIT);
         catchUpDirectLatched = updateHysteresis(catchUpDirectLatched, distToAnchor, catchUpEnter, catchUpExit);
@@ -603,45 +720,25 @@ public final class EmberFollowController {
             return;
         }
 
+        // Priority 1: 小队联合解算器产出的互斥、连通、严苛壁距世界实位（覆盖所有静止站位、驻守、车外护卫及 LINE/RING）
+        if (hasAssignedWorldSlot && assignedSlotZ == lz
+                && (!leaderMoving || isHoldMode || outsideVehMode
+                        || formation == FormationType.LINE || formation == FormationType.RING)) {
+            plannedTargetX = assignedSlotX;
+            plannedTargetY = assignedSlotY;
+            plannedTargetZ = assignedSlotZ;
+            hasPlannedTarget = true;
+            plannedSlotValidated = true;
+            return;
+        }
+
         float lam = spacing != null ? spacing.multiplier() : 1.0F;
         EmberFormationMatcher.slotOffset(formation, myRank, squadCount, lam, slotScratch);
         float slotBack = slotScratch[0];
         float slotSide = slotScratch[1];
 
-        if (outsideVehMode) {
-            float rawR = (float) Math.hypot(slotBack, slotSide);
-            float scale = (rawR < minVehSafeRadius) ? (minVehSafeRadius / Math.max(0.25F, rawR)) : 1.0F;
-            float b = (rawR < 0.05F) ? minVehSafeRadius : slotBack * scale;
-            float s = (rawR < 0.05F) ? 0.0F : slotSide * scale;
-            float wx = lx - lastDirX * b - lastDirY * s;
-            float wy = ly - lastDirY * b + lastDirX * s;
-            if (isCleanFollowSlot(npc, wx, wy, lz, lx, ly)) {
-                plannedTargetX = wx;
-                plannedTargetY = wy;
-                plannedTargetZ = lz;
-                hasPlannedTarget = true;
-                return;
-            }
-            double baseAng = Math.atan2(wy - ly, wx - lx);
-            float[] ringDegs = { 30F, -30F, 60F, -60F, 90F, -90F, 120F, -120F, 150F, -150F, 180F };
-            for (float deg : ringDegs) {
-                double ang = baseAng + Math.toRadians(deg);
-                float cx = lx + (float) Math.cos(ang) * minVehSafeRadius;
-                float cy = ly + (float) Math.sin(ang) * minVehSafeRadius;
-                if (isCleanFollowSlot(npc, cx, cy, lz, lx, ly)) {
-                    plannedTargetX = cx;
-                    plannedTargetY = cy;
-                    plannedTargetZ = lz;
-                    hasPlannedTarget = true;
-                    return;
-                }
-            }
-        }
-
-        boolean requireLosOnStop = !leaderMoving;
-
-        // WEDGE / COLUMN 在跟随行进态沿领袖历史轨迹尾随，确保过门穿巷顺滑贴线
-        if (!isHoldMode && trail != null
+        // Priority 2: WEDGE / COLUMN 在行进态沿领袖历史轨迹尾随，两侧遇阻时弹性收缩横向间距为纵队
+        if (!isHoldMode && !outsideVehMode && trail != null
                 && (formation == FormationType.WEDGE || formation == FormationType.COLUMN)
                 && trail.getFloor() == lz && trail.sample(slotBack, trailScratch)) {
             float bx = trailScratch[0];
@@ -652,20 +749,34 @@ public final class EmberFollowController {
                 dirX = lastDirX;
                 dirY = lastDirY;
             }
-            float wx = bx - dirY * slotSide;
-            float wy = by + dirX * slotSide;
-            if ((Math.abs(slotSide) < 0.01F || !isLineBlocked(npc, bx, by, wx, wy, lz))
-                    && isCleanFollowSlot(npc, wx, wy, lz, lx, ly)
-                    && (!requireLosOnStop || !isLineBlocked(npc, wx, wy, lx, ly, lz))) {
-                plannedTargetX = wx;
-                plannedTargetY = wy;
-                plannedTargetZ = lz;
-                hasPlannedTarget = true;
-                return;
+            int tries = Math.abs(slotSide) >= 0.05F ? TRAIL_SIDE_SQUEEZE.length : 1;
+            for (int t = 0; t < tries; t++) {
+                float sqSide = slotSide * TRAIL_SIDE_SQUEEZE[t];
+                float wx = bx - dirY * sqSide;
+                float wy = by + dirX * sqSide;
+                if ((Math.abs(sqSide) < 0.01F || !isLineBlocked(npc, bx, by, wx, wy, lz))
+                        && isCleanFollowSlot(npc, wx, wy, lz, lx, ly)) {
+                    plannedTargetX = wx;
+                    plannedTargetY = wy;
+                    plannedTargetZ = lz;
+                    hasPlannedTarget = true;
+                    plannedSlotValidated = true;
+                    return;
+                }
             }
         }
 
-        // LINE / RING / HOLD_POSITION 直接围绕锚点与朝向投影世界槽位（防隔墙落点）
+        // Priority 3: 轨迹尾随遇障时，优先切入小队联合解算实位
+        if (hasAssignedWorldSlot && assignedSlotZ == lz) {
+            plannedTargetX = assignedSlotX;
+            plannedTargetY = assignedSlotY;
+            plannedTargetZ = assignedSlotZ;
+            hasPlannedTarget = true;
+            plannedSlotValidated = true;
+            return;
+        }
+
+        boolean requireLosOnStop = !leaderMoving;
         float directX = lx - lastDirX * slotBack - lastDirY * slotSide;
         float directY = ly - lastDirY * slotBack + lastDirX * slotSide;
         if (isCleanFollowSlot(npc, directX, directY, lz, lx, ly)
@@ -674,6 +785,7 @@ public final class EmberFollowController {
             plannedTargetY = directY;
             plannedTargetZ = lz;
             hasPlannedTarget = true;
+            plannedSlotValidated = true;
             return;
         }
 
@@ -687,57 +799,14 @@ public final class EmberFollowController {
                 plannedTargetY = cy;
                 plannedTargetZ = lz;
                 hasPlannedTarget = true;
+                plannedSlotValidated = true;
                 return;
             }
         }
 
-        if (requireLosOnStop && !isHoldMode && trail != null && trail.getFloor() == lz) {
-            float[] shortBacks = { 1.10F, 0.75F };
-            for (float sb : shortBacks) {
-                if (trail.sample(sb, trailScratch)) {
-                    float sx = trailScratch[0];
-                    float sy = trailScratch[1];
-                    if (isCleanFollowSlot(npc, sx, sy, lz, lx, ly)
-                            && !isLineBlocked(npc, sx, sy, lx, ly, lz)) {
-                        plannedTargetX = sx;
-                        plannedTargetY = sy;
-                        plannedTargetZ = lz;
-                        hasPlannedTarget = true;
-                        return;
-                    }
-                }
-            }
-        }
-
-        // 当纵队/梯队轨迹落回楼梯口禁停区或遇到墙体阻挡时，以领袖/锚点为中心在同层室内空地扇形散开
-        double baseRad = Math.atan2(-lastDirY, -lastDirX);
-        float sideSign = (myRank & 1) == 1 ? -1.0F : 1.0F;
-        double rankShiftRad = Math.toRadians(((myRank / 2) % 3) * 14.0F * sideSign);
-        float rPrimary = Math.min(2.40F, 1.05F + (myRank / 2) * 0.35F);
-        float[] fanRadii = { rPrimary, 1.35F, 0.90F };
-        float[] fanDegs = { 25F, -25F, 60F, -60F, 95F, -95F, 130F, -130F, 165F, -165F, 0F };
-        for (float radius : fanRadii) {
-            for (float deg : fanDegs) {
-                double ang = baseRad + rankShiftRad + Math.toRadians(deg * sideSign);
-                float candX = lx + (float) Math.cos(ang) * radius;
-                float candY = ly + (float) Math.sin(ang) * radius;
-                if (isCleanFollowSlot(npc, candX, candY, lz, lx, ly)
-                        && !isLineBlocked(npc, candX, candY, lx, ly, lz)) {
-                    plannedTargetX = candX;
-                    plannedTargetY = candY;
-                    plannedTargetZ = lz;
-                    hasPlannedTarget = true;
-                    return;
-                }
-            }
-        }
-
-        float back = requireLosOnStop ? 1.0F : columnBackDist;
         EmberTargetProjector.ProjectedPoint fallback = EmberTargetProjector.projectGoal(
-                npc, lx - lastDirX * back, ly - lastDirY * back, lz);
-        if (fallback == null
-                || !isCleanFollowSlot(npc, fallback.x(), fallback.y(), fallback.z(), lx, ly)
-                || (requireLosOnStop && isLineBlocked(npc, fallback.x(), fallback.y(), lx, ly, lz))) {
+                npc, lx - lastDirX * 1.0F, ly - lastDirY * 1.0F, lz);
+        if (fallback == null || !isCleanFollowSlot(npc, fallback.x(), fallback.y(), fallback.z(), lx, ly)) {
             fallback = EmberTargetProjector.projectGoal(npc, lx, ly, lz);
         }
         if (fallback != null) {
@@ -749,15 +818,12 @@ public final class EmberFollowController {
     }
 
     private static boolean isCleanFollowSlot(IsoNPC npc, float x, float y, int z, float lx, float ly) {
-        if (!EmberTargetProjector.canStandClean(npc, x, y, z)) {
-            return false;
-        }
         int tx = (int) Math.floor(x);
         int ty = (int) Math.floor(y);
         if (EmberStairDiag.isStairOrExitTile(tx, ty, z)) {
-            return Math.hypot(x - lx, y - ly) <= 1.15F;
+            return Math.hypot(x - lx, y - ly) <= 1.15F && EmberTargetProjector.canStandClean(npc, x, y, z);
         }
-        return true;
+        return EmberTargetProjector.canStandFormationSlot(npc, x, y, z);
     }
 
     private static EmberLocomotionController.Gait mapGearToGait(EmberFollowGaitControl.Gear gear) {

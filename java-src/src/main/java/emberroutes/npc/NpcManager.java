@@ -22,10 +22,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import org.joml.Vector3f;
 import zombie.GameTime;
 import zombie.ZomboidFileSystem;
 import zombie.characters.AttachedItems.AttachedItem;
@@ -182,6 +184,7 @@ public final class NpcManager {
     private static final List<MoveEvent> pendingMoveEvents = new ArrayList<>();
     private static final EmberFormationMatcher.RectangularHungarianWorkspace rankWorkspace =
             new EmberFormationMatcher.RectangularHungarianWorkspace();
+    private static final SquadSlotSolver.Workspace slotWorkspace = new SquadSlotSolver.Workspace();
     private static IsoCell owningCell;
     private static int nextIdSeq = 1;
     private static int tickCounter = 0;
@@ -191,6 +194,20 @@ public final class NpcManager {
     private static int lastRankFollowerCount = 0;
     private static int lastRankPlayerIndex = -1;
     private static long lastRankConfigVersion = -1L;
+    private static float lastObservedAnchorX = 0.0F;
+    private static float lastObservedAnchorY = 0.0F;
+    private static int lastObservedAnchorZ = Integer.MIN_VALUE;
+    private static long lastAnchorMoveMs = 0L;
+    private static float lastSlotAnchorX = 0.0F;
+    private static float lastSlotAnchorY = 0.0F;
+    private static int lastSlotAnchorZ = Integer.MIN_VALUE;
+    private static boolean lastSlotOutsideVeh = false;
+    private static boolean lastSlotLeaderMoving = false;
+    private static int lastSlotCount = 0;
+    private static String[] lastSlotMemberIds = new String[0];
+    private static float[] cachedWorldSlotX = new float[16];
+    private static float[] cachedWorldSlotY = new float[16];
+    private static int[] cachedRanksScratch = new int[16];
     private static WeakReference<BaseVehicle> lastLeaderVehicleRef;
     private static double brainSimTimeSec = 0.0;
 
@@ -198,6 +215,14 @@ public final class NpcManager {
 
     public static synchronized boolean isLoadedForCurrentSave() {
         return loadedForCurrentSave;
+    }
+
+    private static void invalidateFollowSlotLockLocked() {
+        lastRankSolveMs = 0L;
+        lastRankFollowerCount = 0;
+        lastSlotCount = 0;
+        lastSlotAnchorZ = Integer.MIN_VALUE;
+        lastSlotMemberIds = new String[0];
     }
 
     public static synchronized void reset() {
@@ -230,10 +255,13 @@ public final class NpcManager {
         tickCounter = 0;
         offscreenCount = 0;
         loadedForCurrentSave = false;
-        lastRankSolveMs = 0L;
-        lastRankFollowerCount = 0;
         lastRankPlayerIndex = -1;
         lastRankConfigVersion = -1L;
+        lastObservedAnchorZ = Integer.MIN_VALUE;
+        lastAnchorMoveMs = 0L;
+        lastSlotOutsideVeh = false;
+        lastSlotLeaderMoving = false;
+        invalidateFollowSlotLockLocked();
         lastLeaderVehicleRef = null;
         brainSimTimeSec = 0.0;
     }
@@ -590,6 +618,7 @@ public final class NpcManager {
             collectSettledMoveEventLocked(rec);
             rec.deadRetired = true;
             rec.offscreenSnapshot = null;
+            invalidateFollowSlotLockLocked();
             recountOffscreenLocked();
         }
     }
@@ -985,6 +1014,7 @@ public final class NpcManager {
         npc.getBrain().setMode(BrainMode.SQUAD, npc.getBrainContext());
         npc.getLocomotion().interrupt(npc, "FOLLOW_START");
         collectSettledMoveEventLocked(rec);
+        invalidateFollowSlotLockLocked();
         if (npc.getPosture().isBlockingLocomotion()) {
             npc.getPosture().queueFollowAfterStandUp(npc, playerIndex, slot);
             return true;
@@ -1129,6 +1159,7 @@ public final class NpcManager {
         if (rec == null || rec.liveNpc == null) return false;
         rec.liveNpc.getPosture().clearPendingContinuation();
         rec.liveNpc.getFollow().stop(rec.liveNpc, true, "USER_STOP");
+        invalidateFollowSlotLockLocked();
         if (rec.brainMode == BrainMode.SQUAD) {
             rec.brainMode = BrainMode.SETTLEMENT;
             rec.liveNpc.getModData().rawset(MODDATA_BRAIN_MODE_KEY, BrainMode.SETTLEMENT.name());
@@ -1186,6 +1217,44 @@ public final class NpcManager {
         return assigned >= 0 ? assigned : 0;
     }
 
+    private static void ensureSlotScratchCapacity(int count) {
+        if (cachedWorldSlotX.length < count) {
+            int cap = Math.max(count, cachedWorldSlotX.length * 2);
+            cachedWorldSlotX = new float[cap];
+            cachedWorldSlotY = new float[cap];
+            cachedRanksScratch = new int[cap];
+        }
+    }
+
+    private static boolean areLockedSlotsStillValid(
+            List<IsoNPC> dynamicFollowers, int count, int playerIndex,
+            boolean configChanged, boolean anchorMovingNow, boolean outsideVeh,
+            float anchorX, float anchorY, int anchorFloor) {
+        if (configChanged || anchorMovingNow || lastSlotLeaderMoving
+                || count != lastSlotCount || lastSlotMemberIds.length != count
+                || playerIndex != lastRankPlayerIndex || outsideVeh != lastSlotOutsideVeh
+                || anchorFloor != lastSlotAnchorZ || lastSlotAnchorZ == Integer.MIN_VALUE) {
+            return false;
+        }
+        if (Math.hypot(anchorX - lastSlotAnchorX, anchorY - lastSlotAnchorY) > 0.35F) {
+            return false;
+        }
+        for (int i = 0; i < count; i++) {
+            IsoNPC npc = dynamicFollowers.get(i);
+            if (!npc.getNpcId().equals(lastSlotMemberIds[i])) {
+                return false;
+            }
+            EmberFollowController fc = npc.getFollow();
+            if (fc.getAssignedRank() < 0 || !fc.hasAssignedWorldSlot()
+                    || fc.getAssignedSlotZ() != anchorFloor
+                    || !EmberTargetProjector.canStandFormationSlot(
+                            npc, fc.getAssignedSlotX(), fc.getAssignedSlotY(), anchorFloor)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static void refreshFollowRanksLocked(int playerIndex, long now) {
         List<IsoNPC> dynamicFollowers = new ArrayList<>();
         for (NpcRecord rec : records.values()) {
@@ -1196,7 +1265,7 @@ public final class NpcManager {
 
         int count = dynamicFollowers.size();
         if (count == 0) {
-            lastRankFollowerCount = 0;
+            invalidateFollowSlotLockLocked();
             lastRankPlayerIndex = playerIndex;
             lastRankSolveMs = now;
             return;
@@ -1204,10 +1273,83 @@ public final class NpcManager {
 
         long cfgVer = SquadTacticalConfig.getVersion();
         boolean configChanged = (cfgVer != lastRankConfigVersion);
+        boolean useHoldAnchor = SquadTacticalConfig.hasHoldAnchor();
+        IsoPlayer leader = (IsoPlayer.players != null && playerIndex >= 0 && playerIndex < IsoPlayer.players.length)
+                ? IsoPlayer.players[playerIndex]
+                : null;
+        if (!useHoldAnchor && (leader == null || leader.isDead())) {
+            return;
+        }
+
+        float anchorX;
+        float anchorY;
+        float anchorZ;
+        float headingX;
+        float headingY;
+        float seedX;
+        float seedY;
+        float minAnchorDist = SquadSlotSolver.DEFAULT_ANCHOR_CLEARANCE;
+        boolean outsideVeh = false;
+        boolean anchorMovingNow;
+
+        if (useHoldAnchor) {
+            anchorX = SquadTacticalConfig.getHoldX();
+            anchorY = SquadTacticalConfig.getHoldY();
+            anchorZ = SquadTacticalConfig.getHoldZ();
+            headingX = SquadTacticalConfig.getHoldDirX();
+            headingY = SquadTacticalConfig.getHoldDirY();
+            seedX = anchorX;
+            seedY = anchorY;
+            anchorMovingNow = false;
+        } else {
+            BaseVehicle lVeh = leader.getVehicle();
+            if (lVeh != null) {
+                outsideVeh = true;
+                anchorX = lVeh.getX();
+                anchorY = lVeh.getY();
+                anchorZ = lVeh.getZ();
+                minAnchorDist = VehicleCoRideHelper.computeVehicleSafeRadius(lVeh) + 1.0F;
+                Vector3f safePt = VehicleCoRideHelper.computeSafeOutsidePoint(
+                        lVeh, Math.max(0, lVeh.getSeat(leader)), dynamicFollowers.get(0));
+                seedX = safePt != null ? safePt.x : dynamicFollowers.get(0).getX();
+                seedY = safePt != null ? safePt.y : dynamicFollowers.get(0).getY();
+            } else {
+                anchorX = leader.getX();
+                anchorY = leader.getY();
+                anchorZ = leader.getZ();
+                seedX = anchorX;
+                seedY = anchorY;
+            }
+            EmberFollowController firstFc = dynamicFollowers.get(0).getFollow();
+            headingX = firstFc.getLastDirX();
+            headingY = firstFc.getLastDirY();
+            if (headingX * headingX + headingY * headingY < 1.0E-4F) {
+                headingX = leader.getForwardDirectionX();
+                headingY = leader.getForwardDirectionY();
+            }
+            int obsFloor = EmberTargetProjector.levelOf(anchorZ);
+            if (lastObservedAnchorZ != obsFloor
+                    || Math.hypot(anchorX - lastObservedAnchorX, anchorY - lastObservedAnchorY) > 0.04F) {
+                lastObservedAnchorX = anchorX;
+                lastObservedAnchorY = anchorY;
+                lastObservedAnchorZ = obsFloor;
+                lastAnchorMoveMs = now;
+            }
+            anchorMovingNow = (now - lastAnchorMoveMs < 240L)
+                    || (lVeh != null && Math.abs(lVeh.getCurrentSpeedKmHour()) > 0.80F);
+        }
+
+        int anchorFloor = EmberTargetProjector.levelOf(anchorZ);
+        if (areLockedSlotsStillValid(
+                dynamicFollowers, count, playerIndex, configChanged,
+                anchorMovingNow, outsideVeh, anchorX, anchorY, anchorFloor)) {
+            return;
+        }
 
         boolean allAssigned = true;
         for (int i = 0; i < count; i++) {
-            if (dynamicFollowers.get(i).getFollow().getAssignedRank() < 0) {
+            EmberFollowController fc = dynamicFollowers.get(i).getFollow();
+            if (fc.getAssignedRank() < 0 || !fc.hasAssignedWorldSlot()) {
                 allAssigned = false;
                 break;
             }
@@ -1216,15 +1358,9 @@ public final class NpcManager {
                 && allAssigned
                 && count == lastRankFollowerCount
                 && playerIndex == lastRankPlayerIndex
+                && anchorMovingNow == lastSlotLeaderMoving
+                && outsideVeh == lastSlotOutsideVeh
                 && now - lastRankSolveMs < 100L) {
-            return;
-        }
-
-        boolean useHoldAnchor = SquadTacticalConfig.hasHoldAnchor();
-        IsoPlayer leader = (IsoPlayer.players != null && playerIndex >= 0 && playerIndex < IsoPlayer.players.length)
-                ? IsoPlayer.players[playerIndex]
-                : null;
-        if (!useHoldAnchor && (leader == null || leader.isDead())) {
             return;
         }
 
@@ -1234,6 +1370,7 @@ public final class NpcManager {
         boolean[] onStairs = new boolean[count];
         int[] prevRank = new int[count];
         TacticalRole[] roles = new TacticalRole[count];
+        String[] memberIds = new String[count];
         for (int i = 0; i < count; i++) {
             IsoNPC npc = dynamicFollowers.get(i);
             fx[i] = npc.getX();
@@ -1243,45 +1380,63 @@ public final class NpcManager {
             onStairs[i] = sq != null && sq.HasStairs();
             prevRank[i] = npc.getFollow().getAssignedRank();
             roles[i] = VehicleCoRideHelper.resolveTacticalRole(npc);
+            memberIds[i] = npc.getNpcId();
         }
 
-        float anchorX;
-        float anchorY;
-        float anchorZ;
-        float headingX;
-        float headingY;
-        if (useHoldAnchor) {
-            anchorX = SquadTacticalConfig.getHoldX();
-            anchorY = SquadTacticalConfig.getHoldY();
-            anchorZ = SquadTacticalConfig.getHoldZ();
-            headingX = SquadTacticalConfig.getHoldDirX();
-            headingY = SquadTacticalConfig.getHoldDirY();
-        } else {
-            BaseVehicle lVeh = leader.getVehicle();
-            anchorX = lVeh != null ? lVeh.getX() : leader.getX();
-            anchorY = lVeh != null ? lVeh.getY() : leader.getY();
-            anchorZ = lVeh != null ? lVeh.getZ() : leader.getZ();
-            EmberFollowController firstFc = dynamicFollowers.get(0).getFollow();
-            headingX = firstFc.getLastDirX();
-            headingY = firstFc.getLastDirY();
-            if (headingX * headingX + headingY * headingY < 1.0E-4F) {
-                headingX = leader.getForwardDirectionX();
-                headingY = leader.getForwardDirectionY();
+        IsoNPC probeActor = dynamicFollowers.get(0);
+        SquadSlotSolver.TerrainProbe probe = new SquadSlotSolver.TerrainProbe() {
+            @Override
+            public boolean canStandSafe(float x, float y) {
+                return EmberTargetProjector.canStandFormationSlot(probeActor, x, y, anchorFloor);
             }
+
+            @Override
+            public boolean isOpenGround(float x, float y) {
+                return EmberTargetProjector.isOpenGround(x, y, anchorFloor);
+            }
+
+            @Override
+            public boolean isSegmentClear(float x1, float y1, float x2, float y2) {
+                return EmberTargetProjector.isFormationSegmentClear(probeActor, x1, y1, x2, y2, anchorFloor);
+            }
+
+            @Override
+            public boolean canStepTile(int fromTx, int fromTy, int toTx, int toTy) {
+                return EmberTargetProjector.canStepFormationTile(probeActor, fromTx, fromTy, toTx, toTy, anchorFloor);
+            }
+        };
+
+        ensureSlotScratchCapacity(count);
+        FormationType formation = SquadTacticalConfig.getFormation();
+        FormationSpacing spacing = SquadTacticalConfig.getSpacing();
+        SquadSlotSolver.resolveWorldSlots(
+                count, formation, spacing,
+                anchorX, anchorY, seedX, seedY, headingX, headingY,
+                minAnchorDist, probe, cachedWorldSlotX, cachedWorldSlotY, slotWorkspace);
+
+        if (count == 1) {
+            cachedRanksScratch[0] = 0;
+        } else {
+            EmberFormationMatcher.assignRanksToWorldSlots(
+                    count, fx, fy, fz, onStairs, prevRank, roles,
+                    formation, configChanged, anchorZ,
+                    cachedWorldSlotX, cachedWorldSlotY, probe,
+                    cachedRanksScratch, rankWorkspace);
         }
 
-        int[] outRanks = new int[count];
-        EmberFormationMatcher.assignRanks(
-                count, fx, fy, fz, onStairs, prevRank, roles,
-                SquadTacticalConfig.getFormation(),
-                SquadTacticalConfig.getSpacing(),
-                configChanged,
-                anchorX, anchorY, anchorZ,
-                headingX, headingY,
-                outRanks, rankWorkspace);
         for (int i = 0; i < count; i++) {
-            dynamicFollowers.get(i).getFollow().setAssignedRank(outRanks[i]);
+            int r = (cachedRanksScratch[i] >= 0 && cachedRanksScratch[i] < count) ? cachedRanksScratch[i] : i;
+            dynamicFollowers.get(i).getFollow().setAssignedSlot(
+                    r, cachedWorldSlotX[r], cachedWorldSlotY[r], anchorFloor, true);
         }
+
+        lastSlotAnchorX = anchorX;
+        lastSlotAnchorY = anchorY;
+        lastSlotAnchorZ = anchorFloor;
+        lastSlotOutsideVeh = outsideVeh;
+        lastSlotLeaderMoving = anchorMovingNow;
+        lastSlotCount = count;
+        lastSlotMemberIds = memberIds;
         lastRankFollowerCount = count;
         lastRankPlayerIndex = playerIndex;
         lastRankSolveMs = now;
