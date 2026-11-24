@@ -5,6 +5,7 @@ import emberroutes.npc.EmberTargetProjector;
 import emberroutes.npc.IsoNPC;
 import emberroutes.npc.NpcPostureController;
 import emberroutes.npc.brain.NeedsPolicy.UrgentNeed;
+import emberroutes.npc.combat.GuardCombatNode;
 import emberroutes.warehouse.SmartObjectRegistry;
 import emberroutes.warehouse.SmartSlot.SlotKind;
 import emberroutes.warehouse.SmartSlot.SmartSlotLease;
@@ -40,6 +41,7 @@ public final class SettlementBrainBuilder {
         StateEvaluator rootDangerEval = SettlementDangerField::evaluate;
         StateEvaluator rootNeedsEval = SettlementBrainBuilder::evaluateNeedsAndBorrowedTools;
 
+        StateNode guardCombat = new GuardCombatNode();
         StateNode threatEvade = new ThreatEvadeNode();
         StateNode bandageNode = new SurvivalActionNode(
                 "BANDAGE",
@@ -78,7 +80,7 @@ public final class SettlementBrainBuilder {
 
         StateNode root = new RootNode(
                 "SETTLEMENT",
-                new StateNode[]{threatEvade, survivalBranch, returnTool, workDuty, leisureBranch},
+                new StateNode[]{guardCombat, threatEvade, survivalBranch, returnTool, workDuty, leisureBranch},
                 new StateEvaluator[]{rootDangerEval, rootNeedsEval});
         return new StateTreeRunner(root);
     }

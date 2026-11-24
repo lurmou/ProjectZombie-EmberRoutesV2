@@ -1,18 +1,26 @@
 package emberroutes.npc.brain;
 
+import emberroutes.npc.combat.SquadCombatNodes;
+
 /**
  * 构建 {@code BrainMode.SQUAD} 征召随从状态树（完全屏蔽据点床铺 / 座椅 / 工种分配）。
  *
- * <p>EMB-19（M4-①）前置扩展最高优 {@code VEHICLE_CO_RIDE} 自动上下车分支，与常规四阵型队列跟随 {@code FORMATION_FOLLOW}；
- * {@code EMB-30} 将在右侧继续扩展 {@code EMERGENCY_SELF_DEFENSE / COMBAT_ENGAGE}。
+ * <p>严格优先序：
+ * {@code VEHICLE_CO_RIDE} → {@code EMERGENCY_SELF_DEFENSE} → {@code COMBAT_ENGAGE} →
+ * {@code SQUAD_FIELD_FIRST_AID} → {@code FORMATION_FOLLOW}。
  */
 public final class SquadBrainBuilder {
     private SquadBrainBuilder() {}
 
     public static StateTreeRunner createRunner() {
         StateNode vehicleLeaf = new VehicleCoRideNode();
+        StateNode emergencyLeaf = SquadCombatNodes.createEmergencySelfDefenseNode();
+        StateNode combatLeaf = SquadCombatNodes.createCombatEngageNode();
+        StateNode firstAidLeaf = SquadCombatNodes.createSquadFieldFirstAidNode();
         StateNode followLeaf = new FormationFollowNode();
-        StateNode root = new RootNode("SQUAD", new StateNode[]{vehicleLeaf, followLeaf});
+        StateNode root = new RootNode(
+                "SQUAD",
+                new StateNode[]{vehicleLeaf, emergencyLeaf, combatLeaf, firstAidLeaf, followLeaf});
         return new StateTreeRunner(root);
     }
 

@@ -310,6 +310,15 @@ function EmberRoutesJava.assignNpcToSettlement(npcId, settlementId) end
 ---@return string
 function EmberRoutesJava.getNpcAssignedSettlement(npcId) end
 
+---@param npcId string
+---@param guard boolean
+---@return boolean
+function EmberRoutesJava.setNpcGuardDuty(npcId, guard) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.isNpcGuardDuty(npcId) end
+
 ---@param settlementId string
 ---@return number
 function EmberRoutesJava.clearSettlementNpcAssignments(settlementId) end

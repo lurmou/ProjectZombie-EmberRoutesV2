@@ -9,6 +9,9 @@ import emberroutes.npc.brain.SettlementDangerField;
 import emberroutes.npc.brain.TempPropHelper;
 import emberroutes.npc.brain.VehicleCoRideHelper;
 import emberroutes.npc.brain.VehicleSeatRegistry;
+import emberroutes.npc.combat.B42CombatRuntime;
+import emberroutes.npc.combat.CombatHookContext;
+import emberroutes.npc.combat.EmberSquadDirector;
 import emberroutes.warehouse.WarehouseFastIndex;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -77,6 +80,7 @@ import zombie.vehicles.BaseVehicle;
 public final class NpcManager {
     public static final String MODDATA_HOME_SETTLEMENT_KEY = "ER_HomeSettlementId";
     public static final String MODDATA_BRAIN_MODE_KEY = "ER_BrainMode";
+    public static final String MODDATA_GUARD_DUTY_KEY = "ER_GuardDuty";
     private static final String SAVE_FILE_NAME = "emberroutes_npcs.bin";
     private static final int RETIRE_FORCE_DIE_TICKS = 180;
     private static final int RETIRE_HARD_CLEANUP_TICKS = 360;
@@ -109,6 +113,7 @@ public final class NpcManager {
         NpcSnapshot offscreenSnapshot;
         BrainMode brainMode = BrainMode.SETTLEMENT;
         String assignedSettlementId;
+        boolean guardDuty;
         boolean phasedIn;
         boolean deadRetired;
         int deathWatchdogTicks;
@@ -210,8 +215,13 @@ public final class NpcManager {
     private static int[] cachedRanksScratch = new int[16];
     private static WeakReference<BaseVehicle> lastLeaderVehicleRef;
     private static double brainSimTimeSec = 0.0;
+    private static volatile List<IsoNPC> liveNpcsSnapshot = java.util.Collections.emptyList();
 
     private NpcManager() {}
+
+    public static List<IsoNPC> getLiveNpcsSnapshot() {
+        return liveNpcsSnapshot;
+    }
 
     public static synchronized boolean isLoadedForCurrentSave() {
         return loadedForCurrentSave;
@@ -237,6 +247,7 @@ public final class NpcManager {
                     rec.liveNpc.getPosture().forceImmediateReset(rec.liveNpc, "RESET", true);
                     rec.liveNpc.getFollow().stop(rec.liveNpc, false, "RESET");
                     rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "RESET");
+                    rec.liveNpc.cleanupCombatResources();
                 } catch (Throwable ignored) {}
                 detachFromWorld(rec.liveNpc, owningCell);
                 rec.liveNpc = null;
@@ -246,6 +257,9 @@ public final class NpcManager {
         pendingMoveEvents.clear();
         EmberLeaderTrail.resetAll();
         SettlementDangerField.reset();
+        B42CombatRuntime.reset();
+        CombatHookContext.resetAll();
+        liveNpcsSnapshot = java.util.Collections.emptyList();
         LogisticsWorkDutyProvider.reset();
         SquadTacticalConfig.reset();
         VehicleSeatRegistry.reset();
@@ -361,6 +375,7 @@ public final class NpcManager {
         NpcRecord rec = records.remove(npcId);
         if (rec == null) return false;
         SquadTacticalConfig.clearMemberOverrides(npcId);
+        EmberSquadDirector.getInstance().releaseAllForNpc(npcId);
         NpcPortraitBakery.invalidate(npcId);
         if (rec.liveNpc != null) {
             rec.liveNpc.getBrain().shutdown(rec.liveNpc.getBrainContext());
@@ -371,6 +386,7 @@ public final class NpcManager {
             rec.liveNpc.getPosture().forceImmediateReset(rec.liveNpc, "DESPAWN", true);
             rec.liveNpc.getFollow().stop(rec.liveNpc, false, "DESPAWN");
             rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "DESPAWN");
+            rec.liveNpc.cleanupCombatResources();
             collectSettledMoveEventLocked(rec);
             rec.liveNpc.detachAnimDebugTools();
             detachFromWorld(rec.liveNpc, currentCell());
@@ -397,6 +413,7 @@ public final class NpcManager {
             return false;
         }
         IsoNPC npc = rec.liveNpc;
+        EmberSquadDirector.getInstance().releaseAllForNpc(npcId);
         npc.getBrain().shutdown(npc.getBrainContext());
         TempPropHelper.cleanupAllTempProps(npc);
         VehicleCoRideHelper.forceDetachFromVehicle(npc, "PHASE_OUT");
@@ -405,6 +422,7 @@ public final class NpcManager {
         npc.getPosture().forceImmediateReset(npc, "PHASE_OUT", true);
         npc.getFollow().stop(npc, true, "OFFSCREEN");
         npc.getLocomotion().interrupt(npc, "OFFSCREEN");
+        npc.cleanupCombatResources();
         collectSettledMoveEventLocked(rec);
         npc.detachAnimDebugTools();
         try {
@@ -604,6 +622,7 @@ public final class NpcManager {
     public static synchronized void onNpcDeath(IsoNPC npc) {
         if (npc == null) return;
         SquadTacticalConfig.clearMemberOverrides(npc.getNpcId());
+        EmberSquadDirector.getInstance().releaseAllForNpc(npc.getNpcId());
         NpcPortraitBakery.invalidate(npc.getNpcId());
         NpcRecord rec = records.get(npc.getNpcId());
         if (rec != null) {
@@ -615,6 +634,7 @@ public final class NpcManager {
             npc.getPosture().forceImmediateReset(npc, "DEATH", true);
             npc.getFollow().stop(npc, false, "DEAD");
             npc.getLocomotion().interrupt(npc, "DEAD");
+            npc.cleanupCombatResources();
             collectSettledMoveEventLocked(rec);
             rec.deadRetired = true;
             rec.offscreenSnapshot = null;
@@ -658,9 +678,13 @@ public final class NpcManager {
                     ? homeId
                     : WarehouseFastIndex.findSettlementIdAt(
                             (int) Math.floor(npc.getX()), (int) Math.floor(npc.getY()));
+            ctx.guardDuty = rec.guardDuty;
             activeNpcs.add(npc);
         }
 
+        liveNpcsSnapshot = activeNpcs;
+        IsoPlayer leader = (IsoPlayer.players != null && IsoPlayer.players.length > 0) ? IsoPlayer.players[0] : null;
+        B42CombatRuntime.tickDirector(activeNpcs, leader, System.currentTimeMillis());
         LogisticsWorkDutyProvider.tickSettlementAuctions(activeNpcs, brainSimTimeSec);
 
         for (int i = 0, n = activeNpcs.size(); i < n; i++) {
@@ -693,6 +717,28 @@ public final class NpcManager {
             setBrainMode(npcId, BrainMode.SETTLEMENT.name());
         }
         return true;
+    }
+
+    public static synchronized boolean setGuardDuty(String npcId, boolean guard) {
+        NpcRecord rec = records.get(npcId);
+        if (rec == null) {
+            return false;
+        }
+        rec.guardDuty = guard;
+        if (rec.liveNpc != null) {
+            rec.liveNpc.getBrainContext().guardDuty = guard;
+            if (guard) {
+                rec.liveNpc.getModData().rawset(MODDATA_GUARD_DUTY_KEY, Boolean.TRUE);
+            } else if (rec.liveNpc.hasModData()) {
+                rec.liveNpc.getModData().rawset(MODDATA_GUARD_DUTY_KEY, null);
+            }
+        }
+        return true;
+    }
+
+    public static synchronized boolean isGuardDuty(String npcId) {
+        NpcRecord rec = records.get(npcId);
+        return rec != null && rec.guardDuty;
     }
 
     public static synchronized String getAssignedSettlementId(String npcId) {
@@ -1550,6 +1596,10 @@ public final class NpcManager {
         if (path != null && path.contains("VEHICLE_CO_RIDE")) {
             return "BOARDING";
         }
+        String combatState = npc.getBrainContext().combatActivityState;
+        if (combatState != null && !combatState.isEmpty()) {
+            return combatState;
+        }
         EmberFollowController.FollowState fs = npc.getFollow().getState();
         if (fs == EmberFollowController.FollowState.WAIT_VEHICLE) {
             return "WAIT_VEHICLE";
@@ -2112,6 +2162,11 @@ public final class NpcManager {
                     rec.brainMode = BrainMode.valueOf(savedBrain.trim().toUpperCase(Locale.ROOT));
                 } catch (IllegalArgumentException ignored) {}
             }
+            if (npc.hasModData()
+                    && Boolean.TRUE.equals(npc.getModData().rawget(MODDATA_GUARD_DUTY_KEY))) {
+                rec.guardDuty = true;
+            }
+            npc.getBrainContext().guardDuty = rec.guardDuty;
             if (rec.brainMode == BrainMode.SQUAD) {
                 npc.getBrainContext().followPlayerIndex = 0;
                 npc.getBrainContext().followSlot = -1;
@@ -2184,15 +2239,18 @@ public final class NpcManager {
         if (owningCell != cell) {
             for (NpcRecord rec : records.values()) {
                 if (rec.liveNpc != null) {
+                    EmberSquadDirector.getInstance().releaseAllForNpc(rec.npcId);
                     rec.liveNpc.getBrain().shutdown(rec.liveNpc.getBrainContext());
                     TempPropHelper.cleanupAllTempProps(rec.liveNpc);
                     VehicleCoRideHelper.forceDetachFromVehicle(rec.liveNpc, "CELL_CHANGED");
                     rec.liveNpc.getLocomotion().interrupt(rec.liveNpc, "CELL_CHANGED");
+                    rec.liveNpc.cleanupCombatResources();
                     rec.liveNpc.setAttached(false);
                     rec.liveNpc = null;
                     rec.phasedIn = false;
                 }
             }
+            liveNpcsSnapshot = java.util.Collections.emptyList();
             owningCell = cell;
             recountOffscreenLocked();
         }

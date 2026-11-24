@@ -26,11 +26,66 @@ public final class SettlementDangerField {
     private static int cachedCount;
     private static long lastScanMs;
 
+    private static float latestClusterX;
+    private static float latestClusterY;
+    private static float latestClusterZ;
+    private static int latestClusterCount;
+    private static long directorFeedUntilMs;
+
     private SettlementDangerField() {}
 
-    public static void reset() {
+    public static synchronized void reset() {
         cachedCount = 0;
         lastScanMs = 0L;
+        latestClusterCount = 0;
+        directorFeedUntilMs = 0L;
+    }
+
+    /** 由集中式战术导演每 80ms 写入粗筛与聚类的存活威胁点，避免据点平民状态树重复扫全图丧尸。 */
+    public static synchronized void ingestDirectorThreats(
+            long nowMs,
+            float[] xs,
+            float[] ys,
+            float[] zs,
+            int count,
+            boolean hasCluster,
+            float clusterX,
+            float clusterY,
+            float clusterZ,
+            int clusterCount) {
+        int n = Math.max(0, Math.min(MAX_ZOMBIE_SAMPLES, count));
+        for (int i = 0; i < n; i++) {
+            Z_X[i] = xs[i];
+            Z_Y[i] = ys[i];
+            Z_Z[i] = zs[i];
+        }
+        cachedCount = n;
+        lastScanMs = nowMs;
+        directorFeedUntilMs = nowMs + 260L;
+        if (hasCluster) {
+            latestClusterX = clusterX;
+            latestClusterY = clusterY;
+            latestClusterZ = clusterZ;
+            latestClusterCount = clusterCount;
+        } else {
+            latestClusterCount = 0;
+        }
+    }
+
+    public static synchronized int getLatestClusterCount() {
+        return latestClusterCount;
+    }
+
+    public static synchronized float getLatestClusterX() {
+        return latestClusterX;
+    }
+
+    public static synchronized float getLatestClusterY() {
+        return latestClusterY;
+    }
+
+    public static synchronized float getLatestClusterZ() {
+        return latestClusterZ;
     }
 
     /** 刷新全据点周边存活丧尸缓存，并以 O(N_sample) 无堆分配判定当前 NPC 是否处于直接威胁半径内。 */
@@ -43,7 +98,7 @@ public final class SettlementDangerField {
             return;
         }
         long now = System.currentTimeMillis();
-        if (now - lastScanMs >= SCAN_INTERVAL_MS) {
+        if (now > directorFeedUntilMs && now - lastScanMs >= SCAN_INTERVAL_MS) {
             refreshSamples(now);
         }
 

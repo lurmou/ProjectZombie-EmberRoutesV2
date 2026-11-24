@@ -493,6 +493,14 @@ public final class EmberRoutesBridge {
         return NpcManager.getAssignedSettlementId(npcId);
     }
 
+    public static boolean setNpcGuardDuty(String npcId, boolean guard) {
+        return NpcManager.setGuardDuty(npcId, guard);
+    }
+
+    public static boolean isNpcGuardDuty(String npcId) {
+        return NpcManager.isGuardDuty(npcId);
+    }
+
     public static double clearSettlementNpcAssignments(String settlementId) {
         return NpcManager.clearSettlementAssignments(settlementId);
     }
