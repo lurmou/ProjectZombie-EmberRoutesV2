@@ -5,8 +5,10 @@ import emberroutes.npc.brain.BrainRouter;
 import emberroutes.npc.brain.TempPropHelper;
 import emberroutes.npc.perception.NpcPerception;
 import java.util.List;
+import zombie.GameTime;
 import zombie.Lua.LuaEventManager;
 import zombie.UpdateSchedulerSimulationLevel;
+import zombie.ai.states.PlayerStrafeState;
 import zombie.characters.IsoGameCharacter;
 import zombie.characters.IsoPlayer;
 import zombie.characters.SurvivorDesc;
@@ -16,6 +18,7 @@ import zombie.core.skinnedmodel.advancedanimation.LiveAnimNode;
 import zombie.core.skinnedmodel.animation.AnimationTrack;
 import zombie.iso.IsoCamera;
 import zombie.iso.IsoCell;
+import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoMovingObject;
 import zombie.iso.Vector2;
 import zombie.iso.sprite.IsoReticle;
@@ -60,6 +63,12 @@ public final class IsoNPC extends IsoPlayer {
     private float manualMovementClampY;
     private int manualMovementClampZ;
     private boolean manualMovementClampIsFinalGoal;
+
+    private boolean precisionDockClampActive;
+    private float precisionDockTargetX;
+    private float precisionDockTargetY;
+    private int precisionDockTargetZ;
+    private boolean precisionDockStopping;
 
     public IsoNPC(String npcId, IsoCell cell, SurvivorDesc desc, int x, int y, int z) {
         super(cell, desc, 0, 0, 0);
@@ -231,11 +240,46 @@ public final class IsoNPC extends IsoPlayer {
     public void clearManualMovementClamp() {
         this.manualMovementClampActive = false;
         this.manualMovementClampIsFinalGoal = false;
+        clearPrecisionDockClamp();
+    }
+
+    public void setPrecisionDockClamp(float x, float y, int z, boolean stopping) {
+        if (Float.isFinite(x) && Float.isFinite(y)) {
+            this.precisionDockTargetX = x;
+            this.precisionDockTargetY = y;
+            this.precisionDockTargetZ = z;
+            this.precisionDockStopping = stopping;
+            this.precisionDockClampActive = true;
+        } else {
+            clearPrecisionDockClamp();
+        }
+    }
+
+    public void clearPrecisionDockClamp() {
+        this.precisionDockClampActive = false;
+        this.precisionDockStopping = false;
     }
 
     public void applyManualMovementClamp(Vector2 deferred) {
+        if (deferred == null) return;
+        if (precisionDockClampActive && EmberTargetProjector.levelOf(getZ()) == precisionDockTargetZ) {
+            float mult = 1.0F;
+            try {
+                if (GameTime.instance != null && Float.isFinite(GameTime.instance.getMultiplier())) {
+                    mult = GameTime.instance.getMultiplier();
+                }
+            } catch (Throwable ignored) {}
+            float[] adj = EmberPostureMath.computePrecisionRootMotion(
+                    getX(), getY(),
+                    precisionDockTargetX, precisionDockTargetY,
+                    deferred.x, deferred.y,
+                    precisionDockStopping,
+                    mult);
+            deferred.set(adj[0], adj[1]);
+            return;
+        }
         if (!EmberParams.END_CLAMP_ENABLED) return;
-        if (deferred == null || !manualMovementClampActive) return;
+        if (!manualMovementClampActive) return;
         if (EmberTargetProjector.levelOf(getZ()) != manualMovementClampZ) return;
 
         float dx = manualMovementClampX - getX();
@@ -314,6 +358,10 @@ public final class IsoNPC extends IsoPlayer {
     @Override
     protected void calculateWalkSpeed() {
         super.calculateWalkSpeed();
+        if (locomotion.isPrecisionShortStrafing()) {
+            set(PlayerStrafeState.STRAFE_SPEED, 1.0F);
+            setVariable("StrafeSpeed", 1.0F);
+        }
         if (emberControlActive && emberMoving) {
             float physCap = getVariableFloat("WalkSpeed", 1.0F);
             float effCap = (emberWalkSpeedCap >= 0.0F) ? Math.min(physCap, emberWalkSpeedCap) : physCap;
@@ -321,6 +369,24 @@ public final class IsoNPC extends IsoPlayer {
             float cvt = Math.max(minFloor, Math.min(1.0F, effCap * emberAnimSpeedScalar));
             setVariable("WalkSpeed", cvt);
         }
+    }
+
+    @Override
+    public boolean isStrafing() {
+        if (locomotion.isPrecisionShortStrafing()) {
+            return true;
+        }
+        return super.isStrafing();
+    }
+
+    @Override
+    public boolean shouldIgnoreCollisionWithSquare(IsoGridSquare square) {
+        if (square != null
+                && (posture.shouldIgnoreCollisionWithSquare(square)
+                        || locomotion.shouldIgnoreCollisionWithSquare(square))) {
+            return true;
+        }
+        return super.shouldIgnoreCollisionWithSquare(square);
     }
 
     @Override
@@ -464,7 +530,9 @@ public final class IsoNPC extends IsoPlayer {
     @Override
     protected Vector2 getDeferredMovement(Vector2 result, boolean reset) {
         super.getDeferredMovement(result, reset);
-        applyManualMovementClamp(result);
+        if (reset) {
+            applyManualMovementClamp(result);
+        }
         return result;
     }
 

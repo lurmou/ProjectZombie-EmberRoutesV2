@@ -81,6 +81,9 @@ public final class EmberContextSteering {
                     if (mo == self || !(mo instanceof IsoGameCharacter ch) || ch instanceof IsoZombie || ch.isDead()) {
                         continue;
                     }
+                    if (ch.isSittingOnFurniture() || ch.isOnBed()) {
+                        continue;
+                    }
                     if (mo instanceof IsoNPC otherNpc && (selfNearStairs || EmberStairDiag.isNearStairs(otherNpc))) {
                         continue;
                     }

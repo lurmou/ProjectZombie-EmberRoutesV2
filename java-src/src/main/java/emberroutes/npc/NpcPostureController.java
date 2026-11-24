@@ -6,6 +6,7 @@ import emberroutes.npc.EmberPostureMath.BedSlot;
 import emberroutes.npc.brain.TempPropHelper;
 import emberroutes.warehouse.SmartObjectRegistry;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import org.joml.Vector3f;
@@ -78,7 +79,7 @@ public final class NpcPostureController {
     private static final long ENTER_WATCHDOG_MS = 4500L;
     private static final long WAKE_TO_STAND_MS = 1200L;
     private static final long STANDUP_WATCHDOG_MS = 3000L;
-    private static final float ARRIVAL_FALLBACK_DIST = 0.65F;
+    private static final float PRECISION_ARRIVAL_MAX_ERR = 0.12F;
     private static final float BED_ASLEEP_SPEED_SCALE = 0.35F;
     private static final float BED_AWAKE_SPEED_SCALE = 0.48F;
     private static final float BED_FROM_SIT_DURATION_SEC = 0.85F;
@@ -150,6 +151,7 @@ public final class NpcPostureController {
     private float bedSeatY;
     private float bedSlideStartX;
     private float bedSlideStartY;
+    private List<SeatCandidate> activeSeatCandidates;
 
     private PendingKind pendingKind = PendingKind.NONE;
     private double pendingMoveX;
@@ -194,6 +196,14 @@ public final class NpcPostureController {
 
     public boolean isActive() {
         return state != PostureState.STANDING;
+    }
+
+    /** 1:1 对齐原版 {@code PathFindBehavior2.shouldIgnoreCollisionWithSquare}，入座前对准微调期放行当前椅格碰撞。 */
+    public boolean shouldIgnoreCollisionWithSquare(IsoGridSquare square) {
+        return square != null
+                && (state == PostureState.APPROACHING_SEAT || state == PostureState.ENTERING_SEAT)
+                && targetObj != null
+                && targetObj.getSquare() == square;
     }
 
     public boolean isBlockingLocomotion() {
@@ -300,8 +310,9 @@ public final class NpcPostureController {
         }
 
         ArrayList<IsoObject> tiles = collectGridObjects(clickedFurniture);
-        Vector3f worldPos = new Vector3f();
-        SeatCandidate best = null;
+        Vector3f exactPos = new Vector3f();
+        Vector3f pathPos = new Vector3f();
+        List<SeatCandidate> candidates = new ArrayList<>();
 
         for (int ti = 0; ti < tiles.size(); ti++) {
             IsoObject tile = tiles.get(ti);
@@ -315,59 +326,49 @@ public final class NpcPostureController {
             for (String dirStr : CARDINALS) {
                 for (String sideStr : SEAT_SIDES) {
                     if (!sm.getAdjacentPosition(npc, tile, dirStr, sideStr,
-                            "sitonfurniture", "SitOnFurniture" + sideStr, worldPos)) {
+                            "sitonfurniture", "SitOnFurniture" + sideStr, exactPos)) {
                         continue;
                     }
-                    if (!validateAndProjectSeatApproach(npc, cell, sq, dirStr, sideStr, worldPos)) {
+                    if (!computeSeatApproachPair(npc, cell, sq, dirStr, sideStr, exactPos, pathPos)) {
                         continue;
                     }
-                    float dist = dist3D(npc, worldPos.x, worldPos.y, sq.getZ());
+                    float dist = dist3D(npc, pathPos.x, pathPos.y, sq.getZ());
                     float score = dist + (tile == clickedFurniture ? -0.5F : 0.0F);
-                    if (best == null || score < best.score) {
-                        BedFacing sitFacing = BedFacing.normalize(dirStr);
-                        IsoDirections iSitDir = toIsoDir(sitFacing);
-                        IsoDirections iBeforeDir = toIsoDir(EmberPostureMath.resolveSeatBeforeDir(sitFacing, sideStr));
-                        best = new SeatCandidate(tile, iSitDir, sideStr, iBeforeDir,
-                                worldPos.x, worldPos.y, sq.getZ(), score);
-                    }
+                    BedFacing sitFacing = BedFacing.normalize(dirStr);
+                    IsoDirections iSitDir = toIsoDir(sitFacing);
+                    IsoDirections iBeforeDir = toIsoDir(EmberPostureMath.resolveSeatBeforeDir(sitFacing, sideStr));
+                    candidates.add(new SeatCandidate(tile, iSitDir, sideStr, iBeforeDir,
+                            pathPos.x, pathPos.y, exactPos.x, exactPos.y, sq.getZ(), score));
                 }
             }
         }
 
-        if (best == null) {
+        if (candidates.isEmpty()) {
             DebugLog.log(String.format(Locale.US,
                     "[EmberRoutes][POSTURE_DIAG] SIT_NO_SLOT npc=%s obj=%s",
                     npc.getNpcId(), safeSpriteName(clickedFurniture)));
             return false;
         }
 
+        candidates.sort(Comparator.comparingDouble(c -> c.score));
+        SeatCandidate best = candidates.get(0);
+
         npc.getFollow().stop(npc, false, "POSTURE_SIT");
-        this.targetObj = best.tile;
+        applySeatCandidate(best);
         this.bedSlotOtherTile = null;
-        this.sitDir = best.sitDir;
-        this.seatSideStr = best.sideStr;
-        this.beforeDir = best.beforeDir;
-        this.approachX = best.x;
-        this.approachY = best.y;
-        this.approachZ = best.z;
+        this.activeSeatCandidates = candidates;
         clearSitBridgeTargets();
         clearBedFallbackTargets();
         this.standUpAfterSitBridge = false;
         this.urgentAfterSitBridge = false;
         this.bedSeatTile = null;
-        saveSafeStandPos(best.x, best.y, best.z);
-        this.pendingMoveSeq = npc.getLocomotion().moveTo(npc, best.x, best.y, best.z, false);
-        this.eventFired = false;
-        this.eventRetried = false;
-        this.turnStartedMs = 0L;
-        this.turnSettleStartMs = 0L;
-        this.state = PostureState.APPROACHING_SEAT;
-        this.stateEnteredMs = System.currentTimeMillis();
+        this.pendingMoveSeq = issuePrecisionSeatMove(npc, candidates, best.tile.getSquare());
+        enterApproachingState(PostureState.APPROACHING_SEAT);
 
         DebugLog.log(String.format(Locale.US,
-                "[EmberRoutes][POSTURE_DIAG] SIT_CMD npc=%s sprite=%s sitDir=%s side=%s beforeDir=%s app=(%.2f,%.2f,%d) seq=%d",
+                "[EmberRoutes][POSTURE_DIAG] SIT_CMD npc=%s sprite=%s sitDir=%s side=%s beforeDir=%s path=(%.2f,%.2f) app=(%.2f,%.2f,%d) cands=%d seq=%d",
                 npc.getNpcId(), safeSpriteName(best.tile), best.sitDir.name(), best.sideStr, best.beforeDir.name(),
-                best.x, best.y, best.z, pendingMoveSeq));
+                best.pathX, best.pathY, best.exactX, best.exactY, best.z, candidates.size(), pendingMoveSeq));
         return true;
     }
 
@@ -431,40 +432,30 @@ public final class NpcPostureController {
         BedViaSitCandidate sitCand = findBestBedViaSitCandidate(npc, cell, layout, excludeTile);
         if (sitCand != null) {
             npc.getFollow().stop(npc, false, "POSTURE_SLEEP_VIA_SIT");
-            this.targetObj = sitCand.seatTile;
-            this.bedSlotOtherTile = (sitCand.otherSlotObj != null && sitCand.otherSlotObj != sitCand.seatTile)
+            SeatCandidate primary = sitCand.primary;
+            applySeatCandidate(primary);
+            this.bedSlotOtherTile = (sitCand.otherSlotObj != null && sitCand.otherSlotObj != primary.tile)
                     ? sitCand.otherSlotObj
                     : null;
-            this.sitDir = sitCand.sitDir;
-            this.seatSideStr = sitCand.sideStr;
-            this.beforeDir = sitCand.beforeDir;
-            this.approachX = sitCand.x;
-            this.approachY = sitCand.y;
-            this.approachZ = sitCand.z;
+            this.activeSeatCandidates = sitCand.sideCandidates;
             this.bedHeadTargetForSitBridge = sitCand.sleepHeadObj;
             this.bedOtherTileForSitBridge = this.bedSlotOtherTile;
             this.bedLieFacingForSitBridge = sitCand.lieFacing;
             this.bedApproachFallbackBed = (!fallbackUsed && sitCand.isHeadTile) ? clickedBed : null;
-            this.bedApproachExcludedTile = (!fallbackUsed && sitCand.isHeadTile) ? sitCand.seatTile : null;
+            this.bedApproachExcludedTile = (!fallbackUsed && sitCand.isHeadTile) ? primary.tile : null;
             this.bedApproachFallbackUsed = fallbackUsed;
             this.standUpAfterSitBridge = false;
             this.urgentAfterSitBridge = false;
             this.bedSeatTile = null;
-            saveSafeStandPos(sitCand.x, sitCand.y, sitCand.z);
-            this.pendingMoveSeq = npc.getLocomotion().moveTo(npc, sitCand.x, sitCand.y, sitCand.z, false);
-            this.eventFired = false;
-            this.eventRetried = false;
-            this.turnStartedMs = 0L;
-            this.turnSettleStartMs = 0L;
-            this.state = PostureState.APPROACHING_SEAT;
-            this.stateEnteredMs = System.currentTimeMillis();
+            this.pendingMoveSeq = issuePrecisionSeatMove(npc, sitCand.sideCandidates, primary.tile.getSquare());
+            enterApproachingState(PostureState.APPROACHING_SEAT);
 
             DebugLog.log(String.format(Locale.US,
-                    "[EmberRoutes][POSTURE_DIAG] BED_VIA_SIT_CMD npc=%s seatSprite=%s sleepHead=%s headAtFoot=%s lieDir=%s sitDir=%s side=%s beforeDir=%s app=(%.2f,%.2f,%d) seq=%d",
-                    npc.getNpcId(), safeSpriteName(sitCand.seatTile), safeSpriteName(sitCand.sleepHeadObj),
+                    "[EmberRoutes][POSTURE_DIAG] BED_VIA_SIT_CMD npc=%s seatSprite=%s sleepHead=%s headAtFoot=%s lieDir=%s sitDir=%s side=%s beforeDir=%s path=(%.2f,%.2f) app=(%.2f,%.2f,%d) seq=%d",
+                    npc.getNpcId(), safeSpriteName(primary.tile), safeSpriteName(sitCand.sleepHeadObj),
                     !sitCand.isHeadTile, sitCand.lieFacing.name(),
-                    sitCand.sitDir.name(), sitCand.sideStr, sitCand.beforeDir.name(),
-                    sitCand.x, sitCand.y, sitCand.z, pendingMoveSeq));
+                    primary.sitDir.name(), primary.sideStr, primary.beforeDir.name(),
+                    primary.pathX, primary.pathY, primary.exactX, primary.exactY, primary.z, pendingMoveSeq));
             return true;
         }
 
@@ -488,6 +479,7 @@ public final class NpcPostureController {
         this.bedSlotOtherTile = (best.otherSlotObj != null && best.otherSlotObj != best.effectiveHeadObj)
                 ? best.otherSlotObj
                 : null;
+        this.activeSeatCandidates = null;
         this.onBedDirection = app.onBedDirection();
         this.beforeDir = toIsoDir(app.beforeDir());
         this.lieDir = toIsoDir(app.lieDir());
@@ -514,13 +506,12 @@ public final class NpcPostureController {
         this.bedTraceLastLogMs = 0L;
         this.bedTraceLastPhase = "";
         saveSafeStandPos(app.approachX(), app.approachY(), layout.bedZ);
-        this.pendingMoveSeq = npc.getLocomotion().moveTo(npc, app.approachX(), app.approachY(), layout.bedZ, false);
-        this.eventFired = false;
-        this.eventRetried = false;
-        this.turnStartedMs = 0L;
-        this.turnSettleStartMs = 0L;
-        this.state = PostureState.APPROACHING_BED;
-        this.stateEnteredMs = System.currentTimeMillis();
+        this.pendingMoveSeq = npc.getLocomotion().moveToExact(
+                npc,
+                List.of(new EmberLocomotionController.PrecisionTarget(
+                        app.approachX(), app.approachY(), app.approachX(), app.approachY(), layout.bedZ, 0, null)),
+                null);
+        enterApproachingState(PostureState.APPROACHING_BED);
 
         DebugLog.log(String.format(Locale.US,
                 "[EmberRoutes][POSTURE_DIAG] BED_CMD npc=%s sprite=%s propsFacing=%s resolved=%s seatingFacing=%s grid=%dx%d slot=%d/%d headAtFoot=%s onBedDir=%s beforeDir=%s lieDir=%s app=(%.2f,%.2f,%d) liftZ=%.3f seq=%d",
@@ -673,21 +664,43 @@ public final class NpcPostureController {
     }
 
     private void tickApproaching(IsoNPC npc, long now) {
+        EmberLocomotionController loco = npc.getLocomotion();
+        if (state == PostureState.APPROACHING_SEAT
+                && activeSeatCandidates != null
+                && !activeSeatCandidates.isEmpty()) {
+            int tag = loco.getResolvedPrecisionTag();
+            if (tag >= 0 && tag < activeSeatCandidates.size()) {
+                SeatCandidate resolved = activeSeatCandidates.get(tag);
+                if (resolved.tile != targetObj
+                        || Math.abs(resolved.exactX - approachX) > 1.0E-4F
+                        || Math.abs(resolved.exactY - approachY) > 1.0E-4F) {
+                    applySeatCandidate(resolved);
+                }
+            }
+        }
         if (targetObj == null || targetObj.getObjectIndex() == -1) {
-            npc.getLocomotion().stop(npc);
+            loco.stop(npc);
             clearActiveFields();
             state = PostureState.STANDING;
             return;
         }
-        EmberLocomotionController loco = npc.getLocomotion();
         int curZ = EmberTargetProjector.levelOf(npc.getZ());
         float remDist = (float) Math.hypot(approachX - npc.getX(), approachY - npc.getY());
         boolean arrivedBySettled = loco.getSettledSeq() >= pendingMoveSeq
-                && (loco.getStatus() == EmberLocomotionController.Status.ARRIVED
-                || (curZ == approachZ && remDist <= ARRIVAL_FALLBACK_DIST));
+                && loco.getStatus() == EmberLocomotionController.Status.ARRIVED
+                && curZ == approachZ
+                && remDist <= PRECISION_ARRIVAL_MAX_ERR;
 
         if (arrivedBySettled) {
+            if (state == PostureState.APPROACHING_SEAT
+                    && (targetObj.isFurnitureOccupied(npc) || NpcManager.isFurnitureTileClaimedByOther(npc, targetObj))) {
+                loco.stop(npc);
+                clearActiveFields();
+                state = PostureState.STANDING;
+                return;
+            }
             loco.stop(npc);
+            this.activeSeatCandidates = null;
             eventFired = false;
             eventRetried = false;
             turnStartedMs = 0L;
@@ -707,17 +720,17 @@ public final class NpcPostureController {
                 IsoObject retryBed = this.bedApproachFallbackBed;
                 IsoObject failedTile = this.bedApproachExcludedTile;
                 DebugLog.log(String.format(Locale.US,
-                        "[EmberRoutes][POSTURE_DIAG] APPROACH_FAILED_BED_FALLBACK npc=%s state=%s status=%s reason=%s exclude=%s",
+                        "[EmberRoutes][POSTURE_DIAG] APPROACH_FAILED_BED_FALLBACK npc=%s state=%s status=%s reason=%s exclude=%s rem=%.3f",
                         npc.getNpcId(), state.name(), loco.getStatus().name(), loco.getLastReason(),
-                        safeSpriteName(failedTile)));
+                        safeSpriteName(failedTile), remDist));
                 clearActiveFields();
                 state = PostureState.STANDING;
                 commandSleepOnBedInternal(npc, retryBed, failedTile, true);
                 return;
             }
             DebugLog.log(String.format(Locale.US,
-                    "[EmberRoutes][POSTURE_DIAG] APPROACH_FAILED npc=%s state=%s status=%s reason=%s",
-                    npc.getNpcId(), state.name(), loco.getStatus().name(), loco.getLastReason()));
+                    "[EmberRoutes][POSTURE_DIAG] APPROACH_FAILED npc=%s state=%s status=%s reason=%s rem=%.3f",
+                    npc.getNpcId(), state.name(), loco.getStatus().name(), loco.getLastReason(), remDist));
             clearActiveFields();
             state = PostureState.STANDING;
         }
@@ -751,13 +764,14 @@ public final class NpcPostureController {
             npc.setVariable("ExerciseEnded", true);
 
             ensureAlignedBeforeEntry(npc, beforeDir);
+            float errApp = (float) Math.hypot(approachX - npc.getX(), approachY - npc.getY());
             npc.reportEvent("EventSitOnFurniture");
             npc.faceDirection(sitDir);
             eventFired = true;
             eventFiredMs = now;
             DebugLog.log(String.format(Locale.US,
-                    "[EmberRoutes][POSTURE_DIAG] SIT_FIRE npc=%s sitDir=%s side=%s beforeDir=%s",
-                    npc.getNpcId(), sitDir.name(), seatSideStr, beforeDir.name()));
+                    "[EmberRoutes][POSTURE_DIAG] SIT_FIRE npc=%s sitDir=%s side=%s beforeDir=%s errApp=%.3f",
+                    npc.getNpcId(), sitDir.name(), seatSideStr, beforeDir.name(), errApp));
             return;
         }
 
@@ -1347,6 +1361,7 @@ public final class NpcPostureController {
         this.bedSeatY = 0.0F;
         this.bedSlideStartX = 0.0F;
         this.bedSlideStartY = 0.0F;
+        this.activeSeatCandidates = null;
     }
 
     private void updateBedRenderElevation(IsoNPC npc, long now) {
@@ -1767,32 +1782,76 @@ public final class NpcPostureController {
                 && npc.getAdvancedAnimator().animSet != null;
     }
 
-    private static boolean validateAndProjectSeatApproach(
-            IsoNPC npc, IsoCell cell, IsoGridSquare sq, String dirStr, String sideStr, Vector3f worldPos) {
+    private void enterApproachingState(PostureState nextState) {
+        this.eventFired = false;
+        this.eventRetried = false;
+        this.turnStartedMs = 0L;
+        this.turnSettleStartMs = 0L;
+        this.state = nextState;
+        this.stateEnteredMs = System.currentTimeMillis();
+    }
+
+    private void applySeatCandidate(SeatCandidate cand) {
+        this.targetObj = cand.tile;
+        this.sitDir = cand.sitDir;
+        this.seatSideStr = cand.sideStr;
+        this.beforeDir = cand.beforeDir;
+        this.approachX = cand.exactX;
+        this.approachY = cand.exactY;
+        this.approachZ = cand.z;
+        saveSafeStandPos(cand.pathX, cand.pathY, cand.z);
+    }
+
+    private static long issuePrecisionSeatMove(
+            IsoNPC npc, List<SeatCandidate> candidates, IsoGridSquare fallbackIgnoreSquare) {
+        List<EmberLocomotionController.PrecisionTarget> targets = new ArrayList<>(candidates.size());
+        for (int i = 0, n = candidates.size(); i < n; i++) {
+            SeatCandidate c = candidates.get(i);
+            IsoGridSquare sq = c.tile != null ? c.tile.getSquare() : fallbackIgnoreSquare;
+            targets.add(new EmberLocomotionController.PrecisionTarget(
+                    c.pathX, c.pathY, c.exactX, c.exactY, c.z, i, sq));
+        }
+        return npc.getLocomotion().moveToExact(npc, targets, fallbackIgnoreSquare);
+    }
+
+    /**
+     * 1:1 对齐原版 {@code PathFindBehavior2.pathToSitOnFurnitureNoSpriteGrid}：
+     * 保留 {@code exactPos} 作为最终入座精确锚点，同时为实心椅计算外推 0.30F 的 {@code outPathPos} 供可见性图寻路。
+     */
+    private static boolean computeSeatApproachPair(
+            IsoNPC npc, IsoCell cell, IsoGridSquare sq,
+            String dirStr, String sideStr,
+            Vector3f exactPos, Vector3f outPathPos) {
         int sx = sq.getX();
         int sy = sq.getY();
         int sz = sq.getZ();
-        boolean insideSq = worldPos.x >= sx && worldPos.x < sx + 1 && worldPos.y >= sy && worldPos.y < sy + 1;
+        outPathPos.set(exactPos);
+        boolean insideSq = exactPos.x >= sx && exactPos.x < sx + 1 && exactPos.y >= sy && exactPos.y < sy + 1;
 
         if ((sq.isSolid() || sq.isSolidTrans()) && insideSq) {
-            float ox = worldPos.x;
-            float oy = worldPos.y;
-            pushSeatOutsideSolidSquare(sq, dirStr, sideStr, worldPos);
-            if (isLosBlocked(cell, PZMath.fastfloor(worldPos.x), PZMath.fastfloor(worldPos.y), sz,
-                    PZMath.fastfloor(ox), PZMath.fastfloor(oy))) {
+            pushSeatOutsideSolidSquare(sq, dirStr, sideStr, outPathPos);
+            if (isLosBlocked(cell, PZMath.fastfloor(outPathPos.x), PZMath.fastfloor(outPathPos.y), sz,
+                    PZMath.fastfloor(exactPos.x), PZMath.fastfloor(exactPos.y))) {
                 return false;
             }
-        } else if (!insideSq) {
-            if (isLosBlocked(cell, PZMath.fastfloor(worldPos.x), PZMath.fastfloor(worldPos.y), sz, sx, sy)) {
+            IsoGridSquare appSq = cell.getGridSquare(PZMath.fastfloor(outPathPos.x), PZMath.fastfloor(outPathPos.y), sz);
+            if (appSq == null || !appSq.TreatAsSolidFloor() || appSq.isSolid() || appSq.isSolidTrans()) {
+                return false;
+            }
+            return npc.canStandAt(outPathPos.x, outPathPos.y, sz);
+        }
+
+        if (!insideSq) {
+            if (isLosBlocked(cell, PZMath.fastfloor(outPathPos.x), PZMath.fastfloor(outPathPos.y), sz, sx, sy)) {
                 return false;
             }
         }
 
-        IsoGridSquare appSq = cell.getGridSquare(PZMath.fastfloor(worldPos.x), PZMath.fastfloor(worldPos.y), sz);
-        if (appSq == null || !appSq.TreatAsSolidFloor()) {
+        IsoGridSquare appSq = cell.getGridSquare(PZMath.fastfloor(outPathPos.x), PZMath.fastfloor(outPathPos.y), sz);
+        if (appSq == null || !appSq.TreatAsSolidFloor() || appSq.isSolid() || appSq.isSolidTrans()) {
             return false;
         }
-        return EmberTargetProjector.canStandClean(npc, worldPos.x, worldPos.y, sz);
+        return sq.isSolid() || sq.isSolidTrans() || npc.canStandAt(outPathPos.x, outPathPos.y, sz);
     }
 
     private static void pushSeatOutsideSolidSquare(IsoGridSquare sq, String dirStr, String sideStr, Vector3f pos) {
@@ -1993,7 +2052,8 @@ public final class NpcPostureController {
             return null;
         }
         BedFacing[] sideOutDirs = {layout.facing.rotLeft90(), layout.facing.rotRight90()};
-        Vector3f worldPos = new Vector3f();
+        Vector3f exactPos = new Vector3f();
+        Vector3f pathPos = new Vector3f();
         BedViaSitCandidate best = null;
 
         for (int si = 0; si < layout.slots.size(); si++) {
@@ -2032,24 +2092,31 @@ public final class NpcPostureController {
                             ? ((footObj != null && footObj != headObj && footObj.getObjectIndex() != -1) ? footObj : null)
                             : headObj;
                     BedFacing lieFacing = isHeadTile ? layout.facing : layout.facing.opposite();
+                    List<SeatCandidate> group = new ArrayList<>(SEAT_SIDES.length);
                     for (String sideStr : SEAT_SIDES) {
                         if (!sm.getAdjacentPosition(npc, seatTile, outDir.name(), sideStr,
-                                "sitonfurniture", "SitOnFurniture" + sideStr, worldPos)) {
+                                "sitonfurniture", "SitOnFurniture" + sideStr, exactPos)) {
                             continue;
                         }
-                        if (!validateAndProjectSeatApproach(npc, cell, sq, outDir.name(), sideStr, worldPos)) {
+                        if (!computeSeatApproachPair(npc, cell, sq, outDir.name(), sideStr, exactPos, pathPos)) {
                             continue;
                         }
-                        float dist = dist3D(npc, worldPos.x, worldPos.y, sq.getZ());
+                        float dist = dist3D(npc, pathPos.x, pathPos.y, sq.getZ());
                         float score = dist
                                 + (isHeadTile ? HEAD_TILE_PRIORITY_BONUS : 0.0F)
                                 + (slot.slotIndex() == layout.clickedSlot ? -1.5F : 0.0F)
                                 + ("Front".equals(sideStr) ? -0.3F : 0.0F);
-                        if (best == null || score < best.score) {
-                            IsoDirections iSitDir = toIsoDir(outDir);
-                            IsoDirections iBeforeDir = toIsoDir(EmberPostureMath.resolveSeatBeforeDir(outDir, sideStr));
-                            best = new BedViaSitCandidate(seatTile, otherSlotObj, seatTile, isHeadTile, lieFacing,
-                                    iSitDir, sideStr, iBeforeDir, worldPos.x, worldPos.y, sq.getZ(), score);
+                        IsoDirections iSitDir = toIsoDir(outDir);
+                        IsoDirections iBeforeDir = toIsoDir(EmberPostureMath.resolveSeatBeforeDir(outDir, sideStr));
+                        group.add(new SeatCandidate(seatTile, iSitDir, sideStr, iBeforeDir,
+                                pathPos.x, pathPos.y, exactPos.x, exactPos.y, sq.getZ(), score));
+                    }
+                    if (!group.isEmpty()) {
+                        group.sort(Comparator.comparingDouble(c -> c.score));
+                        SeatCandidate groupBest = group.get(0);
+                        if (best == null || groupBest.score < best.primary.score) {
+                            best = new BedViaSitCandidate(
+                                    seatTile, otherSlotObj, isHeadTile, lieFacing, groupBest, group);
                         }
                     }
                 }
@@ -2253,7 +2320,7 @@ public final class NpcPostureController {
 
     private record SeatCandidate(
             IsoObject tile, IsoDirections sitDir, String sideStr, IsoDirections beforeDir,
-            float x, float y, int z, float score) {}
+            float pathX, float pathY, float exactX, float exactY, int z, float score) {}
 
     private record BedCandidate(
             IsoObject effectiveHeadObj, IsoObject otherSlotObj, int slotIndex, BedApproach approach, float score) {}
@@ -2263,7 +2330,6 @@ public final class NpcPostureController {
             IsoObject[][] gridObjects, BedFacing facing, List<BedSlot> slots, int clickedSlot) {}
 
     private record BedViaSitCandidate(
-            IsoObject sleepHeadObj, IsoObject otherSlotObj, IsoObject seatTile, boolean isHeadTile,
-            BedFacing lieFacing, IsoDirections sitDir, String sideStr,
-            IsoDirections beforeDir, float x, float y, int z, float score) {}
+            IsoObject sleepHeadObj, IsoObject otherSlotObj, boolean isHeadTile,
+            BedFacing lieFacing, SeatCandidate primary, List<SeatCandidate> sideCandidates) {}
 }

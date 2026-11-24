@@ -5,7 +5,7 @@
 ## 1. 开工第一铁律（防脑补与防失忆）
 
 - **动笔前必读架构与路由表**：任何模块设计、新增功能或重构前，**必须先读取 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（分阶段仿真内核与兼容契约）及 [docs/MODULE_MAP.md](docs/MODULE_MAP.md) 中对应阶段的「原产品设计」「旧库必读参考文件」与「B42 引擎实证红线」**，并在方案中贴出具体代码文件路径与行号。严禁跳过旧库已有交互/领域设计凭通用游戏套路自行脑补概念（如禁止凭空发明“地面存储子区”、禁止两段式右键框选）。
-- **原版 B42 全链路源码前置通读（严禁碎片化摸象）**：本机完整可读 Java 反编译源码位于 `D:/Software/GameApp/steam/steamapps/common/ProjectZomboid/zombie反编译源码`，原版动画树位于 `.../media/AnimSets`，原版 Lua 位于 `.../media/lua`（详见 [.agents/rules/vanilla-full-chain-audit.md](.agents/rules/vanilla-full-chain-audit.md)）。凡涉及引擎机制（运动、动画、TimedAction、战斗、容器、载具、UI），**动工前必须直接在 `zombie反编译源码` 中一次性通读从入口到结算的完整端到端调用链与真玩家原生分支**；严禁拿 `javap -c` 切局部片段盲人摸象，严禁未核清原版默认参数与门控条件就塞魔法倍率让用户反复实机试错。
+- **原版 B42 全链路源码前置通读与对照表门禁（严禁碎片化摸象）**：本机完整可读 Java 反编译源码位于 `D:/Software/GameApp/steam/steamapps/common/ProjectZomboid/zombie反编译源码`，原版动画树位于 `.../media/AnimSets`，原版 Lua 位于 `.../media/lua`（详见 [.agents/rules/vanilla-full-chain-audit.md](.agents/rules/vanilla-full-chain-audit.md)）。凡涉及引擎机制（运动、动画、TimedAction、战斗、容器、载具、UI），**动工前必须直接在 `zombie反编译源码`、`media/lua`、`media/AnimSets` 中一次性通读从入口到结算的完整端到端调用链与真玩家原生分支，并在写代码前先向用户列出《原版全链路 vs 拟实现对照表》（标注原版文件/行号、参数/公式/门控、拟复用方式与任何偏差）**；严禁拿 `javap -c` 切局部片段盲人摸象，严禁未列对照表就凭经验抄近道或塞魔法倍率让用户反复实机试错。
 - **尊重原版玩法、复用原版链路与机制（严禁自作聪明抄近道，也不机械照抄错配参数）**：
   - 实现任何 NPC 行为或系统交互时，**必须尊重原版玩法规则并复用原版引擎机制**（例如：原版玩家不能隔着背上的背包直接吃喝/打绷带，必须先将物品从背包掏入主物品栏 `getInventory()`、挂载原版 `CharacterTimedActions.BaseAction` 手模与动画事件、用完将剩余物品归还原背包；严禁自作聪明跳过原版容器/动作/渲染规则搞“空手假动作”或私造简化旁路）。**区分“原版玩法/引擎机制”与“原版特定资产的配套参数”**：自定义动作/资产不得机械照抄不适用的原版 XML 开关（例如将原地坐躺动画的 `m_useDeferedRotation=true` 硬套给前倾跪爬自定义动画）。
   - **质量无损前提下的最简路径**：在不损害最终成功质量与原版玩法还原度的前提下，优先选择最简洁的原生实现（先查声明式 XML / 原生引擎能力如 `<m_Transitions>`，能通过删减错配开关解决绝不额外堆代码）；**严禁用一层 Java 数学补偿去对冲另一层错配引擎开关的副作用**。
