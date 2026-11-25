@@ -12,11 +12,13 @@ import zombie.inventory.InventoryItem;
  * 从背囊与主物品栏取真实散弹逐发压入未满兼容弹匣，支持步行且受威胁瞬间打断。
  */
 public final class NpcRepackMagAction extends BaseAction {
-    private static final double REPACK_INTERVAL_SIM_SEC = 0.55;
+    private static final double STALL_WATCHDOG_SIM_SEC = 3.0;
 
     private final IsoNPC npc;
     private final InventoryItem magazine;
-    private double accumSec;
+    private float updateLoadBulletsTime;
+    private boolean loadedThisLoop;
+    private double stallWatchdogSec;
     private boolean done;
 
     public NpcRepackMagAction(IsoNPC npc, InventoryItem magazine) {
@@ -62,7 +64,9 @@ public final class NpcRepackMagAction extends BaseAction {
     @Override
     public void start() {
         super.start();
-        accumSec = 0.0;
+        updateLoadBulletsTime = 0.0F;
+        loadedThisLoop = false;
+        stallWatchdogSec = 0.0;
         if (!NpcWeaponSelector.ensureItemInMainInventory(npc, magazine)) {
             done = true;
             forceStop();
@@ -78,12 +82,19 @@ public final class NpcRepackMagAction extends BaseAction {
     public void update() {
         super.update();
         if (done) return;
-        double dt = GameTime.getInstance() != null ? GameTime.getInstance().getTimeDelta() : 0.016;
-        accumSec += Math.max(0.0, dt);
         float reloadSpeed = npc.getVariableFloat("ReloadSpeed", 1.0F);
-        npc.setVariable("UpdateLoadBulletsTime", (float) ((accumSec * reloadSpeed) % 1.0));
-        if (accumSec * reloadSpeed >= REPACK_INTERVAL_SIM_SEC) {
-            accumSec = 0.0;
+        float animTimeDelta = Math.max(0.0F, npc.getAnimationTimeDelta()) * reloadSpeed;
+        float oldUpdateLoadBulletsTime = updateLoadBulletsTime;
+        updateLoadBulletsTime = (updateLoadBulletsTime + animTimeDelta) % 1.0F;
+        if (oldUpdateLoadBulletsTime > updateLoadBulletsTime) {
+            loadedThisLoop = false;
+        }
+        npc.setVariable("UpdateLoadBulletsTime", updateLoadBulletsTime);
+
+        double dt = GameTime.getInstance() != null ? GameTime.getInstance().getTimeDelta() : 0.016;
+        stallWatchdogSec += Math.max(0.0, dt);
+        if (stallWatchdogSec >= STALL_WATCHDOG_SIM_SEC) {
+            stallWatchdogSec = 0.0;
             loadOneBullet();
         }
     }
@@ -92,9 +103,14 @@ public final class NpcRepackMagAction extends BaseAction {
     public void OnAnimEvent(AnimEvent event) {
         if (event == null || done) return;
         if ("InsertBullet".equals(event.eventName)) {
+            if (loadedThisLoop) {
+                return;
+            }
+            loadedThisLoop = true;
+            stallWatchdogSec = 0.0;
             loadOneBullet();
         } else if ("InsertBulletSound".equals(event.eventName) && event.parameterValue != null) {
-            if (magazine.getCurrentAmmoCount() < magazine.getMaxAmmo()) {
+            if (!loadedThisLoop && magazine.getCurrentAmmoCount() < magazine.getMaxAmmo()) {
                 npc.playSound(event.parameterValue);
             }
         }

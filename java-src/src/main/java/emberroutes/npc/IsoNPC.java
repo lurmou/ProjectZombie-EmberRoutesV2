@@ -518,10 +518,7 @@ public final class IsoNPC extends IsoPlayer {
         }
         locomotion.clearCombatMove(this);
         try {
-            BallisticsController bc = getBallisticsController();
-            if (bc != null) {
-                bc.releaseController();
-            }
+            releaseBallisticsController();
         } catch (Throwable ignored) {}
     }
 

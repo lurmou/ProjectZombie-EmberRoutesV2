@@ -167,6 +167,7 @@ public final class SquadCombatNodes {
             }
 
             if (npc.getMeleeDelay() <= 0.5F && npc.CanAttack()) {
+                assignAttackTargetSquare(npc, threat);
                 NpcNullInputComponent in = npc.getNullInputComponent();
                 boolean transition = CombatTargetState.isPostureTransition(threat.stateMask);
                 if (!transition && CombatTargetState.isGroundAttackable(threat.stateMask) && dist < 1.15F) {
@@ -513,6 +514,9 @@ public final class SquadCombatNodes {
             ctx.combatActivityState = "RELOADING";
             npc.setIsAiming(false);
             npc.clearVirtualAim();
+            if (curAct instanceof NpcReloadAction) {
+                director.getReloadPool().acquire(npc.getNpcId(), nowMs);
+            }
             if (!(curAct instanceof NpcReloadAction) && curAct.stopOnWalk) {
                 npc.getLocomotion().clearCombatMove(npc);
                 return;

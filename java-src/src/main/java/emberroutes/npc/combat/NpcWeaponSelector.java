@@ -43,10 +43,40 @@ public final class NpcWeaponSelector {
         return hw != null && !hw.isRanged() && hw.getCondition() > 0 && !hw.hasTag(ItemTag.FAKE_WEAPON);
     }
 
+    /** 若随从/守卫接管的枪械处于 {@code Safe} 保险档位，自动切至单发（或首个非 Safe 射击档）。 */
+    public static void ensureFireModeOffSafe(HandWeapon gun) {
+        if (gun == null || !gun.isSelectFire() || !"Safe".equals(gun.getFireMode())) {
+            return;
+        }
+        List<String> modes = gun.getFireModePossibilities();
+        if (modes == null || modes.isEmpty()) {
+            gun.setFireMode("Single");
+            return;
+        }
+        String fallback = null;
+        for (int i = 0, n = modes.size(); i < n; i++) {
+            String m = modes.get(i);
+            if ("Single".equals(m)) {
+                gun.setFireMode(m);
+                return;
+            }
+            if (fallback == null && m != null && !m.isEmpty() && !"Safe".equals(m)) {
+                fallback = m;
+            }
+        }
+        if (fallback != null) {
+            gun.setFireMode(fallback);
+        }
+    }
+
     /** 对照 {@code ISReloadWeaponAction.canShoot}（额外校验 Safe 保险状态）。 */
     public static boolean canShootNow(IsoNPC npc, HandWeapon gun) {
+        return canShootCore(npc, gun, true);
+    }
+
+    private static boolean canShootCore(IsoNPC npc, HandWeapon gun, boolean checkSafe) {
         if (npc == null || !isUsableFirearm(gun)) return false;
-        if (gun.isSelectFire() && "Safe".equals(gun.getFireMode())) {
+        if (checkSafe && gun.isSelectFire() && "Safe".equals(gun.getFireMode())) {
             return false;
         }
         if (npc.isUnlimitedAmmo()) {
@@ -173,6 +203,9 @@ public final class NpcWeaponSelector {
         }
 
         HandWeapon current = getEquippedWeapon(npc);
+        if (isUsableFirearm(current)) {
+            ensureFireModeOffSafe(current);
+        }
         HandWeapon bestGun = findBestFirearmWithAmmoOrChambered(npc);
         HandWeapon bestMelee = findBestMeleeWeapon(npc);
 
@@ -235,6 +268,9 @@ public final class NpcWeaponSelector {
         if (prevPrimary != null && prevPrimary != weapon && npc.getSecondaryHandItem() == prevPrimary) {
             npc.setSecondaryHandItem(null);
         }
+        if (weapon.isAimedFirearm()) {
+            ensureFireModeOffSafe(weapon);
+        }
         npc.setPrimaryHandItem(weapon);
         if (weapon.isTwoHandWeapon()) {
             npc.setSecondaryHandItem(weapon);
@@ -279,7 +315,7 @@ public final class NpcWeaponSelector {
     private static float scoreCandidateWeapon(IsoNPC npc, HandWeapon hw, boolean firearm) {
         if (firearm) {
             if (!isUsableFirearm(hw)) return -Float.MAX_VALUE;
-            if (!canShootNow(npc, hw) && resolveNeededReload(npc, hw) == ReloadKind.NONE) {
+            if (!canShootCore(npc, hw, false) && resolveNeededReload(npc, hw) == ReloadKind.NONE) {
                 return -Float.MAX_VALUE;
             }
             float score = hw.getMaxDamage() * 10.0F + hw.getCurrentAmmoCount()

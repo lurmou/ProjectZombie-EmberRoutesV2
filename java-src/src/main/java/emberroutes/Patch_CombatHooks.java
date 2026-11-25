@@ -257,7 +257,7 @@ public final class Patch_CombatHooks {
     public static final class MoodlesWiggleGuard {
         @Patch.OnEnter(skipOn = true)
         public static boolean enter() {
-            return CombatHookContext.isNpcCombatActive();
+            return CombatHookContext.isNpcUpdateOrCombatActive();
         }
     }
 

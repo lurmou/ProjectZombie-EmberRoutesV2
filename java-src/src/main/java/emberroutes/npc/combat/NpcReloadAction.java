@@ -98,7 +98,8 @@ public final class NpcReloadAction extends BaseAction {
             return;
         }
 
-        npc.setVariable("WeaponReloadType", String.valueOf(gun.getWeaponReloadType()));
+        String reloadTypeStr = gun.getWeaponReloadType() != null ? gun.getWeaponReloadType().toString() : "";
+        setAnimVariable("WeaponReloadType", reloadTypeStr);
         setOverrideHandModels(gun, null);
         ejectSpentRounds();
 
@@ -354,10 +355,14 @@ public final class NpcReloadAction extends BaseAction {
             }
             done = true;
             forceComplete();
+        } else {
+            // 每装入一发即重置看门狗计时，确保仅在动画事件卡死时介入而不因多发长换弹触发逐帧瞬吸
+            elapsedSimSec = 0.0;
         }
     }
 
     private void completeFallbackOnWatchdog() {
+        elapsedSimSec = 0.0;
         if (kind == ReloadKind.UNJAM || kind == ReloadKind.RACK) {
             handleRackBullet();
         } else if (kind == ReloadKind.INSERT_MAG || kind == ReloadKind.EJECT_AND_INSERT_MAG) {
