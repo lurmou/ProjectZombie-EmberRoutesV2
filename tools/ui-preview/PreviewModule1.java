@@ -508,6 +508,62 @@ public final class PreviewModule1 {
         jb.rawset("dismissSquadMember", (JavaFunction) (cf, n) -> cf.push("DISMISSED"));
         jb.rawset("listSquadMembers", (JavaFunction) (cf, n) -> cf.push(LuaManager.platform.newTable()));
         jb.rawset("getNpcPortraitTexture", (JavaFunction) (cf, n) -> cf.push(null));
+        jb.rawset("listNpcIds", (JavaFunction) (cf, n) -> {
+            KahluaTable t = LuaManager.platform.newTable();
+            t.rawset(Double.valueOf(1), "npc_1");
+            t.rawset(Double.valueOf(2), "npc_2");
+            return cf.push(t);
+        });
+        jb.rawset("getNpcPostureState", (JavaFunction) (cf, n) -> cf.push("STANDING"));
+        jb.rawset("getLogisticsSummary", (JavaFunction) (cf, n) -> cf.push("orders=4 active=2"));
+        jb.rawset("getSmartSlotSummary", (JavaFunction) (cf, n) -> cf.push("beds=4 seats=6"));
+
+        final boolean[] combatDiag = { false };
+        final boolean[] allAnimRec = { false };
+        jb.rawset("isAllNpcAnimRecorderEnabled", (JavaFunction) (cf, n) -> cf.push(Boolean.valueOf(allAnimRec[0])));
+        jb.rawset("setAllNpcAnimRecorderEnabled", (JavaFunction) (cf, n) -> {
+            if (n >= 2 && cf.get(1) instanceof Boolean b) allAnimRec[0] = b;
+            return cf.push(allAnimRec[0] ? "ON" : "OFF");
+        });
+        jb.rawset("isCombatDiagEnabled", (JavaFunction) (cf, n) -> cf.push(Boolean.valueOf(combatDiag[0])));
+        jb.rawset("setCombatDiagEnabled", (JavaFunction) (cf, n) -> {
+            if (n >= 2 && cf.get(1) instanceof Boolean b) combatDiag[0] = b;
+            return cf.push(Boolean.TRUE);
+        });
+        jb.rawset("getCombatDebugSnapshot", (JavaFunction) (cf, n) -> {
+            KahluaTable out = LuaManager.platform.newTable();
+            out.rawset("combatDiagEnabled", Boolean.valueOf(combatDiag[0]));
+            out.rawset("allAnimRecEnabled", Boolean.valueOf(allAnimRec[0]));
+            out.rawset("threatCount", Double.valueOf(4));
+            out.rawset("clusterCount", Double.valueOf(1));
+            out.rawset("corridorCount", Double.valueOf(2));
+            KahluaTable npcs = LuaManager.platform.newTable();
+            Object[][] previewNpcs = {
+                {"npc_1", "COMBAT_MELEE", "COMBAT", Double.valueOf(1042), "STANDING", Double.valueOf(1.12), Double.valueOf(0.60), Double.valueOf(1.35), Boolean.FALSE, Boolean.FALSE, "HOLD"},
+                {"npc_2", "COMBAT_MELEE", "COMBAT", Double.valueOf(1055), "PRONE", Double.valueOf(0.48), Double.valueOf(0.24), Double.valueOf(0.60), Boolean.TRUE, Boolean.TRUE, "HOLD"},
+                {"npc_3", "COMBAT_RANGED", "COMBAT", Double.valueOf(1061), "SPRINTER", Double.valueOf(7.80), Double.valueOf(2.55), Double.valueOf(12.0), Boolean.FALSE, Boolean.FALSE, "RETREAT"},
+            };
+            for (int i = 0; i < previewNpcs.length; i++) {
+                Object[] p = previewNpcs[i];
+                KahluaTable row = LuaManager.platform.newTable();
+                row.rawset("npcId", p[0]);
+                row.rawset("state", p[1]);
+                row.rawset("activity", p[2]);
+                row.rawset("targetId", p[3]);
+                row.rawset("targetPosture", p[4]);
+                row.rawset("dist", p[5]);
+                row.rawset("minRange", p[6]);
+                row.rawset("maxRange", p[7]);
+                row.rawset("aimFloor", p[8]);
+                row.rawset("stomp", p[9]);
+                row.rawset("radialMode", p[10]);
+                npcs.rawset(Double.valueOf(i + 1), row);
+            }
+            out.rawset("npcs", npcs);
+            return cf.push(out);
+        });
+        jb.rawset("dumpCombatDebugSnapshot", (JavaFunction) (cf, n) ->
+            cf.push("diag=" + combatDiag[0] + " rec=" + allAnimRec[0] + " threats=4 clusters=1 corridors=2"));
         LuaManager.env.rawset("EmberRoutesJava", jb);
 
         String sceneCode = """
@@ -628,6 +684,35 @@ public final class PreviewModule1 {
 
         renderNpcInventoryPreview(outDir, lang);
         renderSquadHudPreview(outDir, lang);
+        renderDebugPanelPreview(outDir, lang);
+    }
+
+    private static void renderDebugPanelPreview(Path outDir, String lang) throws Exception {
+        pcallLua("""
+            local EmberUI = require "EmberUI"
+            EmberUI.Theme.applyPreset("ae2")
+            local Kernel = require "EmberRoutes/Kernel"
+            local DebugPanel = require "EmberRoutes/UI/DebugPanel"
+            Kernel.onWorldReady()
+            local dp = DebugPanel.openPreview({ tabId = "combat", x = 250, y = 70, width = 780, height = 560 })
+            _G.__previewDebug = dp
+            assert(dp.win.contentHost.errorStage == false, "DebugPanel root must solve cleanly: " .. tostring(dp.win.contentHost.errorStage) .. " / " .. tostring(dp.win.contentHost.errorMessage))
+            assert(dp.tabPanels.combat.errorStage == false, "DebugPanel combat tab must solve cleanly: " .. tostring(dp.tabPanels.combat.errorStage) .. " / " .. tostring(dp.tabPanels.combat.errorMessage))
+            assert(dp.tabPanels.npc.errorStage == false, "DebugPanel npc tab must solve cleanly: " .. tostring(dp.tabPanels.npc.errorStage) .. " / " .. tostring(dp.tabPanels.npc.errorMessage))
+            assert(dp.tabPanels.logistics.errorStage == false, "DebugPanel logistics tab must solve cleanly: " .. tostring(dp.tabPanels.logistics.errorStage) .. " / " .. tostring(dp.tabPanels.logistics.errorMessage))
+            """);
+        waitForAssets();
+
+        renderPreviewFrames(outDir.resolve("preview-debug-panel-" + lang + ".png"), false);
+
+        pcallLua("""
+            local Kernel = require "EmberRoutes/Kernel"
+            local DebugPanel = require "EmberRoutes/UI/DebugPanel"
+            Kernel.teardown()
+            assert(_G.__previewDebug.win.disposed == true, "Kernel.teardown must close DebugPanel")
+            assert(DebugPanel.getActive() == nil, "DebugPanel active handle must clear on teardown")
+            _G.__previewDebug = nil
+            """);
     }
 
     private static void renderPreviewFrames(Path outFile, boolean drawZonePolygon) throws Exception {
@@ -975,7 +1060,12 @@ public final class PreviewModule1 {
         Map.entry('联', '聯'), Map.entry('团', '團'), Map.entry('压', '壓'), Map.entry('极', '極'),
         Map.entry('气', '氣'), Map.entry('简', '簡'), Map.entry('筛', '篩'), Map.entry('粮', '糧'),
         Map.entry('纳', '納'), Map.entry('结', '結'), Map.entry('继', '繼'), Map.entry('缓', '緩'),
-        Map.entry('这', '這'), Map.entry('间', '間'), Map.entry('鲜', '鮮')
+        Map.entry('这', '這'), Map.entry('间', '間'), Map.entry('鲜', '鮮'),
+        Map.entry('卖', '賣'), Map.entry('敌', '敵'), Map.entry('杀', '殺'), Map.entry('尸', '屍'),
+        Map.entry('脑', '腦'), Map.entry('录', '錄'), Map.entry('须', '須'), Map.entry('诊', '診'),
+        Map.entry('断', '斷'), Map.entry('志', '誌'), Map.entry('机', '機'), Map.entry('冻', '凍'),
+        Map.entry('饿', '餓'), Map.entry('画', '畫'), Map.entry('递', '遞'), Map.entry('响', '響'),
+        Map.entry('兴', '興'), Map.entry('张', '張'), Map.entry('邻', '鄰')
     );
 
     private static float isoX(float gx, float gy) {

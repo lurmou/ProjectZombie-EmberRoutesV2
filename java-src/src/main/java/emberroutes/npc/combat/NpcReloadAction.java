@@ -1,11 +1,10 @@
 package emberroutes.npc.combat;
 
 import emberroutes.npc.IsoNPC;
+import emberroutes.npc.brain.BaseAction;
+import emberroutes.npc.brain.BrainContext;
 import emberroutes.npc.combat.NpcWeaponSelector.ReloadKind;
-import zombie.GameTime;
 import zombie.characters.CharacterActionAnims;
-import zombie.characters.IsoPlayer;
-import zombie.characters.CharacterTimedActions.BaseAction;
 import zombie.characters.skills.PerkFactory;
 import zombie.core.random.Rand;
 import zombie.core.skinnedmodel.advancedanimation.AnimEvent;
@@ -19,19 +18,17 @@ import zombie.scripting.objects.ItemTag;
 import zombie.scripting.objects.MoodleType;
 
 /**
- * 纯 Java B42 原生装弹 / 换弹匣 / 拉栓 / 排障 {@link BaseAction}（100% 遵循背包→主栏→枪械真原件守恒与动画事件驱动）。
+ * 纯 Java B42 原生装弹 / 换弹匣 / 拉栓 / 排障 {@link BaseAction}（1:1 对齐 {@code ISReloadWeaponAction} 与双管 {@code needToBeClosedOnceReload}）。
  *
  * <ul>
- *   <li>{@code stopOnWalk = false} 允许步行风筝与退避换弹；{@code stopOnRun = true} 防切奔跑穿模；</li>
- *   <li>由 {@code IsoPlayer.OnAnimEvent:8170} 直接驱动 {@link #OnAnimEvent(AnimEvent)} 落袋每发实弹/弹匣/拉栓与声效，
- *       并附 {@code 5.5s} simTime 看门狗防第三方模组枪械漏配事件卡死；</li>
- *   <li>与泵动霰弹枪开火后原版自动入队的 {@code ISRackFirearm} 天然互斥共存（已有动作运行则等待完成不重复入队）。</li>
+ *   <li>严格只消费主物品栏 {@code npc.getInventory()} 内的真实弹匣/散弹（背囊取弹由前序 {@code SelfInventoryTransferAction} 完成，严禁瞬移）；</li>
+ *   <li>双管霰弹合膛（{@code needToBeClosedOnceReload}）设置 {@code isRacking=true} 对齐 {@code RackDblBarrel.xml}；</li>
+ *   <li>仅 {@code LOAD_BULLETS / RACK / UNJAM} 退空壳、仅实际装弹阶段结束播放 {@code InsertAmmoStopSound}。</li>
  * </ul>
  */
 public final class NpcReloadAction extends BaseAction {
     private static final double WATCHDOG_SIM_SEC = 5.5;
 
-    private final IsoNPC npc;
     private final HandWeapon gun;
     private final ReloadKind kind;
     private InventoryItem targetMagazine;
@@ -39,53 +36,28 @@ public final class NpcReloadAction extends BaseAction {
     private boolean ejectThenInsertPending;
     private boolean playedInsertStartSound;
     private boolean playedEjectStartSound;
-    private boolean done;
 
     public NpcReloadAction(IsoNPC npc, HandWeapon gun, ReloadKind kind) {
-        super(npc);
-        this.npc = npc;
+        super(npc, 1.0, null);
         this.gun = gun;
         this.kind = kind;
         this.stopOnWalk = false;
         this.stopOnRun = true;
         this.stopOnAim = false;
-        this.useProgressBar = false;
-        this.forceProgressBar = false;
-        this.maxTime = -1;
-    }
-
-    public boolean isDone() {
-        return done || forceStop || forceComplete;
-    }
-
-    public static void startIfIdle(IsoNPC npc, HandWeapon gun, ReloadKind kind) {
-        if (npc == null || npc.isDead() || gun == null || kind == ReloadKind.NONE) {
-            return;
-        }
-        if (!npc.getCharacterActions().isEmpty()) {
-            return;
-        }
-        NpcReloadAction act = new NpcReloadAction(npc, gun, kind);
-        npc.StartAction(act);
+        enableEventDrivenMode();
     }
 
     @Override
     public boolean valid() {
-        return npc != null
-                && !npc.isDead()
+        return super.valid()
                 && gun != null
                 && npc.getPrimaryHandItem() == gun
-                && !done;
+                && kind != null
+                && kind != ReloadKind.NONE;
     }
 
     @Override
-    public boolean finished() {
-        return done;
-    }
-
-    @Override
-    public void start() {
-        super.start();
+    protected void onStart(BrainContext ctx) {
         this.elapsedSimSec = 0.0;
         this.playedInsertStartSound = false;
         this.playedEjectStartSound = false;
@@ -93,60 +65,53 @@ public final class NpcReloadAction extends BaseAction {
         this.targetMagazine = null;
 
         if (!valid()) {
-            done = true;
-            forceComplete();
+            failOnStart();
             return;
         }
 
         String reloadTypeStr = gun.getWeaponReloadType() != null ? gun.getWeaponReloadType().toString() : "";
         setAnimVariable("WeaponReloadType", reloadTypeStr);
-        setOverrideHandModels(gun, null);
-        ejectSpentRounds();
+        configureHandModels(gun, null);
+
+        if (kind == ReloadKind.LOAD_BULLETS || kind == ReloadKind.RACK || kind == ReloadKind.UNJAM) {
+            ejectSpentRounds();
+        }
 
         switch (kind) {
             case UNJAM, RACK -> startRackPhase();
             case EJECT_AND_INSERT_MAG -> {
-                String magType = gun.getMagazineType();
-                this.targetMagazine = NpcWeaponSelector.findBestNonEmptyMagazine(npc, magType);
+                this.targetMagazine = NpcWeaponSelector.findBestNonEmptyMagazineInMain(npc, gun.getMagazineType());
                 if (this.targetMagazine == null) {
-                    done = true;
-                    forceStop();
+                    failOnStart();
                     return;
                 }
-                NpcWeaponSelector.ensureItemInMainInventory(npc, this.targetMagazine);
                 this.ejectThenInsertPending = true;
                 startUnloadMagPhase();
             }
             case INSERT_MAG -> {
-                String magType = gun.getMagazineType();
-                this.targetMagazine = NpcWeaponSelector.findBestNonEmptyMagazine(npc, magType);
-                if (this.targetMagazine == null || !NpcWeaponSelector.ensureItemInMainInventory(npc, this.targetMagazine)) {
-                    done = true;
-                    forceStop();
+                this.targetMagazine = NpcWeaponSelector.findBestNonEmptyMagazineInMain(npc, gun.getMagazineType());
+                if (this.targetMagazine == null) {
+                    failOnStart();
                     return;
                 }
                 startLoadPhase();
             }
             case LOAD_BULLETS -> {
                 if (gun.getAmmoType() == null
-                        || !NpcWeaponSelector.hasItemRecursive(npc.getInventory(), gun.getAmmoType().getItemKey())) {
-                    done = true;
-                    forceStop();
+                        || !NpcWeaponSelector.hasItemInMain(npc.getInventory(), gun.getAmmoType().getItemKey())) {
+                    failOnStart();
                     return;
                 }
                 startLoadPhase();
             }
-            default -> {
-                done = true;
-                forceComplete();
-            }
+            default -> forceComplete();
         }
     }
 
     private void startRackPhase() {
         npc.clearVariable("isLoading");
         npc.clearVariable("isUnloading");
-        if (gun.haveChamber()) {
+        if (gun.haveChamber() || gun.needToBeClosedOnceReload()) {
             setAnimVariable("isRacking", true);
         } else {
             setAnimVariable("isUnloading", true);
@@ -179,20 +144,19 @@ public final class NpcReloadAction extends BaseAction {
     }
 
     @Override
-    public void update() {
-        super.update();
-        if (done) return;
-        float mult = GameTime.getInstance() != null ? GameTime.getInstance().getMultiplier() : 1.0F;
-        elapsedSimSec += Math.max(0.0, GameTime.getInstance() != null ? GameTime.getInstance().getTimeDelta() : 0.016 * mult);
+    protected void onTick(BrainContext ctx, double dtSim) {
+        if (!isRunning()) {
+            return;
+        }
+        elapsedSimSec += Math.max(0.0, dtSim);
         if (elapsedSimSec >= WATCHDOG_SIM_SEC) {
-            // 看门狗防呆：若第三方面具/枪械 AnimSet 缺失结束事件，执行安全状态落地并退出
             completeFallbackOnWatchdog();
         }
     }
 
     @Override
     public void OnAnimEvent(AnimEvent event) {
-        if (event == null || event.eventName == null || done) {
+        if (event == null || event.eventName == null || !isRunning()) {
             return;
         }
         String name = event.eventName;
@@ -202,10 +166,7 @@ public final class NpcReloadAction extends BaseAction {
             case "playReloadSound" -> handlePlayReloadSound(param);
             case "changeWeaponSprite" -> handleChangeWeaponSprite(param);
             case "rackBullet" -> handleRackBullet();
-            case "rackingFinished" -> {
-                done = true;
-                forceComplete();
-            }
+            case "rackingFinished" -> forceComplete();
             case "unloadFinished" -> handleUnloadFinished();
             case "loadFinished" -> handleLoadFinished();
             default -> {}
@@ -247,7 +208,7 @@ public final class NpcReloadAction extends BaseAction {
 
     private void handleChangeWeaponSprite(String param) {
         if (param.isEmpty() || "original".equals(param)) {
-            setOverrideHandModels(gun, null);
+            configureHandModels(gun, null);
         } else {
             setOverrideHandModelsString(param, null);
         }
@@ -255,7 +216,7 @@ public final class NpcReloadAction extends BaseAction {
 
     private void handleRackBullet() {
         if (gun.haveChamber()) {
-            if (gun.isJammed() && gun.checkUnJam((IsoPlayer) npc)) {
+            if (gun.isJammed() && gun.checkUnJam(npc)) {
                 return;
             }
             if (!gun.isJammed() && gun.isRoundChambered() && gun.getAmmoType() != null) {
@@ -267,11 +228,12 @@ public final class NpcReloadAction extends BaseAction {
                 gun.setRoundChambered(true);
                 gun.setCurrentAmmoCount(gun.getCurrentAmmoCount() - gun.getAmmoPerShoot());
                 if (gun.getJamGunChance() > 0.0F) {
-                    gun.checkJam((IsoPlayer) npc, true);
+                    gun.checkJam(npc, true);
                 }
             }
         } else {
-            if (!gun.isJammed() && gun.getCurrentAmmoCount() > 0 && gun.getAmmoType() != null) {
+            if (!gun.isJammed() && !gun.needToBeClosedOnceReload()
+                    && gun.getCurrentAmmoCount() > 0 && gun.getAmmoType() != null) {
                 spawnEjectedRoundToInventory();
                 gun.setCurrentAmmoCount(Math.max(0, gun.getCurrentAmmoCount() - gun.getAmmoPerShoot()));
             }
@@ -280,32 +242,36 @@ public final class NpcReloadAction extends BaseAction {
     }
 
     private void handleUnloadFinished() {
-        if (gun.isContainsClip() && gun.getMagazineType() != null) {
+        ItemContainer mainInv = npc.getInventory();
+        if (gun.isContainsClip() && gun.getMagazineType() != null && mainInv != null) {
             InventoryItem ejected = InventoryItemFactory.CreateItem(gun.getMagazineType());
             if (ejected != null) {
                 ejected.setCurrentAmmoCount(gun.getCurrentAmmoCount());
-                npc.getInventory().AddItem(ejected);
-                stowLooseMagToBagIfConvenient(npc, ejected);
+                mainInv.AddItem(ejected);
             }
             gun.setContainsClip(false);
             gun.setCurrentAmmoCount(0);
         }
         npc.clearVariable("isUnloading");
-        if (ejectThenInsertPending && targetMagazine != null && NpcWeaponSelector.ensureItemInMainInventory(npc, targetMagazine)) {
+        if (ejectThenInsertPending && targetMagazine != null && mainInv != null && mainInv.contains(targetMagazine)) {
             ejectThenInsertPending = false;
             elapsedSimSec = 0.0;
             startLoadPhase();
         } else {
-            done = true;
             forceComplete();
         }
     }
 
     private void handleLoadFinished() {
         awardReloadXp(npc);
+        ItemContainer mainInv = npc.getInventory();
+        if (mainInv == null) {
+            forceStop();
+            return;
+        }
         if (gun.getMagazineType() != null && !gun.getMagazineType().isEmpty()) {
-            if (targetMagazine != null && NpcWeaponSelector.ensureItemInMainInventory(npc, targetMagazine) && !gun.isContainsClip()) {
-                npc.getInventory().Remove(targetMagazine);
+            if (targetMagazine != null && mainInv.contains(targetMagazine) && !gun.isContainsClip()) {
+                mainInv.Remove(targetMagazine);
                 npc.removeFromHands(targetMagazine);
                 gun.setCurrentAmmoCount(targetMagazine.getCurrentAmmoCount());
                 gun.setContainsClip(true);
@@ -316,35 +282,32 @@ public final class NpcReloadAction extends BaseAction {
                     return;
                 }
             }
-            done = true;
             forceComplete();
             return;
         }
 
-        // 内置弹仓 / 左轮 / 霰弹：每次 loadFinished 扣一枚实弹（或全部填满型）
         if (gun.getAmmoType() == null) {
-            done = true;
             forceComplete();
             return;
         }
         String key = gun.getAmmoType().getItemKey();
         if (gun.isInsertAllBulletsReload()) {
             while (gun.getCurrentAmmoCount() < gun.getMaxAmmo()) {
-                InventoryItem bullet = NpcWeaponSelector.transferOneMatchingItemToMain(npc, key);
+                InventoryItem bullet = NpcWeaponSelector.findFirstMatchingItemInMain(mainInv, key);
                 if (bullet == null) break;
-                npc.getInventory().Remove(bullet);
+                mainInv.Remove(bullet);
                 gun.setCurrentAmmoCount(gun.getCurrentAmmoCount() + 1);
             }
         } else if (gun.getCurrentAmmoCount() < gun.getMaxAmmo()) {
-            InventoryItem bullet = NpcWeaponSelector.transferOneMatchingItemToMain(npc, key);
+            InventoryItem bullet = NpcWeaponSelector.findFirstMatchingItemInMain(mainInv, key);
             if (bullet != null) {
-                npc.getInventory().Remove(bullet);
+                mainInv.Remove(bullet);
                 gun.setCurrentAmmoCount(gun.getCurrentAmmoCount() + 1);
             }
         }
 
         boolean doneBullets = gun.getCurrentAmmoCount() >= gun.getMaxAmmo()
-                || !NpcWeaponSelector.hasItemRecursive(npc.getInventory(), key);
+                || !NpcWeaponSelector.hasItemInMain(mainInv, key);
         if (doneBullets) {
             npc.clearVariable("isLoading");
             if ((gun.haveChamber() && !gun.isRoundChambered() && gun.getCurrentAmmoCount() >= gun.getAmmoPerShoot())
@@ -353,10 +316,8 @@ public final class NpcReloadAction extends BaseAction {
                 startRackPhase();
                 return;
             }
-            done = true;
             forceComplete();
         } else {
-            // 每装入一发即重置看门狗计时，确保仅在动画事件卡死时介入而不因多发长换弹触发逐帧瞬吸
             elapsedSimSec = 0.0;
         }
     }
@@ -365,26 +326,29 @@ public final class NpcReloadAction extends BaseAction {
         elapsedSimSec = 0.0;
         if (kind == ReloadKind.UNJAM || kind == ReloadKind.RACK) {
             handleRackBullet();
-        } else if (kind == ReloadKind.INSERT_MAG || kind == ReloadKind.EJECT_AND_INSERT_MAG) {
+            forceComplete();
+            return;
+        }
+        if (kind == ReloadKind.INSERT_MAG || kind == ReloadKind.EJECT_AND_INSERT_MAG) {
             if (gun.isContainsClip() && ejectThenInsertPending) {
                 handleUnloadFinished();
                 return;
             }
             handleLoadFinished();
             return;
-        } else if (kind == ReloadKind.LOAD_BULLETS) {
+        }
+        if (kind == ReloadKind.LOAD_BULLETS) {
             handleLoadFinished();
             return;
         }
-        done = true;
         forceComplete();
     }
 
     private void spawnEjectedRoundToInventory() {
         AmmoType at = gun.getAmmoType();
-        if (at == null) return;
+        if (at == null || npc.getInventory() == null) return;
         InventoryItem newBullet = InventoryItemFactory.CreateItem(at.getItemKey());
-        if (newBullet != null && npc.getInventory() != null) {
+        if (newBullet != null) {
             npc.getInventory().AddItem(newBullet);
         }
     }
@@ -403,25 +367,26 @@ public final class NpcReloadAction extends BaseAction {
     }
 
     @Override
-    public void stop() {
-        done = true;
+    protected boolean onComplete(BrainContext ctx) {
         clearReloadAnimVars();
-        if (kind == ReloadKind.EJECT_AND_INSERT_MAG && ejectThenInsertPending && gun.getEjectAmmoStopSound() != null) {
-            npc.playSound(gun.getEjectAmmoStopSound());
-        } else if (gun.getInsertAmmoStopSound() != null) {
+        boolean loadPhase = kind == ReloadKind.LOAD_BULLETS
+                || kind == ReloadKind.INSERT_MAG
+                || (kind == ReloadKind.EJECT_AND_INSERT_MAG && !ejectThenInsertPending);
+        if (loadPhase && gun != null && gun.getInsertAmmoStopSound() != null) {
             npc.playSound(gun.getInsertAmmoStopSound());
         }
-        super.stop();
+        return true;
     }
 
     @Override
-    public void perform() {
-        done = true;
+    protected void onInterrupt(BrainContext ctx, String reason) {
         clearReloadAnimVars();
-        if (gun.getInsertAmmoStopSound() != null) {
+        if (gun == null) return;
+        if (kind == ReloadKind.EJECT_AND_INSERT_MAG && ejectThenInsertPending && gun.getEjectAmmoStopSound() != null) {
+            npc.playSound(gun.getEjectAmmoStopSound());
+        } else if (kind != ReloadKind.RACK && kind != ReloadKind.UNJAM && gun.getInsertAmmoStopSound() != null) {
             npc.playSound(gun.getInsertAmmoStopSound());
         }
-        super.perform();
     }
 
     private void clearReloadAnimVars() {
@@ -480,21 +445,6 @@ public final class NpcReloadAction extends BaseAction {
         float xp = lvl < 5 ? 4.0F : 1.0F;
         if (Rand.Next(chance) == 0) {
             npc.getXp().AddXP(PerkFactory.Perks.Reloading, xp, true, true, false, false);
-        }
-    }
-
-    /** 检查是否允许原地/随行归还空匣到尚有余量的背负容器（主包仍保有则留在主包）。 */
-    public static void stowLooseMagToBagIfConvenient(IsoNPC npc, InventoryItem item) {
-        if (npc == null || npc.getInventory() == null || item == null) return;
-        for (InventoryItem invItem : npc.getInventory().getItems()) {
-            if (invItem instanceof zombie.inventory.types.InventoryContainer bag && bag.getInventory() != null) {
-                ItemContainer bagInv = bag.getInventory();
-                if (bagInv.hasRoomFor(npc, item)) {
-                    npc.getInventory().DoRemoveItem(item);
-                    bagInv.AddItem(item);
-                    return;
-                }
-            }
         }
     }
 }

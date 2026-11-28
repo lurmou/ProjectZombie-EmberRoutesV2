@@ -55,6 +55,7 @@ SquadService.KEYS = {
         WAIT_VEHICLE = "IGUI_ER_Squad_Act_WAIT_VEHICLE",
         OFFSCREEN = "IGUI_ER_Squad_Act_OFFSCREEN",
         COMBAT = "IGUI_ER_Squad_Act_COMBAT",
+        EQUIPPING = "IGUI_ER_Squad_Act_EQUIPPING",
         RELOADING = "IGUI_ER_Squad_Act_RELOADING",
         RETREATING = "IGUI_ER_Squad_Act_RETREATING",
         FIRST_AID = "IGUI_ER_Squad_Act_FIRST_AID",

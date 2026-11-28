@@ -114,4 +114,33 @@ public final class CqbController {
         }
         return -1;
     }
+
+    /** CQB 模式下按队员顺位错开警戒扇区相位游标，避免多名射手盯死同一开口。 */
+    public void applyMemberPhaseOffset(int memberRank, int squadCount) {
+        int activePhases = Math.max(1, Math.min(MAX_PHASES, phaseCount));
+        if (squadCount <= 1 || memberRank < 0) {
+            return;
+        }
+        this.phaseCursor = Math.floorMod(memberRank, activePhases);
+    }
+
+    /** 室内 CQB 队形自适应：窄通道/2 格净空以内自动切换纵队（COLUMN），开阔室内大厅展开横排（LINE）。 */
+    public static emberroutes.npc.FormationType resolveIndoorFormation(
+            boolean cqbEnabled,
+            boolean indoor,
+            int localTileClearance,
+            emberroutes.npc.FormationType configured) {
+        emberroutes.npc.FormationType fallback =
+                configured != null ? configured : emberroutes.npc.FormationType.WEDGE;
+        if (!cqbEnabled || !indoor) {
+            return fallback;
+        }
+        if (localTileClearance <= 2) {
+            return emberroutes.npc.FormationType.COLUMN;
+        }
+        if (localTileClearance >= 4 && fallback == emberroutes.npc.FormationType.COLUMN) {
+            return emberroutes.npc.FormationType.LINE;
+        }
+        return fallback;
+    }
 }

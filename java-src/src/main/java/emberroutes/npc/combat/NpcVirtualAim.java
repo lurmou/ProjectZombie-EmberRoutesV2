@@ -16,6 +16,7 @@ public final class NpcVirtualAim {
     public static final float MAX_SLEW_DEG_PER_SEC = 270.0F;
     public static final float VERTICAL_PROJ_SCALE = 2.44949F;
     public static final float CHEST_HEIGHT_OFFSET = 0.495F;
+    public static final float PRONE_HEIGHT_OFFSET = 0.22F;
 
     private boolean active;
     private float aimYawRad;
@@ -101,9 +102,28 @@ public final class NpcVirtualAim {
             float targetVelY,
             float maxRange,
             float dtSec) {
+        aimAtTarget(
+                currentBodyYawRad, selfX, selfY, selfZ,
+                targetX, targetY, targetZ, targetVelX, targetVelY, false, maxRange, dtSec);
+    }
+
+    /** 以 {@code 90°/s -> 270°/s} 默认阻尼角速度追踪移动目标点（区分站立胸口 {@code 0.495F} 与倒地/爬行 {@code 0.22F} 高度）。 */
+    public void aimAtTarget(
+            float currentBodyYawRad,
+            float selfX,
+            float selfY,
+            float selfZ,
+            float targetX,
+            float targetY,
+            float targetZ,
+            float targetVelX,
+            float targetVelY,
+            boolean targetProne,
+            float maxRange,
+            float dtSec) {
         float leadX = targetX + targetVelX * LEAD_TIME_SEC;
         float leadY = targetY + targetVelY * LEAD_TIME_SEC;
-        float leadZ = targetZ + CHEST_HEIGHT_OFFSET;
+        float leadZ = targetZ + (targetProne ? PRONE_HEIGHT_OFFSET : CHEST_HEIGHT_OFFSET);
         updateInternal(currentBodyYawRad, selfX, selfY, selfZ, leadX, leadY, leadZ, maxRange, dtSec, -1.0F);
     }
 
@@ -194,7 +214,7 @@ public final class NpcVirtualAim {
         this.worldZ = leadZ;
 
         float dz = leadZ - (selfZ + CHEST_HEIGHT_OFFSET);
-        this.pitchDegrees = (float) Math.toDegrees(Math.atan2(dz * VERTICAL_PROJ_SCALE, Math.max(0.35F, effDist)));
+        this.pitchDegrees = (float) Math.toDegrees(Math.atan2(dz, Math.max(0.35F, effDist)) * VERTICAL_PROJ_SCALE);
     }
 
     public static float clamp(float val, float min, float max) {

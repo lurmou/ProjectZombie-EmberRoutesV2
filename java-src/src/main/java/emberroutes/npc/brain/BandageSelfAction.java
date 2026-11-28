@@ -20,13 +20,36 @@ import zombie.scripting.objects.CharacterTrait;
  * </ul>
  */
 public final class BandageSelfAction extends BaseAction {
-    public BandageSelfAction() {
-        super(2.8, "Bandage", "BandageType", "LeftArm");
+    public BandageSelfAction(IsoNPC npc) {
+        super(npc, 2.8, "Bandage", "BandageType", "LeftArm");
+        this.stopOnRun = true;
+        this.stopOnAim = false;
         setReportEventName("EventBandage");
     }
 
     public static boolean hasBleedingUnbandagedPart(IsoNPC npc) {
         return findFirstBleedingUnbandagedPart(npc) != null;
+    }
+
+    /** 高危出血判定：任一未包扎部位出血强度 {@code >= 3.0f}，或总血量跌破 65% 且仍有未止血伤口。 */
+    public static boolean isSevereBleeding(IsoNPC npc) {
+        if (npc == null || npc.getBodyDamage() == null) {
+            return false;
+        }
+        List<BodyPart> parts = npc.getBodyDamage().getBodyParts();
+        if (parts == null) {
+            return false;
+        }
+        float overallHealth = npc.getBodyDamage().getOverallBodyHealth();
+        for (int i = 0, n = parts.size(); i < n; i++) {
+            BodyPart bp = parts.get(i);
+            if (bp != null && bp.bleeding() && !bp.bandaged()) {
+                if (bp.getBleedingTime() >= 3.0F || overallHealth < 65.0F) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public static BodyPart findFirstBleedingUnbandagedPart(IsoNPC npc) {
@@ -102,16 +125,22 @@ public final class BandageSelfAction extends BaseAction {
 
     @Override
     protected void onStart(BrainContext ctx) {
-        IsoNPC npc = ctx != null ? ctx.npc : null;
-        if (npc == null || npc.isDead()) {
+        IsoNPC targetNpc = this.npc != null ? this.npc : (ctx != null ? ctx.npc : null);
+        if (targetNpc == null || targetNpc.isDead()) {
+            failOnStart();
             return;
         }
-        int doctorLevel = npc.getPerkLevel(PerkFactory.Perks.Doctor);
+        BodyPart targetPart = findFirstBleedingUnbandagedPart(targetNpc);
+        if (targetPart == null || findBestBandage(targetNpc) == null) {
+            failOnStart();
+            return;
+        }
+        this.stopOnWalk = targetPart.getIndex() > BodyPartType.ToIndex(BodyPartType.Groin);
+        int doctorLevel = targetNpc.getPerkLevel(PerkFactory.Perks.Doctor);
         setDurationSimSec(VanillaActionTiming.computeApplyBandageSeconds(doctorLevel));
-        BodyPart targetPart = findFirstBleedingUnbandagedPart(npc);
         setExtraAnimVar("BandageType", resolveBandageType(targetPart));
         configureHandModels(null, null);
-        playActionSound(npc, "FirstAidApplyBandage");
+        playActionSound(targetNpc, "FirstAidApplyBandage");
     }
 
     @Override

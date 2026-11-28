@@ -180,6 +180,16 @@ function NpcRuntime.toggleAnimRecorder(npcId)
     return EmberRoutesJava.toggleNpcAnimRecorder(npcId) or "UNAVAILABLE"
 end
 
+function NpcRuntime.isAllAnimRecorderEnabled()
+    if not EmberRoutesJava or not EmberRoutesJava.isAllNpcAnimRecorderEnabled then return false end
+    return EmberRoutesJava.isAllNpcAnimRecorderEnabled() == true
+end
+
+function NpcRuntime.setAllAnimRecorderEnabled(enabled)
+    if not EmberRoutesJava or not EmberRoutesJava.setAllNpcAnimRecorderEnabled then return "UNAVAILABLE" end
+    return EmberRoutesJava.setAllNpcAnimRecorderEnabled(enabled == true) or "UNAVAILABLE"
+end
+
 function NpcRuntime.setBrainMode(npcId, modeName)
     if not EmberRoutesJava or not EmberRoutesJava.setNpcBrainMode or not npcId or not modeName then return false end
     return EmberRoutesJava.setNpcBrainMode(npcId, modeName) == true

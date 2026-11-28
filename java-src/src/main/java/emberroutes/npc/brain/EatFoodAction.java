@@ -21,8 +21,11 @@ public final class EatFoodAction extends BaseAction {
     private String eatSound;
     private boolean playedScrapeSound;
 
-    public EatFoodAction() {
-        super(3.0, "eat");
+    public EatFoodAction(IsoNPC npc) {
+        super(npc, 3.0, "eat");
+        this.stopOnWalk = false;
+        this.stopOnRun = true;
+        this.stopOnAim = false;
         setReportEventName("EventEating");
     }
 
@@ -55,15 +58,17 @@ public final class EatFoodAction extends BaseAction {
     protected void onStart(BrainContext ctx) {
         this.playedScrapeSound = false;
         setPerformingActionAnim("eat");
-        IsoNPC npc = ctx != null ? ctx.npc : null;
-        if (npc == null || npc.isDead()) {
+        IsoNPC targetNpc = this.npc != null ? this.npc : (ctx != null ? ctx.npc : null);
+        if (targetNpc == null || targetNpc.isDead()) {
+            failOnStart();
             return;
         }
-        ItemLocation loc = findBestEdibleFood(npc);
+        ItemLocation loc = findBestEdibleFood(targetNpc);
         if (loc == null
                 || !(loc.item() instanceof Food food)
-                || npc.getInventory() == null
-                || !npc.getInventory().contains(food)) {
+                || targetNpc.getInventory() == null
+                || !targetNpc.getInventory().contains(food)) {
+            failOnStart();
             return;
         }
         this.activeFood = food;

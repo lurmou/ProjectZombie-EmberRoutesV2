@@ -31,7 +31,7 @@ class CombatMicroKernelsTest {
     }
 
     @Test
-    void spacingControllerAppliesCooldownPushoutCrawlerRepulsionAndWallSlide() {
+    void combatLocomotionSolverAppliesCooldownPushoutAndWallSlide() {
         EmberSquadDirector dir = new EmberSquadDirector();
         int standing = CombatTargetState.FLAG_VALID | CombatTargetState.FLAG_STANDING;
         int crawler = CombatTargetState.FLAG_VALID
@@ -39,17 +39,23 @@ class CombatMicroKernelsTest {
                 | CombatTargetState.FLAG_CRAWLER;
         dir.upsertManualThreat(99, 10.8F, 10.0F, 0.0F, 0.0F, 0.0F, crawler, 1000L);
 
-        SpacingController.MoveCommand cmd = new SpacingController.MoveCommand();
-        // 攻击冷却期内 + 贴身 0.9 格 + 身侧存在爬行者 + 左侧 x=9.0 处为墙面，观察切向滑移而非撞墙死锁
+        CombatLocomotionSolver.CombatMoveState moveState = new CombatLocomotionSolver.CombatMoveState();
+        CombatLocomotionSolver.MoveCommand cmd = new CombatLocomotionSolver.MoveCommand();
+        // 攻击冷却期内 + 贴身 0.9 格 + 身侧存在爬行者 + 左侧 x=9.3 处为墙面，观察切向滑移而非撞墙死锁
         EmberSquadDirector.PassabilityProbe leftWall = (x1, y1, x2, y2, z) -> x2 >= 9.3F;
-        SpacingController.computeMeleeStep(
-                10.0F, 10.0F, 0, "npc_1",
+        CombatLocomotionSolver.computeMeleeStep(
+                moveState, dir, "npc_1",
+                10.0F, 10.0F, 0,
+                10.9F, 10.0F, standing,
                 10.1F, 10.0F,
-                10.9F, 10.0F, 0.0F, 0.0F, standing,
-                0.9F, true, dir, leftWall, cmd);
+                0.70F, 1.05F, 1.40F, 1.80F,
+                true, false, 2.60F,
+                null, null, 0,
+                false, 0.0F, 0.0F, 0.0F,
+                null, leftWall, 10.0, 0.05F, cmd);
 
-        assertTrue(cmd.shouldMove);
-        // 正后方 (x=8.5) 受左侧墙阻塞时，切向滑移仍保持有效水平/垂直位移分量而不归零
+        assertTrue(cmd.wantMove);
+        assertEquals(CombatLocomotionSolver.RadialMode.RETREAT, cmd.radialMode);
         assertTrue(Math.hypot(cmd.dirX, cmd.dirY) > 0.9F);
     }
 

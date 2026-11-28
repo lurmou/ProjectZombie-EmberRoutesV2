@@ -5,3 +5,5 @@ java-src/build/
 java-src/bin/
 .idea/
 *.iml
+.serena/
+.cache/

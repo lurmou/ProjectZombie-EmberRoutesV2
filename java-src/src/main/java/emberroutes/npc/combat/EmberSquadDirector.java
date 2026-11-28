@@ -23,7 +23,18 @@ public final class EmberSquadDirector {
 
     public static final int HORDE_MIN_COUNT = 4;
     public static final float HORDE_SCAN_RADIUS = 3.0F;
-    public static final float HORDE_INTER_DIST_THRESHOLD = 0.5F;
+    public static final float HORDE_INTER_DIST_THRESHOLD = 0.50F;
+    public static final float PERSONAL_HORDE_CLOSE_DIST = 1.80F;
+    public static final String PLAYER_TARGET_ID = "__PLAYER__";
+    public static final long DISTRESS_PRIORITY_TTL_MS = 1500L;
+
+    public static final long VISUAL_MEMORY_MS = 3500L;
+    public static final long HEARING_MEMORY_MS = 3000L;
+    public static final long UNREACHABLE_MELEE_COOLDOWN_MS = 1600L;
+    public static final long UNREACHABLE_RANGED_COOLDOWN_MS = 650L;
+    public static final long RANGED_CLAIM_LEASE_MS = 1400L;
+    public static final int MAX_RANGED_CLAIMS = 16;
+    public static final int MAX_UNREACHABLE = 64;
 
     public static final long MELEE_COMMIT_LOCK_MS = 550L;
     public static final float MELEE_STICKY_BONUS_FACTOR = 0.82F;
@@ -102,6 +113,10 @@ public final class EmberSquadDirector {
             return slot >= 0 && nowMs < commitUntilMs[slot];
         }
 
+        public String getPrimaryHolder() {
+            return holders[SLOT_PRIMARY];
+        }
+
         /** 为 NPC 分配主攻(0) 或 侧翼(1/2) 令牌；若 3 个近战席已满则返回 -1（触发转火罚分 1000.0）。 */
         public int tryClaim(String npcId, long nowMs) {
             if (npcId == null || npcId.isEmpty()) return -1;
@@ -138,6 +153,19 @@ public final class EmberSquadDirector {
         public int stateMask;
         public long staggerStartMs;
         public long lastSeenMs;
+        public long lastPerceivedMs;
+        public boolean perceivedBySquad;
+        public boolean heardOnly;
+        public int attackedAllyPriority;
+        public String liveTargetEntityId;
+        public long distressPriorityUntilMs;
+        public float lastKnownX;
+        public float lastKnownY;
+        public float lastKnownZ;
+        public float headX;
+        public float headY;
+        public boolean hasHeadPos;
+        public long knockedDownAtMs;
         public final MeleeRingTokenTable ringTable = new MeleeRingTokenTable();
 
         ThreatEntry(int slotIndex) {
@@ -154,7 +182,21 @@ public final class EmberSquadDirector {
             stateMask = 0;
             staggerStartMs = 0L;
             lastSeenMs = 0L;
+            lastPerceivedMs = 0L;
+            perceivedBySquad = false;
+            heardOnly = false;
+            attackedAllyPriority = 0;
+            liveTargetEntityId = null;
+            distressPriorityUntilMs = 0L;
+            lastKnownX = lastKnownY = lastKnownZ = 0.0F;
+            headX = headY = 0.0F;
+            hasHeadPos = false;
+            knockedDownAtMs = 0L;
             ringTable.reset();
+        }
+
+        public boolean isTargetingOtherAlly(String selfNpcId) {
+            return liveTargetEntityId != null && !liveTargetEntityId.equals(selfNpcId);
         }
     }
 
@@ -177,15 +219,17 @@ public final class EmberSquadDirector {
         }
     }
 
-    /** 小队战术换弹掩护令牌池：常规战术换弹并发上限 {@code max(1, floor(R_active / 2))}，租约 5s。 */
+    /** 小队战术换弹掩护令牌池：常规战术换弹并发上限 {@code max(1, floor(R_active / 2))}，CQB 模式下强制 1 人互斥换弹，租约 5s。 */
     public static final class ReloadCoverTokenPool {
         private static final int MAX_LEASES = 16;
         private final String[] holders = new String[MAX_LEASES];
         private final long[] expiresAtMs = new long[MAX_LEASES];
         private int activeShooters;
+        private boolean cqbSingleReloadOnly;
 
         public void reset() {
             activeShooters = 0;
+            cqbSingleReloadOnly = false;
             for (int i = 0; i < MAX_LEASES; i++) {
                 holders[i] = null;
                 expiresAtMs[i] = 0L;
@@ -196,8 +240,12 @@ public final class EmberSquadDirector {
             this.activeShooters = Math.max(0, count);
         }
 
+        public void setCqbSingleReloadOnly(boolean cqbSingleReloadOnly) {
+            this.cqbSingleReloadOnly = cqbSingleReloadOnly;
+        }
+
         public int maxConcurrentReloads() {
-            return Math.max(1, activeShooters / 2);
+            return cqbSingleReloadOnly ? 1 : Math.max(1, activeShooters / 2);
         }
 
         public int activeLeaseCount(long nowMs) {
@@ -317,6 +365,35 @@ public final class EmberSquadDirector {
     private final boolean[] clusterVisited = new boolean[MAX_THREATS];
     private final int[] clusterMembers = new int[MAX_THREATS];
 
+    private static final class UnreachableMark {
+        String npcId;
+        int zombieId;
+        boolean ranged;
+        long untilMs;
+
+        void clear() {
+            npcId = null;
+            zombieId = -1;
+            ranged = false;
+            untilMs = 0L;
+        }
+    }
+
+    private static final class RangedClaim {
+        String npcId;
+        int zombieId;
+        long expiresAtMs;
+
+        void clear() {
+            npcId = null;
+            zombieId = -1;
+            expiresAtMs = 0L;
+        }
+    }
+
+    private final UnreachableMark[] unreachableMarks = new UnreachableMark[MAX_UNREACHABLE];
+    private final RangedClaim[] rangedClaims = new RangedClaim[MAX_RANGED_CLAIMS];
+
     private long lastScanMs;
 
     private static final EmberSquadDirector INSTANCE = new EmberSquadDirector();
@@ -325,6 +402,8 @@ public final class EmberSquadDirector {
         for (int i = 0; i < MAX_THREATS; i++) threats[i] = new ThreatEntry(i);
         for (int i = 0; i < MAX_CLUSTERS; i++) clusters[i] = new HordeCluster();
         for (int i = 0; i < MAX_CORRIDORS; i++) corridors[i] = new FiringCorridor();
+        for (int i = 0; i < MAX_UNREACHABLE; i++) unreachableMarks[i] = new UnreachableMark();
+        for (int i = 0; i < MAX_RANGED_CLAIMS; i++) rangedClaims[i] = new RangedClaim();
     }
 
     public static EmberSquadDirector getInstance() {
@@ -337,6 +416,8 @@ public final class EmberSquadDirector {
         for (int i = 0; i < MAX_THREATS; i++) threats[i].clear();
         for (int i = 0; i < MAX_CLUSTERS; i++) clusters[i].clear();
         for (int i = 0; i < MAX_CORRIDORS; i++) corridors[i].clear();
+        for (int i = 0; i < MAX_UNREACHABLE; i++) unreachableMarks[i].clear();
+        for (int i = 0; i < MAX_RANGED_CLAIMS; i++) rangedClaims[i].clear();
         reloadPool.reset();
     }
 
@@ -358,6 +439,117 @@ public final class EmberSquadDirector {
         }
         reloadPool.release(npcId);
         unregisterCorridor(npcId);
+        releaseRangedClaim(npcId);
+        for (int i = 0; i < MAX_UNREACHABLE; i++) {
+            if (npcId.equals(unreachableMarks[i].npcId)) {
+                unreachableMarks[i].clear();
+            }
+        }
+    }
+
+    public synchronized void broadcastAllyDistress(
+            int zombieId, float zx, float zy, float zz, boolean targetIsPlayer, long nowMs) {
+        ThreatEntry entry = findById(zombieId);
+        if (entry == null) {
+            entry = allocThreatSlot(zx, zy, zz, anchorCount);
+            if (entry == null) return;
+            entry.active = true;
+            entry.zombieId = zombieId;
+            entry.x = zx;
+            entry.y = zy;
+            entry.z = zz;
+            entry.stateMask = CombatTargetState.FLAG_VALID | CombatTargetState.FLAG_STANDING;
+        }
+        entry.perceivedBySquad = true;
+        entry.heardOnly = false;
+        entry.lastPerceivedMs = nowMs;
+        entry.lastSeenMs = Math.max(entry.lastSeenMs, nowMs);
+        entry.lastKnownX = zx;
+        entry.lastKnownY = zy;
+        entry.lastKnownZ = zz;
+        int level = targetIsPlayer ? 2 : 1;
+        if (level >= entry.attackedAllyPriority) {
+            entry.attackedAllyPriority = level;
+        }
+        entry.distressPriorityUntilMs = Math.max(entry.distressPriorityUntilMs, nowMs + DISTRESS_PRIORITY_TTL_MS);
+    }
+
+    public synchronized void markUnreachable(String npcId, int zombieId, boolean ranged, long nowMs) {
+        if (npcId == null || npcId.isEmpty() || zombieId < 0) return;
+        long ttl = ranged ? UNREACHABLE_RANGED_COOLDOWN_MS : UNREACHABLE_MELEE_COOLDOWN_MS;
+        int free = -1;
+        for (int i = 0; i < MAX_UNREACHABLE; i++) {
+            UnreachableMark m = unreachableMarks[i];
+            if (m.npcId != null && m.zombieId == zombieId && m.ranged == ranged && npcId.equals(m.npcId)) {
+                m.untilMs = nowMs + ttl;
+                return;
+            }
+            if ((m.npcId == null || nowMs >= m.untilMs) && free < 0) {
+                free = i;
+            }
+        }
+        int idx = free >= 0 ? free : 0;
+        UnreachableMark m = unreachableMarks[idx];
+        m.npcId = npcId;
+        m.zombieId = zombieId;
+        m.ranged = ranged;
+        m.untilMs = nowMs + ttl;
+    }
+
+    public synchronized boolean isUnreachable(String npcId, int zombieId, boolean ranged, long nowMs) {
+        if (npcId == null || zombieId < 0) return false;
+        for (int i = 0; i < MAX_UNREACHABLE; i++) {
+            UnreachableMark m = unreachableMarks[i];
+            if (m.npcId != null && m.zombieId == zombieId && m.ranged == ranged && npcId.equals(m.npcId)) {
+                if (nowMs < m.untilMs) {
+                    return true;
+                }
+                m.clear();
+            }
+        }
+        return false;
+    }
+
+    public synchronized void claimRangedTarget(String npcId, int zombieId, long nowMs) {
+        if (npcId == null || npcId.isEmpty() || zombieId < 0) return;
+        int free = -1;
+        for (int i = 0; i < MAX_RANGED_CLAIMS; i++) {
+            RangedClaim c = rangedClaims[i];
+            if (npcId.equals(c.npcId)) {
+                c.zombieId = zombieId;
+                c.expiresAtMs = nowMs + RANGED_CLAIM_LEASE_MS;
+                return;
+            }
+            if ((c.npcId == null || nowMs >= c.expiresAtMs) && free < 0) {
+                free = i;
+            }
+        }
+        int idx = free >= 0 ? free : 0;
+        RangedClaim c = rangedClaims[idx];
+        c.npcId = npcId;
+        c.zombieId = zombieId;
+        c.expiresAtMs = nowMs + RANGED_CLAIM_LEASE_MS;
+    }
+
+    public synchronized void releaseRangedClaim(String npcId) {
+        if (npcId == null) return;
+        for (int i = 0; i < MAX_RANGED_CLAIMS; i++) {
+            if (npcId.equals(rangedClaims[i].npcId)) {
+                rangedClaims[i].clear();
+            }
+        }
+    }
+
+    public synchronized int countOtherRangedClaims(String selfNpcId, int zombieId, long nowMs) {
+        int c = 0;
+        for (int i = 0; i < MAX_RANGED_CLAIMS; i++) {
+            RangedClaim rc = rangedClaims[i];
+            if (rc.npcId != null && nowMs < rc.expiresAtMs && rc.zombieId == zombieId
+                    && (selfNpcId == null || !selfNpcId.equals(rc.npcId))) {
+                c++;
+            }
+        }
+        return c;
     }
 
     public void unregisterCorridor(String ownerId) {
@@ -446,6 +638,21 @@ public final class EmberSquadDirector {
 
     public synchronized ThreatEntry recordScannedThreat(
             int zombieId, float zx, float zy, float zz, int stateMask, long nowMs, float scanDt) {
+        return recordScannedThreat(zombieId, zx, zy, zz, stateMask, nowMs, scanDt, true, false, 0, null);
+    }
+
+    public synchronized ThreatEntry recordScannedThreat(
+            int zombieId,
+            float zx,
+            float zy,
+            float zz,
+            int stateMask,
+            long nowMs,
+            float scanDt,
+            boolean perceivedNow,
+            boolean heardOnlyNow,
+            int attackedAllyPriority,
+            String liveTargetEntityId) {
         ThreatEntry entry = findById(zombieId);
         boolean existed = (entry != null);
         if (entry == null) {
@@ -474,10 +681,45 @@ public final class EmberSquadDirector {
         entry.z = zz;
         entry.speed = (float) Math.hypot(entry.velX, entry.velY);
         entry.hasVelSample = true;
+        boolean wasProne = existed && CombatTargetState.isProneOrCrawl(entry.stateMask);
+        boolean nowProne = CombatTargetState.isProneOrCrawl(stateMask);
+        if (!wasProne && nowProne) {
+            entry.knockedDownAtMs = nowMs;
+        } else if (!nowProne && !CombatTargetState.isPostureTransition(stateMask)) {
+            entry.knockedDownAtMs = 0L;
+        }
         entry.stateMask = stateMask;
         entry.lastSeenMs = nowMs;
+        if (perceivedNow) {
+            entry.perceivedBySquad = true;
+            entry.heardOnly = heardOnlyNow;
+            entry.lastPerceivedMs = nowMs;
+            entry.lastKnownX = zx;
+            entry.lastKnownY = zy;
+            entry.lastKnownZ = zz;
+        } else if (entry.perceivedBySquad) {
+            long ttl = entry.heardOnly ? HEARING_MEMORY_MS : VISUAL_MEMORY_MS;
+            if ((nowMs - entry.lastPerceivedMs) > ttl) {
+                entry.perceivedBySquad = false;
+                entry.heardOnly = false;
+            }
+        }
+        entry.liveTargetEntityId = liveTargetEntityId;
+        if (attackedAllyPriority > 0) {
+            entry.attackedAllyPriority = Math.max(entry.attackedAllyPriority, attackedAllyPriority);
+            entry.distressPriorityUntilMs = Math.max(entry.distressPriorityUntilMs, nowMs + DISTRESS_PRIORITY_TTL_MS);
+        } else if (nowMs >= entry.distressPriorityUntilMs) {
+            entry.attackedAllyPriority = 0;
+        }
         updateStaggerTimestamp(entry, wasStaggered, stateMask, nowMs);
         return entry;
+    }
+
+    public synchronized void deactivateThreat(int zombieId) {
+        ThreatEntry entry = findById(zombieId);
+        if (entry != null) {
+            entry.clear();
+        }
     }
 
     public synchronized void clearAllThreats() {
@@ -493,6 +735,13 @@ public final class EmberSquadDirector {
                 if (t.lastSeenMs != nowMs) {
                     t.clear();
                 } else {
+                    if (t.perceivedBySquad) {
+                        long ttl = t.heardOnly ? HEARING_MEMORY_MS : VISUAL_MEMORY_MS;
+                        if ((nowMs - t.lastPerceivedMs) > ttl) {
+                            t.perceivedBySquad = false;
+                            t.heardOnly = false;
+                        }
+                    }
                     t.ringTable.expireStale(nowMs);
                 }
             }
@@ -530,6 +779,11 @@ public final class EmberSquadDirector {
         slot.hasVelSample = true;
         slot.stateMask = stateMask;
         slot.lastSeenMs = nowMs;
+        slot.perceivedBySquad = true;
+        slot.lastPerceivedMs = nowMs;
+        slot.lastKnownX = x;
+        slot.lastKnownY = y;
+        slot.lastKnownZ = z;
         updateStaggerTimestamp(slot, wasStaggered, stateMask, nowMs);
         return slot;
     }
@@ -696,6 +950,65 @@ public final class EmberSquadDirector {
                 }
             }
         }
+    }
+
+    /**
+     * 按单兵视角判定 {@code scanRadius} 内是否存在<b>真正围攻本人</b>的高密度站立丧尸群：
+     * 仅计入正锁定本人，或未明确锁定他人/距本人 {@code <= 1.80m} 贴身紧逼的站立丧尸；
+     * 若满足数量 {@code >= 4} 且近邻平均间距 {@code < 0.50m}，写入质心至 {@code outCentroid[0..1]} 并返回 {@code true}。
+     * （避免 4 只僵尸围攻队友时，把从侧面支援的友军吓跑。）
+     */
+    public synchronized boolean findPersonalHordeThreat(
+            String selfNpcId, float x, float y, int zLevel, float scanRadius, float[] outCentroid) {
+        int memberCount = 0;
+        float rSq = scanRadius * scanRadius;
+        float closeSq = PERSONAL_HORDE_CLOSE_DIST * PERSONAL_HORDE_CLOSE_DIST;
+        for (int i = 0; i < MAX_THREATS && memberCount < 16; i++) {
+            ThreatEntry cand = threats[i];
+            if (!cand.active || !CombatTargetState.isStanding(cand.stateMask) || Math.abs(cand.z - zLevel) > 0.6F) {
+                continue;
+            }
+            float dx = cand.x - x;
+            float dy = cand.y - y;
+            float dSq = dx * dx + dy * dy;
+            if (dSq > rSq) {
+                continue;
+            }
+            boolean targetingOtherAlly = cand.liveTargetEntityId != null
+                    && !cand.liveTargetEntityId.isEmpty()
+                    && !cand.liveTargetEntityId.equals(selfNpcId);
+            if (targetingOtherAlly && dSq > closeSq) {
+                continue;
+            }
+            clusterMembers[memberCount++] = i;
+        }
+        if (memberCount < HORDE_MIN_COUNT) {
+            return false;
+        }
+        float sumNearest = 0.0F;
+        float sumX = 0.0F;
+        float sumY = 0.0F;
+        for (int a = 0; a < memberCount; a++) {
+            ThreatEntry ta = threats[clusterMembers[a]];
+            sumX += ta.x;
+            sumY += ta.y;
+            float nearest = Float.MAX_VALUE;
+            for (int b = 0; b < memberCount; b++) {
+                if (a == b) continue;
+                ThreatEntry tb = threats[clusterMembers[b]];
+                float d = (float) Math.hypot(ta.x - tb.x, ta.y - tb.y);
+                if (d < nearest) nearest = d;
+            }
+            sumNearest += nearest;
+        }
+        if ((sumNearest / memberCount) >= HORDE_INTER_DIST_THRESHOLD) {
+            return false;
+        }
+        if (outCentroid != null && outCentroid.length >= 2) {
+            outCentroid[0] = sumX / memberCount;
+            outCentroid[1] = sumY / memberCount;
+        }
+        return true;
     }
 
     /**

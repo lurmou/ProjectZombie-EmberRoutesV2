@@ -15,8 +15,9 @@ public final class SquadBrainBuilder {
     public static StateTreeRunner createRunner() {
         StateNode vehicleLeaf = new VehicleCoRideNode();
         StateNode emergencyLeaf = SquadCombatNodes.createEmergencySelfDefenseNode();
-        StateNode combatLeaf = SquadCombatNodes.createCombatEngageNode();
-        StateNode firstAidLeaf = SquadCombatNodes.createSquadFieldFirstAidNode();
+        StateNode combatLeaf = SquadCombatNodes.createCombatRootNode();
+        StateNode firstAidLeaf = SelfAidActionNode.forSquadFieldAid(
+                ctx -> SquadCombatNodes.hasThreatWithin(ctx.npc, 4.5F));
         StateNode followLeaf = new FormationFollowNode();
         StateNode root = new RootNode(
                 "SQUAD",

@@ -1,39 +1,40 @@
 package emberroutes.npc.combat;
 
+import emberroutes.npc.EmberLocomotionController;
 import emberroutes.npc.EmberTargetProjector;
 import emberroutes.npc.IsoNPC;
 import emberroutes.npc.NpcManager;
 import emberroutes.npc.NpcNullInputComponent;
 import emberroutes.npc.RulesOfEngagement;
 import emberroutes.npc.SquadTacticalConfig;
-import emberroutes.npc.brain.BandageSelfAction;
 import emberroutes.npc.brain.BaseAction;
 import emberroutes.npc.brain.BrainContext;
-import emberroutes.npc.brain.DrinkWaterAction;
-import emberroutes.npc.brain.EatFoodAction;
-import emberroutes.npc.brain.NeedsPolicy.UrgentNeed;
 import emberroutes.npc.brain.SelfInventoryTransferAction;
 import emberroutes.npc.brain.StateNode;
 import emberroutes.npc.brain.StateScope;
+import emberroutes.npc.combat.NpcWeaponSelector.DesiredWeaponPlan;
 import emberroutes.npc.combat.NpcWeaponSelector.ReloadKind;
 import emberroutes.npc.combat.NpcWeaponSelector.WeaponMode;
 import java.util.List;
 import zombie.characters.IsoPlayer;
 import zombie.characters.IsoZombie;
-import zombie.inventory.InventoryItem;
-import zombie.inventory.ItemContainer;
+import zombie.core.physics.BallisticsController;
 import zombie.inventory.types.HandWeapon;
-import zombie.iso.IsoWorld;
-import zombie.iso.LosUtil;
-import zombie.iso.Vector2;
 
 /**
- * {@code BrainMode.SQUAD} 战斗与战间随身自理状态节点集，以及与据点守卫共用的单兵战斗执行核。
+ * 随从与据点守卫共用的 {@code EmberStateTree} 战斗子树与单兵交战执行核：
+ * <ol>
+ *   <li>真子叶拆分：{@code COMBAT_ROOT -> (COMBAT_RETREAT, COMBAT_EQUIP_OR_RELOAD, COMBAT_RANGED, COMBAT_MELEE)}；</li>
+ *   <li>全链路遵守异步「起身屏障」与 {@code StateScope} RAII 对称回收（交由 {@link B42CombatRuntime#cleanupNpcCombat} 单点收口）；</li>
+ *   <li>唯一身体控制端口：所有移动矢量、架势与瞄准朝向均经 {@link EmberLocomotionController#setCombatAimStrafe} 同帧下发。</li>
+ * </ol>
  */
 public final class SquadCombatNodes {
     private static final float SELF_DEFENSE_ENTER_DIST = 1.35F;
     private static final float SELF_DEFENSE_EXIT_DIST = 1.85F;
-    private static final float FIELD_AID_SAFE_RADIUS = 4.5F;
+    private static final float SQUAD_HOLD_COMBAT_RADIUS = 6.5F;
+    private static final double TARGET_COMMIT_SIM = 0.45;
+    private static final int MAX_ALLY_ARRAY = 16;
 
     private SquadCombatNodes() {}
 
@@ -41,430 +42,94 @@ public final class SquadCombatNodes {
         return new EmergencySelfDefenseNode();
     }
 
-    public static StateNode createCombatEngageNode() {
-        return new CombatEngageNode();
+    public static StateNode createCombatRootNode() {
+        return new CombatRootNode();
     }
 
-    public static StateNode createSquadFieldFirstAidNode() {
-        return new SquadFieldFirstAidNode();
+    /** 供 {@link CombatRootNode} 与 {@link GuardCombatNode} 共享的 4 枚正式战斗子叶。 */
+    public static StateNode[] createCombatChildLeaves(
+            CombatSessionState session, boolean allowSquadCqbSweep) {
+        return new StateNode[]{
+            new CombatRetreatLeaf(session),
+            new CombatEquipOrReloadLeaf(session),
+            new CombatRangedLeaf(session, allowSquadCqbSweep),
+            new CombatMeleeLeaf(session)
+        };
     }
 
-    /** 共有状态上下文（由单兵战斗节点通过 {@link StateScope} 管理并释放）。 */
+    /** 共有状态上下文（纯内存瞬态，由战斗根分支或守卫分支持有并经 {@link StateScope} 自动清理）。 */
     public static final class CombatSessionState {
         public final HordeRetreatPolicy retreatPolicy = new HordeRetreatPolicy();
         public final CqbController cqb = new CqbController();
-        public final MeleeSlotAssigner.SelectedEngagement selectedMelee =
-                new MeleeSlotAssigner.SelectedEngagement();
-        public final SpacingController.MoveCommand moveCmd = new SpacingController.MoveCommand();
-        public final Vector2 tmpAim = new Vector2();
-        public final float[] wallScratch = new float[2];
+        public final CombatLocomotionSolver.CombatMoveState moveState =
+                new CombatLocomotionSolver.CombatMoveState();
+        public final CombatLocomotionSolver.MoveCommand moveCmd =
+                new CombatLocomotionSolver.MoveCommand();
+        public final CombatLocomotionSolver.SafeSideGuard safeGuard =
+                new CombatLocomotionSolver.SafeSideGuard();
+        public final MeleeTargetSelector.SelectedEngagement selectedMelee =
+                new MeleeTargetSelector.SelectedEngagement();
+        public final RangedTacticsController.RepositionCommand rangedCmd =
+                new RangedTacticsController.RepositionCommand();
+        public final float[] allyXs = new float[MAX_ALLY_ARRAY];
+        public final float[] allyYs = new float[MAX_ALLY_ARRAY];
+        public final String[] allyIds = new String[MAX_ALLY_ARRAY];
+        public final float[] retreatCentroidScratch = new float[2];
+
         public int currentMeleeTargetId = -1;
-        public float emergencyUntilSim;
+        public int currentRangedTargetId = -1;
+        public double targetCommitUntilSim;
+        public double lastShoveSim = -10.0;
         public long lastCqbScanMs;
+        public String activeSubState = "IDLE";
 
         public void reset() {
             retreatPolicy.reset();
             cqb.reset();
+            moveState.reset();
+            moveCmd.reset();
+            safeGuard.reset();
+            rangedCmd.reset();
+            selectedMelee.threat = null;
+            selectedMelee.ringSlot = -1;
             currentMeleeTargetId = -1;
-            emergencyUntilSim = 0.0F;
+            currentRangedTargetId = -1;
+            targetCommitUntilSim = 0.0;
+            lastShoveSim = -10.0;
             lastCqbScanMs = 0L;
+            activeSubState = "IDLE";
         }
     }
 
-    /** ① 最高优贴身自卫（{@code < 1.35} 格无视 {@code HOLD_FIRE} 停火令强行推开/挥击）。 */
-    private static final class EmergencySelfDefenseNode extends StateNode {
-        private final Vector2 tmpAim = new Vector2();
-        private final float[] wallScratch = new float[2];
-        private double enteredAtSim;
-
-        EmergencySelfDefenseNode() {
-            super("EMERGENCY_SELF_DEFENSE", null, null, 0.0, true);
-        }
-
-        @Override
-        public boolean canEnter(BrainContext ctx) {
-            if (ctx.npc == null || ctx.npc.isDead() || ctx.npc.getVehicle() != null) {
-                return false;
-            }
-            return findClosestThreatDist(ctx.npc, SELF_DEFENSE_ENTER_DIST) != null;
-        }
-
-        @Override
-        public boolean canContinue(BrainContext ctx) {
-            if (ctx.npc == null || ctx.npc.isDead() || ctx.npc.getVehicle() != null) {
-                return false;
-            }
-            if (ctx.simTime - enteredAtSim < 0.40) {
-                return true;
-            }
-            return findClosestThreatDist(ctx.npc, SELF_DEFENSE_EXIT_DIST) != null;
-        }
-
-        @Override
-        public void onEnter(BrainContext ctx, StateScope scope) {
-            ctx.working = false;
-            enteredAtSim = ctx.simTime;
-            ctx.combatActivityState = "COMBAT";
-            IsoNPC npc = ctx.npc;
-            if (npc == null || npc.isDead()) return;
-
-            ctx.requestStandUp(true);
-            npc.getFollow().stop(npc, false, "EMERGENCY_SELF_DEF");
-            if (!npc.getCharacterActions().isEmpty()) {
-                npc.StopAllActionQueue();
-            }
-            scope.defer(npc.getGaze().suppress("COMBAT"));
-            scope.defer(() -> {
-                ctx.combatActivityState = "";
-                if (ctx.npc != null) {
-                    ctx.npc.clearVirtualAim();
-                    ctx.npc.setIsAiming(false);
-                    NpcNullInputComponent in = ctx.npc.getNullInputComponent();
-                    if (in != null) {
-                        in.clearCombatIntents();
-                    }
-                    ctx.npc.getLocomotion().clearCombatMove(ctx.npc);
-                }
-            });
-        }
-
-        @Override
-        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
-            IsoNPC npc = ctx.npc;
-            if (npc == null || npc.isDead()) return;
-            EmberSquadDirector.ThreatEntry threat = findClosestThreatDist(npc, SELF_DEFENSE_EXIT_DIST + 0.5F);
-            if (threat == null) return;
-
-            int zLvl = EmberTargetProjector.levelOf(npc.getZ());
-            float bodyYaw = npc.getDirectionAngleRadians();
-            npc.getVirtualAim().aimAtTarget(
-                    bodyYaw,
-                    npc.getX(),
-                    npc.getY(),
-                    npc.getZ(),
-                    threat.x,
-                    threat.y,
-                    threat.z,
-                    threat.velX,
-                    threat.velY,
-                    2.5F,
-                    (float) Math.max(0.016, dtSim));
-            npc.setIsAiming(true);
-            npc.setForwardDirection(tmpAim.set(npc.getVirtualAim().getAimDirX(), npc.getVirtualAim().getAimDirY()));
-            npc.setDirectionAngle(npc.getVirtualAim().getAimYawDeg());
-
-            float dx = threat.x - npc.getX();
-            float dy = threat.y - npc.getY();
-            float dist = (float) Math.hypot(dx, dy);
-            float awayX = dist > 1.0E-4F ? -(dx / dist) : -npc.getForwardDirectionX();
-            float awayY = dist > 1.0E-4F ? -(dy / dist) : -npc.getForwardDirectionY();
-            SpacingController.applyWallAvoidTangentialSlide(
-                    npc.getX(), npc.getY(), zLvl, awayX, awayY, B42CombatRuntime.WORLD_PROBE, wallScratch);
-            if (dist < 1.15F) {
-                npc.getLocomotion().setCombatMove(npc, wallScratch[0], wallScratch[1], false, true, 0.78F);
-            } else {
-                npc.getLocomotion().setCombatMove(npc, 0.0F, 0.0F, false, true, 0.0F);
-            }
-
-            if (npc.getMeleeDelay() <= 0.5F && npc.CanAttack()) {
-                assignAttackTargetSquare(npc, threat);
-                NpcNullInputComponent in = npc.getNullInputComponent();
-                boolean transition = CombatTargetState.isPostureTransition(threat.stateMask);
-                if (!transition && CombatTargetState.isGroundAttackable(threat.stateMask) && dist < 1.15F) {
-                    if (in != null) {
-                        in.setCombatStompIntent(true);
-                        in.setCombatMeleeButtonIntent(true);
-                    }
-                    npc.setAimAtFloor(true);
-                    npc.setDoShove(true);
-                    npc.AttemptAttack(0.0F);
-                } else if (!transition) {
-                    if (in != null) {
-                        in.clearCombatIntents();
-                    }
-                    npc.setAimAtFloor(false);
-                    npc.setDoShove(true);
-                    npc.AttemptAttack(0.0F);
-                } else {
-                    if (in != null) {
-                        in.clearCombatIntents();
-                    }
-                    npc.setAimAtFloor(false);
-                    npc.setDoShove(false);
-                    npc.AttemptAttack(0.35F);
-                }
-            }
-        }
+    public static boolean hasThreatWithin(IsoNPC npc, float radius) {
+        return npc != null && findClosestThreatDist(npc, radius) != null;
     }
 
-    /** ② 小队核心交战节点（受 ROE / CQB / 7 大微操内核 / 集中式导演联合控制）。 */
-    private static final class CombatEngageNode extends StateNode {
-        private final CombatSessionState session = new CombatSessionState();
-
-        CombatEngageNode() {
-            super("COMBAT_ENGAGE", null, null, 0.25, true);
-        }
-
-        @Override
-        public boolean canEnter(BrainContext ctx) {
-            return shouldEngageSquadCombat(ctx);
-        }
-
-        @Override
-        public boolean canContinue(BrainContext ctx) {
-            return shouldEngageSquadCombat(ctx) || session.retreatPolicy.isActive();
-        }
-
-        @Override
-        public void onEnter(BrainContext ctx, StateScope scope) {
-            ctx.working = false;
-            session.reset();
-            IsoNPC npc = ctx.npc;
-            if (npc == null || npc.isDead()) return;
-            ctx.requestStandUp(true);
-            npc.getFollow().stop(npc, false, "COMBAT_ENGAGE");
-            scope.defer(npc.getGaze().suppress("COMBAT"));
-            scope.defer(() -> cleanupCombatScope(ctx, session));
-        }
-
-        @Override
-        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
-            boolean cqbEnabled = SquadTacticalConfig.isEffectiveCqb(ctx.npcId);
-            executeTacticalCombatTick(ctx, session, cqbEnabled, true, dtSim);
-        }
+    public static void performQuickDefensiveShove(
+            IsoNPC npc, EmberSquadDirector.ThreatEntry blocker, double nowSim) {
+        MeleeAttackExecutor.commitDefensiveShove(npc, blocker, nowSim);
     }
 
-    /** ③ 战间随身包扎/干粮/压弹（严格经原版背囊取放、绝不离开小队或找床找箱）。 */
-    private static final class SquadFieldFirstAidNode extends StateNode {
-        private enum Phase {
-            IDLE,
-            BANDAGE,
-            EAT,
-            DRINK,
-            REPACK
-        }
-
-        private Phase phase = Phase.IDLE;
-        private boolean transferringOut;
-        private boolean repackingBack;
-        private SelfInventoryTransferAction transferAction;
-        private BaseAction brainAction;
-        private InventoryItem unpackedItem;
-        private ItemContainer unpackedFromBag;
-
-        SquadFieldFirstAidNode() {
-            super("SQUAD_FIELD_FIRST_AID", null, null, 0.0, true);
-        }
-
-        @Override
-        public boolean canEnter(BrainContext ctx) {
-            if (ctx.npc == null || ctx.npc.isDead() || ctx.npc.getVehicle() != null) {
-                return false;
-            }
-            if (findClosestThreatDist(ctx.npc, FIELD_AID_SAFE_RADIUS) != null) {
-                return false;
-            }
-            return pickAidKind(ctx.npc) != Phase.IDLE;
-        }
-
-        @Override
-        public boolean canContinue(BrainContext ctx) {
-            if (ctx.npc == null || ctx.npc.isDead() || ctx.npc.getVehicle() != null) {
-                return false;
-            }
-            if (findClosestThreatDist(ctx.npc, FIELD_AID_SAFE_RADIUS) != null) {
-                return false;
-            }
-            if (transferringOut || repackingBack) {
-                return transferAction != null && transferAction.isRunning();
-            }
-            if (phase == Phase.REPACK) {
-                return !ctx.npc.getCharacterActions().isEmpty();
-            }
-            return brainAction != null && brainAction.isRunning();
-        }
-
-        @Override
-        public void onEnter(BrainContext ctx, StateScope scope) {
-            phase = pickAidKind(ctx.npc);
-            transferringOut = false;
-            repackingBack = false;
-            transferAction = null;
-            brainAction = null;
-            unpackedItem = null;
-            unpackedFromBag = null;
-            ctx.combatActivityState = "FIRST_AID";
-
-            IsoNPC npc = ctx.npc;
-            if (phase == Phase.REPACK) {
-                NpcRepackMagAction.tryStart(npc);
-            } else if (npc != null) {
-                BaseAction.ItemLocation loc = findItemForPhase(npc, phase);
-                ItemContainer mainInv = npc.getInventory();
-                if (loc != null && loc.item() != null && mainInv != null) {
-                    ItemContainer src = loc.item().getContainer() != null ? loc.item().getContainer() : loc.container();
-                    if (src != null && src != mainInv) {
-                        unpackedItem = loc.item();
-                        unpackedFromBag = src;
-                        transferringOut = true;
-                        transferAction = new SelfInventoryTransferAction(List.of(
-                                new SelfInventoryTransferAction.TransferEntry(loc.item(), src, mainInv)));
-                        transferAction.start(ctx);
-                    } else {
-                        startPrimaryAidAction(ctx);
-                    }
-                }
-            }
-
-            scope.defer(() -> {
-                ctx.combatActivityState = "";
-                if (transferAction != null && transferAction.isRunning()) {
-                    transferAction.interrupt(ctx, "FIELD_AID_EXIT");
-                }
-                transferAction = null;
-                if (brainAction != null && brainAction.isRunning()) {
-                    brainAction.interrupt(ctx, "FIELD_AID_EXIT");
-                }
-                brainAction = null;
-                if (ctx.npc != null && !ctx.npc.getCharacterActions().isEmpty()) {
-                    ctx.npc.StopAllActionQueue();
-                }
-                unpackedItem = null;
-                unpackedFromBag = null;
-                transferringOut = false;
-                repackingBack = false;
-                phase = Phase.IDLE;
-            });
-        }
-
-        @Override
-        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
-            if (transferringOut) {
-                if (transferAction == null) {
-                    transferringOut = false;
-                    return;
-                }
-                transferAction.tick(ctx, dtSim);
-                if (!transferAction.isRunning()) {
-                    boolean ok = transferAction.getStatus() == BaseAction.ActionStatus.COMPLETED;
-                    transferAction = null;
-                    transferringOut = false;
-                    if (ok) {
-                        startPrimaryAidAction(ctx);
-                    } else {
-                        unpackedItem = null;
-                        unpackedFromBag = null;
-                    }
-                }
-                return;
-            }
-
-            if (repackingBack) {
-                if (transferAction != null) {
-                    transferAction.tick(ctx, dtSim);
-                    if (!transferAction.isRunning()) {
-                        transferAction = null;
-                        repackingBack = false;
-                    }
-                } else {
-                    repackingBack = false;
-                }
-                return;
-            }
-
-            if (brainAction != null && brainAction.isRunning()) {
-                brainAction.tick(ctx, dtSim);
-                if (!brainAction.isRunning() && ctx.npc != null) {
-                    brainAction = null;
-                    ItemContainer mainInv = ctx.npc.getInventory();
-                    if (unpackedItem != null
-                            && unpackedFromBag != null
-                            && mainInv != null
-                            && mainInv.contains(unpackedItem)
-                            && unpackedFromBag.hasRoomFor(ctx.npc, unpackedItem)
-                            && unpackedFromBag.isItemAllowed(unpackedItem)) {
-                        repackingBack = true;
-                        transferAction = new SelfInventoryTransferAction(List.of(
-                                new SelfInventoryTransferAction.TransferEntry(unpackedItem, mainInv, unpackedFromBag)));
-                        unpackedItem = null;
-                        unpackedFromBag = null;
-                        transferAction.start(ctx);
-                    } else {
-                        unpackedItem = null;
-                        unpackedFromBag = null;
-                    }
-                }
+    public static EmberSquadDirector.ThreatEntry findClosestThreatDist(IsoNPC npc, float maxRadius) {
+        if (npc == null) return null;
+        EmberSquadDirector director = EmberSquadDirector.getInstance();
+        int npcZ = EmberTargetProjector.levelOf(npc.getZ());
+        float nx = npc.getX();
+        float ny = npc.getY();
+        EmberSquadDirector.ThreatEntry best = null;
+        float bestDistSq = maxRadius * maxRadius;
+        for (int i = 0; i < EmberSquadDirector.MAX_THREATS; i++) {
+            EmberSquadDirector.ThreatEntry t = director.getThreatAt(i);
+            if (!t.active || !t.perceivedBySquad || Math.abs(t.z - npcZ) > 0.6F) continue;
+            float dx = t.x - nx;
+            float dy = t.y - ny;
+            float dSq = dx * dx + dy * dy;
+            if (dSq <= bestDistSq) {
+                bestDistSq = dSq;
+                best = t;
             }
         }
-
-        private void startPrimaryAidAction(BrainContext ctx) {
-            if (phase == Phase.BANDAGE) {
-                brainAction = new BandageSelfAction();
-            } else if (phase == Phase.EAT) {
-                brainAction = new EatFoodAction();
-            } else if (phase == Phase.DRINK) {
-                brainAction = new DrinkWaterAction();
-            }
-            if (brainAction != null) {
-                brainAction.start(ctx);
-            }
-        }
-
-        private static BaseAction.ItemLocation findItemForPhase(IsoNPC npc, Phase p) {
-            return switch (p) {
-                case BANDAGE -> BandageSelfAction.findBestBandage(npc);
-                case EAT -> EatFoodAction.findBestEdibleFood(npc);
-                case DRINK -> DrinkWaterAction.findCleanWaterContainer(npc);
-                default -> null;
-            };
-        }
-
-        private static Phase pickAidKind(IsoNPC npc) {
-            if (npc == null) return Phase.IDLE;
-            if (BandageSelfAction.hasBleedingUnbandagedPart(npc)
-                    && BandageSelfAction.findBestBandage(npc) != null) {
-                return Phase.BANDAGE;
-            }
-            if (npc.getStats() != null) {
-                float h = npc.getStats().get(zombie.characters.CharacterStat.HUNGER);
-                float t = npc.getStats().get(zombie.characters.CharacterStat.THIRST);
-                UrgentNeed need = emberroutes.npc.brain.NeedsPolicy.evaluateUrgentNeed(
-                        h, t, 0.0F, false, false, UrgentNeed.NONE);
-                if (need == UrgentNeed.EAT && EatFoodAction.findBestEdibleFood(npc) != null) {
-                    return Phase.EAT;
-                }
-                if (need == UrgentNeed.DRINK && DrinkWaterAction.findCleanWaterContainer(npc) != null) {
-                    return Phase.DRINK;
-                }
-            }
-            if (npc.getCharacterActions().isEmpty()
-                    && NpcWeaponSelector.findReloadableEmptyMagazine(npc) != null) {
-                return Phase.REPACK;
-            }
-            return Phase.IDLE;
-        }
-    }
-
-    // =========================================================================
-    //  小队与据点守卫共用的单兵战斗核心管线（禁止在 Guard 中复制粘贴逻辑）
-    // =========================================================================
-
-    static void cleanupCombatScope(BrainContext ctx, CombatSessionState session) {
-        if (session != null) {
-            session.reset();
-        }
-        ctx.combatActivityState = "";
-        IsoNPC npc = ctx.npc;
-        if (npc != null) {
-            EmberSquadDirector.getInstance().releaseAllForNpc(npc.getNpcId());
-            npc.clearVirtualAim();
-            npc.setIsAiming(false);
-            NpcNullInputComponent in = npc.getNullInputComponent();
-            if (in != null) {
-                in.clearCombatIntents();
-            }
-            npc.getLocomotion().clearCombatMove(npc);
-        }
+        return best;
     }
 
     static boolean shouldEngageSquadCombat(BrainContext ctx) {
@@ -492,55 +157,296 @@ public final class SquadCombatNodes {
         return cqb && hasGun && !npc.isOutside();
     }
 
-    /** 供 {@link CombatEngageNode} 与 {@link GuardCombatNode} 共用的单兵战斗每帧决策步。 */
-    static void executeTacticalCombatTick(
-            BrainContext ctx,
-            CombatSessionState session,
-            boolean cqbEnabled,
-            boolean allowSquadSweepWhenIdle,
-            double dtSim) {
-        IsoNPC npc = ctx.npc;
-        if (npc == null || npc.isDead()) return;
+    /** ① 最高优贴身自卫（停火令 / 长动作打断 / 枪手被极近身贴脸时的紧急推开自保）。 */
+    private static final class EmergencySelfDefenseNode extends StateNode {
+        private final CombatLocomotionSolver.CombatMoveState moveState =
+                new CombatLocomotionSolver.CombatMoveState();
+        private final CombatLocomotionSolver.MoveCommand moveCmd =
+                new CombatLocomotionSolver.MoveCommand();
+        private final float[] allyXs = new float[MAX_ALLY_ARRAY];
+        private final float[] allyYs = new float[MAX_ALLY_ARRAY];
+        private double enteredAtSim;
 
-        EmberSquadDirector director = EmberSquadDirector.getInstance();
-        long nowMs = System.currentTimeMillis();
-        int npcZ = EmberTargetProjector.levelOf(npc.getZ());
-        IsoPlayer leader = resolveLeader(ctx.followPlayerIndex);
-        List<IsoNPC> liveAllies = NpcManager.getLiveNpcsSnapshot();
+        EmergencySelfDefenseNode() {
+            super("EMERGENCY_SELF_DEFENSE", null, null, 0.0, true);
+        }
 
-        // 0. 检查是否有正在运行的原版 Lua 动作（例如泵动霰弹开火后自动排队的 ISRackFirearm）
-        if (!npc.getCharacterActions().isEmpty()) {
-            zombie.characters.CharacterTimedActions.BaseAction curAct = npc.getCharacterActions().get(0);
-            ctx.combatActivityState = "RELOADING";
-            npc.setIsAiming(false);
-            npc.clearVirtualAim();
-            if (curAct instanceof NpcReloadAction) {
-                director.getReloadPool().acquire(npc.getNpcId(), nowMs);
+        @Override
+        public boolean canEnter(BrainContext ctx) {
+            if (ctx.npc == null || ctx.npc.isDead() || ctx.npc.getVehicle() != null) {
+                return false;
             }
-            if (!(curAct instanceof NpcReloadAction) && curAct.stopOnWalk) {
+            RulesOfEngagement roe = SquadTacticalConfig.getEffectiveRoe(ctx.npcId);
+            boolean hasAction = !ctx.npc.getCharacterActions().isEmpty();
+            HandWeapon eq = NpcWeaponSelector.getEquippedWeapon(ctx.npc);
+            boolean holdingFirearm = NpcWeaponSelector.isUsableFirearm(eq);
+            boolean closeThreat = findClosestThreatDist(ctx.npc, SELF_DEFENSE_ENTER_DIST) != null;
+            return CombatTargetState.isEmergencySelfDefenseNeeded(roe, hasAction, holdingFirearm, closeThreat);
+        }
+
+        @Override
+        public boolean canContinue(BrainContext ctx) {
+            if (ctx.npc == null || ctx.npc.isDead() || ctx.npc.getVehicle() != null) {
+                return false;
+            }
+            if (ctx.simTime - enteredAtSim < 0.40) {
+                return true;
+            }
+            return findClosestThreatDist(ctx.npc, SELF_DEFENSE_EXIT_DIST) != null;
+        }
+
+        @Override
+        public void onEnter(BrainContext ctx, StateScope scope) {
+            ctx.working = false;
+            enteredAtSim = ctx.simTime;
+            moveState.reset();
+            moveCmd.reset();
+            ctx.combatActivityState = "COMBAT";
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) return;
+
+            ctx.requestStandUp(true);
+            npc.getFollow().stop(npc, false, "EMERGENCY_SELF_DEF");
+            if (!npc.getCharacterActions().isEmpty()) {
+                npc.StopAllActionQueue();
+            }
+            scope.defer(npc.getGaze().suppress("COMBAT"));
+            scope.defer(() -> B42CombatRuntime.cleanupNpcCombat(ctx.npc, null));
+        }
+
+        @Override
+        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) return;
+            if (npc.getPosture().isBlockingLocomotion()) {
+                ctx.requestStandUp(true);
+                return;
+            }
+
+            EmberSquadDirector.ThreatEntry threat = findClosestThreatDist(npc, SELF_DEFENSE_EXIT_DIST + 0.5F);
+            if (threat == null) {
                 npc.getLocomotion().clearCombatMove(npc);
                 return;
             }
-            stepRetreatSpacingDuringAction(npc, npcZ, session.wallScratch);
-            return;
+
+            int zLvl = EmberTargetProjector.levelOf(npc.getZ());
+            float bodyYaw = npc.getDirectionAngleRadians();
+            npc.getVirtualAim().aimAtTarget(
+                    bodyYaw,
+                    npc.getX(),
+                    npc.getY(),
+                    npc.getZ(),
+                    threat.x,
+                    threat.y,
+                    threat.z,
+                    threat.velX,
+                    threat.velY,
+                    CombatTargetState.isProneOrCrawl(threat.stateMask),
+                    2.5F,
+                    (float) Math.max(0.016, dtSim));
+
+            float dx = threat.x - npc.getX();
+            float dy = threat.y - npc.getY();
+            float dist = (float) Math.hypot(dx, dy);
+            EmberSquadDirector director = EmberSquadDirector.getInstance();
+            int allyCount = collectAllies(npc, zLvl, allyXs, allyYs, null);
+
+            CombatLocomotionSolver.computeRangedRetreatStep(
+                    moveState,
+                    director,
+                    npc.getNpcId(),
+                    npc.getX(),
+                    npc.getY(),
+                    zLvl,
+                    threat.x,
+                    threat.y,
+                    dist,
+                    allyXs,
+                    allyYs,
+                    allyCount,
+                    false,
+                    0.0F,
+                    0.0F,
+                    0.0F,
+                    B42CombatRuntime.WORLD_PROBE,
+                    ctx.simTime,
+                    (float) dtSim,
+                    moveCmd);
+
+            boolean wantStep = moveCmd.wantMove && dist < 1.15F;
+            npc.getLocomotion().setCombatAimStrafe(
+                    npc,
+                    wantStep ? moveCmd.dirX : 0.0F,
+                    wantStep ? moveCmd.dirY : 0.0F,
+                    wantStep,
+                    true,
+                    true,
+                    npc.getVirtualAim().getAimDirX(),
+                    npc.getVirtualAim().getAimDirY(),
+                    false,
+                    0.78F);
+
+            if (npc.getMeleeDelay() <= 0.5F
+                    && npc.CanAttack()
+                    && !npc.isCombatAttackBlocked(ctx.simTime)
+                    && dist <= MeleeWeaponMetrics.VANILLA_BARE_HANDS_MAX_RANGE + 0.15F) {
+                MeleeAttackExecutor.commitDefensiveShove(npc, threat, ctx.simTime);
+            }
+        }
+    }
+
+    /** ② {@code SQUAD} 主战斗分支节点（持有统一姿态、凝视屏蔽与收口生命周期）。 */
+    private static final class CombatRootNode extends StateNode {
+        private final CombatSessionState session;
+
+        CombatRootNode() {
+            this(new CombatSessionState());
         }
 
-        // 1. 武器自适应切换（CQB/有备弹优先枪械，断弹自动切换随身近战）
-        WeaponMode mode = NpcWeaponSelector.ensureBestCombatWeapon(npc, cqbEnabled, true);
-        HandWeapon weapon = NpcWeaponSelector.getEquippedWeapon(npc);
+        private CombatRootNode(CombatSessionState session) {
+            super("COMBAT_ROOT", createCombatChildLeaves(session, true), null, 0.25, true);
+            this.session = session;
+        }
 
-        // 2. 二段尸潮质心撤退（<3.0 格触发背离撤退 3.0 格，1.35s 驻留 + 4.0s 冷却）
-        EmberSquadDirector.HordeCluster cluster = director.findNearestCluster(npc.getX(), npc.getY(), npcZ, 6.0F);
-        boolean retreating = session.retreatPolicy.update(
-                npc.getX(),
-                npc.getY(),
-                npcZ,
-                cluster != null,
-                cluster != null ? cluster.centroidX : 0.0F,
-                cluster != null ? cluster.centroidY : 0.0F,
-                ctx.simTime,
-                B42CombatRuntime.WORLD_PROBE);
-        if (retreating) {
+        @Override
+        public boolean canEnter(BrainContext ctx) {
+            return shouldEngageSquadCombat(ctx);
+        }
+
+        @Override
+        public boolean canContinue(BrainContext ctx) {
+            return shouldEngageSquadCombat(ctx) || session.retreatPolicy.isActive();
+        }
+
+        @Override
+        public void onEnter(BrainContext ctx, StateScope scope) {
+            ctx.working = false;
+            session.reset();
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) return;
+            ctx.requestStandUp(true);
+            npc.getFollow().stop(npc, false, "COMBAT_ROOT");
+            scope.defer(npc.getGaze().suppress("COMBAT"));
+            scope.defer(() -> B42CombatRuntime.cleanupNpcCombat(ctx.npc, session));
+        }
+    }
+
+    /** ③ 战斗子叶 1：尸潮质心撤退（直行目标点，不做二次偏转打架）。 */
+    private static final class CombatRetreatLeaf extends StateNode {
+        private final CombatSessionState session;
+
+        CombatRetreatLeaf(CombatSessionState session) {
+            super("COMBAT_RETREAT", null, null, 0.0, true);
+            this.session = session;
+        }
+
+        @Override
+        public boolean canEnter(BrainContext ctx) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead() || npc.getPosture().isBlockingLocomotion()
+                    || npc.isPerformingHostileSwing()) {
+                return false;
+            }
+            int npcZ = EmberTargetProjector.levelOf(npc.getZ());
+            boolean hasPersonalHorde = EmberSquadDirector.getInstance().findPersonalHordeThreat(
+                    npc.getNpcId(),
+                    npc.getX(),
+                    npc.getY(),
+                    npcZ,
+                    HordeRetreatPolicy.TRIGGER_RADIUS_TILES,
+                    session.retreatCentroidScratch);
+            return session.retreatPolicy.wouldTrigger(
+                    npc.getX(),
+                    npc.getY(),
+                    hasPersonalHorde,
+                    session.retreatCentroidScratch[0],
+                    session.retreatCentroidScratch[1],
+                    ctx.simTime);
+        }
+
+        @Override
+        public boolean canContinue(BrainContext ctx) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) {
+                return false;
+            }
+            return session.retreatPolicy.isActive();
+        }
+
+        @Override
+        public void onEnter(BrainContext ctx, StateScope scope) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null) return;
+            session.activeSubState = "RETREAT";
+            ctx.combatActivityState = "RETREATING";
+            npc.setIsAiming(false);
+            npc.clearVirtualAim();
+            int npcZ = EmberTargetProjector.levelOf(npc.getZ());
+            EmberSquadDirector dir = EmberSquadDirector.getInstance();
+            boolean hasPersonalHorde = dir.findPersonalHordeThreat(
+                    npc.getNpcId(),
+                    npc.getX(),
+                    npc.getY(),
+                    npcZ,
+                    HordeRetreatPolicy.TRIGGER_RADIUS_TILES,
+                    session.retreatCentroidScratch);
+            session.retreatPolicy.update(
+                    npc.getX(),
+                    npc.getY(),
+                    npcZ,
+                    hasPersonalHorde,
+                    session.retreatCentroidScratch[0],
+                    session.retreatCentroidScratch[1],
+                    ctx.simTime,
+                    B42CombatRuntime.WORLD_PROBE,
+                    dir);
+            CombatDiagLog.logEvent(
+                    npc.getNpcId(),
+                    "RETREAT_ENTER",
+                    String.format(java.util.Locale.ROOT,
+                            "centroid=(%.2f,%.2f) goal=(%.2f,%.2f)",
+                            session.retreatCentroidScratch[0],
+                            session.retreatCentroidScratch[1],
+                            session.retreatPolicy.getTargetX(),
+                            session.retreatPolicy.getTargetY()));
+            scope.defer(() -> {
+                if (ctx.npc != null) {
+                    ctx.npc.getLocomotion().clearCombatMove(ctx.npc);
+                }
+            });
+        }
+
+        @Override
+        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) return;
+            if (npc.getPosture().isBlockingLocomotion()) {
+                ctx.requestStandUp(true);
+                return;
+            }
+            int npcZ = EmberTargetProjector.levelOf(npc.getZ());
+            EmberSquadDirector dir = EmberSquadDirector.getInstance();
+            boolean hasPersonalHorde = dir.findPersonalHordeThreat(
+                    npc.getNpcId(),
+                    npc.getX(),
+                    npc.getY(),
+                    npcZ,
+                    HordeRetreatPolicy.TRIGGER_RADIUS_TILES,
+                    session.retreatCentroidScratch);
+            boolean active = session.retreatPolicy.update(
+                    npc.getX(),
+                    npc.getY(),
+                    npcZ,
+                    hasPersonalHorde,
+                    session.retreatCentroidScratch[0],
+                    session.retreatCentroidScratch[1],
+                    ctx.simTime,
+                    B42CombatRuntime.WORLD_PROBE,
+                    dir);
+            if (!active) {
+                npc.getLocomotion().clearCombatMove(npc);
+                return;
+            }
             ctx.combatActivityState = "RETREATING";
             npc.setIsAiming(false);
             npc.clearVirtualAim();
@@ -548,357 +454,874 @@ public final class SquadCombatNodes {
             float dy = session.retreatPolicy.getTargetY() - npc.getY();
             float len = (float) Math.hypot(dx, dy);
             if (len > 0.1F) {
-                npc.getLocomotion().setCombatMove(npc, dx / len, dy / len, true, false, 1.0F);
+                npc.getLocomotion().setCombatAimStrafe(
+                        npc, dx / len, dy / len, true, false, false, 0.0F, 0.0F, true, -1.0F);
+            } else {
+                npc.getLocomotion().clearCombatMove(npc);
             }
-            return;
+        }
+    }
+
+    /** ③ 战斗子叶 2：背包掏取 -> 换装 / 装弹（严格经 {@link SelfInventoryTransferAction} 与统一 {@link BaseAction} 执行）。 */
+    private static final class CombatEquipOrReloadLeaf extends StateNode {
+        private final CombatSessionState session;
+        private BaseAction ownedAction;
+        private HandWeapon pendingEquipWeapon;
+        private HandWeapon pendingReloadGun;
+        private ReloadKind pendingReloadKind = ReloadKind.NONE;
+        private boolean equipMode;
+
+        CombatEquipOrReloadLeaf(CombatSessionState session) {
+            super("COMBAT_EQUIP_OR_RELOAD", null, null, 0.0, true);
+            this.session = session;
         }
 
-        // 3. 枪械装弹 / 排障与掩护换弹令牌池协同
-        if (mode == WeaponMode.FIREARM && weapon != null) {
-            ReloadKind reloadKind = NpcWeaponSelector.resolveNeededReload(npc, weapon);
-            boolean dryOrJammed = !NpcWeaponSelector.canShootNow(npc, weapon);
-            if (reloadKind != ReloadKind.NONE && dryOrJammed) {
-                ctx.combatActivityState = "RELOADING";
-                director.getReloadPool().acquire(npc.getNpcId(), nowMs);
-                npc.setIsAiming(false);
-                npc.clearVirtualAim();
-                NpcReloadAction.startIfIdle(npc, weapon, reloadKind);
-                stepRetreatSpacingDuringAction(npc, npcZ, session.wallScratch);
+        @Override
+        public boolean canEnter(BrainContext ctx) {
+            return needsEquipOrReloadNow(ctx, false);
+        }
+
+        @Override
+        public boolean canContinue(BrainContext ctx) {
+            return needsEquipOrReloadNow(ctx, true);
+        }
+
+        private boolean needsEquipOrReloadNow(BrainContext ctx, boolean alreadyInNode) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) {
+                return false;
+            }
+            if (!npc.getCharacterActions().isEmpty()) {
+                return true;
+            }
+            if (alreadyInNode && ownedAction != null && ownedAction.isRunning()) {
+                return true;
+            }
+            boolean preferFirearm = SquadTacticalConfig.isEffectiveCqb(ctx.npcId)
+                    || NpcWeaponSelector.isUsableFirearm(NpcWeaponSelector.getEquippedWeapon(npc));
+            DesiredWeaponPlan plan = NpcWeaponSelector.planDesiredCombatWeapon(npc, preferFirearm, true);
+            if (plan.needsEquip()) {
+                return true;
+            }
+            if (plan.mode() == WeaponMode.FIREARM && plan.weapon() != null) {
+                HandWeapon gun = plan.weapon();
+                ReloadKind rk = NpcWeaponSelector.resolveNeededReload(npc, gun);
+                if (rk == ReloadKind.NONE) {
+                    return false;
+                }
+                if (!NpcWeaponSelector.canShootNow(npc, gun)) {
+                    return true;
+                }
+                if (gun.getCurrentAmmoCount() <= Math.max(1, gun.getMaxAmmo() / 4)
+                        && findClosestThreatDist(npc, 3.2F) == null) {
+                    EmberSquadDirector dir = EmberSquadDirector.getInstance();
+                    long nowMs = Math.round(ctx.simTime * 1000.0);
+                    return alreadyInNode
+                            ? (dir.getReloadPool().hasToken(npc.getNpcId(), nowMs)
+                                    || dir.getReloadPool().acquire(npc.getNpcId(), nowMs))
+                            : (dir.getReloadPool().hasToken(npc.getNpcId(), nowMs)
+                                    || dir.getReloadPool().acquire(npc.getNpcId(), nowMs));
+                }
+            }
+            return false;
+        }
+
+        @Override
+        public void onEnter(BrainContext ctx, StateScope scope) {
+            ownedAction = null;
+            pendingEquipWeapon = null;
+            pendingReloadGun = null;
+            pendingReloadKind = ReloadKind.NONE;
+            equipMode = false;
+            session.activeSubState = "EQUIP_OR_RELOAD";
+
+            scope.defer(() -> {
+                if (ownedAction != null && ownedAction.isRunning()) {
+                    ownedAction.interrupt(ctx, "EQUIP_RELOAD_EXIT");
+                }
+                ownedAction = null;
+                pendingEquipWeapon = null;
+                pendingReloadGun = null;
+                pendingReloadKind = ReloadKind.NONE;
+                if (ctx.npc != null) {
+                    EmberSquadDirector.getInstance().getReloadPool().release(ctx.npc.getNpcId());
+                    ctx.npc.getLocomotion().clearCombatMove(ctx.npc);
+                }
+            });
+        }
+
+        @Override
+        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) return;
+
+            if (npc.getPosture().isBlockingLocomotion()) {
+                ctx.requestStandUp(true);
                 return;
             }
-            // 未空仓但弹匣见底：向掩护令牌池申请换弹权，未拿到则继续架枪掩护队友
-            if (reloadKind != ReloadKind.NONE && weapon.getCurrentAmmoCount() <= Math.max(1, weapon.getMaxAmmo() / 4)) {
-                EmberSquadDirector.ThreatEntry veryClose = findClosestThreatDist(npc, 3.2F);
-                if (veryClose == null && director.getReloadPool().acquire(npc.getNpcId(), nowMs)) {
-                    ctx.combatActivityState = "RELOADING";
-                    npc.setIsAiming(false);
-                    npc.clearVirtualAim();
-                    NpcReloadAction.startIfIdle(npc, weapon, reloadKind);
-                    stepRetreatSpacingDuringAction(npc, npcZ, session.wallScratch);
+
+            if (ownedAction != null && ownedAction.isRunning()) {
+                applySafeWalkBackDuringAction(npc, ownedAction.stopOnWalk, dtSim, ctx.simTime);
+                ctx.combatActivityState = equipMode ? "EQUIPPING" : "RELOADING";
+                return;
+            }
+            if (!npc.getCharacterActions().isEmpty()) {
+                zombie.characters.CharacterTimedActions.BaseAction vanillaAct = npc.getCharacterActions().get(0);
+                applySafeWalkBackDuringAction(npc, vanillaAct.stopOnWalk, dtSim, ctx.simTime);
+                ctx.combatActivityState = "RELOADING";
+                return;
+            }
+
+            // 前置背包掏取完毕 -> 立即续接真正拔枪或装弹动作
+            if (ownedAction != null && ownedAction.getStatus() == BaseAction.ActionStatus.COMPLETED) {
+                ownedAction = null;
+                if (pendingEquipWeapon != null && npc.getInventory() != null
+                        && npc.getInventory().contains(pendingEquipWeapon)) {
+                    HandWeapon w = pendingEquipWeapon;
+                    pendingEquipWeapon = null;
+                    startAction(ctx, new NpcEquipWeaponAction(npc, w), true);
                     return;
                 }
+                if (pendingReloadGun != null && pendingReloadKind != ReloadKind.NONE) {
+                    HandWeapon g = pendingReloadGun;
+                    ReloadKind rk = pendingReloadKind;
+                    pendingReloadGun = null;
+                    pendingReloadKind = ReloadKind.NONE;
+                    long nowMs = Math.round(ctx.simTime * 1000.0);
+                    EmberSquadDirector.getInstance().getReloadPool().acquire(npc.getNpcId(), nowMs);
+                    startAction(ctx, new NpcReloadAction(npc, g, rk), false);
+                    return;
+                }
+            } else {
+                ownedAction = null;
+                pendingEquipWeapon = null;
+                pendingReloadGun = null;
+                pendingReloadKind = ReloadKind.NONE;
             }
-        }
-        director.getReloadPool().release(npc.getNpcId());
 
-        // 4. 远程射击流
-        if (mode == WeaponMode.FIREARM && weapon != null && NpcWeaponSelector.canShootNow(npc, weapon)) {
-            EmberSquadDirector.ThreatEntry rangedTarget = pickBestRangedLosTarget(
-                    npc, npcZ, weapon, director);
-            if (rangedTarget != null) {
-                ctx.combatActivityState = "COMBAT";
-                runRangedCombatStep(npc, npcZ, weapon, rangedTarget, leader, liveAllies, session, director, nowMs, dtSim);
+            boolean preferFirearm = SquadTacticalConfig.isEffectiveCqb(ctx.npcId)
+                    || NpcWeaponSelector.isUsableFirearm(NpcWeaponSelector.getEquippedWeapon(npc));
+            DesiredWeaponPlan plan = NpcWeaponSelector.planDesiredCombatWeapon(npc, preferFirearm, true);
+            if (plan.needsEquip() && plan.weapon() != null) {
+                if (plan.needsUnpackFromBag() && plan.location() != null && npc.getInventory() != null) {
+                    pendingEquipWeapon = plan.weapon();
+                    SelfInventoryTransferAction unpack = new SelfInventoryTransferAction(npc, List.of(
+                            new SelfInventoryTransferAction.TransferEntry(
+                                    plan.location().item(), plan.location().container(), npc.getInventory())));
+                    startAction(ctx, unpack, true);
+                } else {
+                    startAction(ctx, new NpcEquipWeaponAction(npc, plan.weapon()), true);
+                }
                 return;
             }
-            // 手持满弹枪但暂时无射线目标：若已开 CQB 且处于室内，进入 3m 门窗 4 相位切角警戒
-            if (allowSquadSweepWhenIdle && cqbEnabled) {
-                ctx.combatActivityState = "CQB_SWEEP";
-                if (nowMs - session.lastCqbScanMs >= 750L) {
-                    session.lastCqbScanMs = nowMs;
-                    B42CombatRuntime.scanDoorWindowSectors(
-                            session.cqb, npc.getX(), npc.getY(), npcZ, npc.getDirectionAngleRadians());
+
+            if (plan.mode() == WeaponMode.FIREARM && plan.weapon() != null) {
+                HandWeapon gun = plan.weapon();
+                ReloadKind rk = NpcWeaponSelector.resolveNeededReload(npc, gun);
+                if (rk != ReloadKind.NONE) {
+                    long nowMs = Math.round(ctx.simTime * 1000.0);
+                    if (NpcWeaponSelector.canShootNow(npc, gun)
+                            && !EmberSquadDirector.getInstance().getReloadPool().acquire(npc.getNpcId(), nowMs)) {
+                        return;
+                    }
+                    EmberSquadDirector.getInstance().getReloadPool().acquire(npc.getNpcId(), nowMs);
+                    List<SelfInventoryTransferAction.TransferEntry> prep =
+                            NpcWeaponSelector.findReloadPrepTransfers(npc, gun, rk);
+                    if (!prep.isEmpty()) {
+                        pendingReloadGun = gun;
+                        pendingReloadKind = rk;
+                        startAction(ctx, new SelfInventoryTransferAction(npc, prep), false);
+                    } else {
+                        startAction(ctx, new NpcReloadAction(npc, gun, rk), false);
+                    }
                 }
-                session.cqb.stepSectorSweep(
-                        npc.getVirtualAim(),
-                        npc.getDirectionAngleRadians(),
+            }
+        }
+
+        private void startAction(BrainContext ctx, BaseAction action, boolean equipping) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || action == null) return;
+            npc.setIsAiming(false);
+            npc.clearVirtualAim();
+            npc.getLocomotion().clearCombatMove(npc);
+            this.equipMode = equipping;
+            this.ownedAction = action;
+            ctx.combatActivityState = equipping ? "EQUIPPING" : "RELOADING";
+            action.start(ctx);
+        }
+
+        private void applySafeWalkBackDuringAction(
+                IsoNPC npc, boolean actionStopsOnWalk, double dtSim, double nowSim) {
+            npc.setIsAiming(false);
+            npc.clearVirtualAim();
+            if (actionStopsOnWalk) {
+                npc.getLocomotion().clearCombatMove(npc);
+                return;
+            }
+            EmberSquadDirector.ThreatEntry nearest = findClosestThreatDist(npc, 3.5F);
+            if (nearest == null) {
+                npc.getLocomotion().clearCombatMove(npc);
+                return;
+            }
+            int zLvl = EmberTargetProjector.levelOf(npc.getZ());
+            int allyCount = collectAllies(npc, zLvl, session.allyXs, session.allyYs, session.allyIds);
+            float dist = (float) Math.hypot(nearest.x - npc.getX(), nearest.y - npc.getY());
+            CombatLocomotionSolver.computeRangedRetreatStep(
+                    session.moveState,
+                    EmberSquadDirector.getInstance(),
+                    npc.getNpcId(),
+                    npc.getX(),
+                    npc.getY(),
+                    zLvl,
+                    nearest.x,
+                    nearest.y,
+                    dist,
+                    session.allyXs,
+                    session.allyYs,
+                    allyCount,
+                    false,
+                    0.0F,
+                    0.0F,
+                    0.0F,
+                    B42CombatRuntime.WORLD_PROBE,
+                    nowSim,
+                    (float) dtSim,
+                    session.moveCmd);
+            if (session.moveCmd.wantMove) {
+                npc.getLocomotion().setCombatAimStrafe(
+                        npc,
+                        session.moveCmd.dirX,
+                        session.moveCmd.dirY,
+                        true,
+                        false,
+                        false,
+                        0.0F,
+                        0.0F,
+                        false,
+                        0.72F);
+            } else {
+                npc.getLocomotion().clearCombatMove(npc);
+            }
+        }
+    }
+
+    /** ③ 战斗子叶 3：远程射击、2.55/3.45m 滞回走位、失视线侧切与 CQB 室内切角戒备。 */
+    private static final class CombatRangedLeaf extends StateNode {
+        private final CombatSessionState session;
+        private final boolean allowSquadCqbSweep;
+
+        CombatRangedLeaf(CombatSessionState session, boolean allowSquadCqbSweep) {
+            super("COMBAT_RANGED", null, null, 0.0, false);
+            this.session = session;
+            this.allowSquadCqbSweep = allowSquadCqbSweep;
+        }
+
+        @Override
+        public boolean canEnter(BrainContext ctx) {
+            return isRangedEligible(ctx);
+        }
+
+        @Override
+        public boolean canContinue(BrainContext ctx) {
+            return isRangedEligible(ctx);
+        }
+
+        private boolean isRangedEligible(BrainContext ctx) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) return false;
+            HandWeapon weapon = NpcWeaponSelector.getEquippedWeapon(npc);
+            if (!NpcWeaponSelector.isUsableFirearm(weapon) || !NpcWeaponSelector.canShootNow(npc, weapon)) {
+                return false;
+            }
+            EmberSquadDirector dir = EmberSquadDirector.getInstance();
+            long nowMs = Math.round(ctx.simTime * 1000.0);
+            int npcZ = EmberTargetProjector.levelOf(npc.getZ());
+            if (pickBestRangedTarget(npc, npcZ, weapon, dir, nowMs, session.currentRangedTargetId) != null) {
+                return true;
+            }
+            return allowSquadCqbSweep
+                    && SquadTacticalConfig.isEffectiveCqb(ctx.npcId)
+                    && !npc.isOutside();
+        }
+
+        @Override
+        public void onEnter(BrainContext ctx, StateScope scope) {
+            session.activeSubState = "RANGED";
+            session.moveState.rangedRetreatActive = false;
+            scope.defer(() -> {
+                session.currentRangedTargetId = -1;
+                session.moveState.rangedRetreatActive = false;
+                if (ctx.npc != null) {
+                    EmberSquadDirector.getInstance().unregisterCorridor(ctx.npc.getNpcId());
+                    EmberSquadDirector.getInstance().releaseRangedClaim(ctx.npc.getNpcId());
+                    ctx.npc.clearVirtualAim();
+                    NpcNullInputComponent in = ctx.npc.getNullInputComponent();
+                    if (in != null) {
+                        in.clearAutoFireHold();
+                    }
+                    ctx.npc.getLocomotion().clearCombatMove(ctx.npc);
+                }
+            });
+        }
+
+        @Override
+        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) return;
+            if (npc.getPosture().isBlockingLocomotion()) {
+                ctx.requestStandUp(true);
+                return;
+            }
+
+            HandWeapon gun = NpcWeaponSelector.getEquippedWeapon(npc);
+            if (!NpcWeaponSelector.isUsableFirearm(gun) || !NpcWeaponSelector.canShootNow(npc, gun)) {
+                return;
+            }
+
+            int npcZ = EmberTargetProjector.levelOf(npc.getZ());
+            EmberSquadDirector director = EmberSquadDirector.getInstance();
+            long nowMs = Math.round(ctx.simTime * 1000.0);
+            IsoPlayer leader = resolveLeader(ctx.followPlayerIndex);
+            List<IsoNPC> liveAllies = NpcManager.getLiveNpcsSnapshot();
+
+            EmberSquadDirector.ThreatEntry target =
+                    pickBestRangedTarget(npc, npcZ, gun, director, nowMs, session.currentRangedTargetId);
+
+            if (target == null) {
+                director.unregisterCorridor(npc.getNpcId());
+                director.releaseRangedClaim(npc.getNpcId());
+                session.currentRangedTargetId = -1;
+                if (allowSquadCqbSweep && SquadTacticalConfig.isEffectiveCqb(ctx.npcId) && !npc.isOutside()) {
+                    ctx.combatActivityState = "CQB_SWEEP";
+                    if (nowMs - session.lastCqbScanMs >= 750L) {
+                        session.lastCqbScanMs = nowMs;
+                        B42CombatRuntime.scanDoorWindowSectors(
+                                session.cqb, npc.getX(), npc.getY(), npcZ, npc.getDirectionAngleRadians());
+                        int squadCount = liveAllies != null ? Math.max(1, liveAllies.size()) : 1;
+                        session.cqb.applyMemberPhaseOffset(
+                                ctx.followSlot >= 0 ? ctx.followSlot : 0, squadCount);
+                    }
+                    session.cqb.stepSectorSweep(
+                            npc.getVirtualAim(),
+                            npc.getDirectionAngleRadians(),
+                            npc.getX(),
+                            npc.getY(),
+                            npc.getZ(),
+                            gun.getMaxRange(npc),
+                            dtSim);
+                    npc.getLocomotion().setCombatAimStrafe(
+                            npc,
+                            0.0F,
+                            0.0F,
+                            false,
+                            true,
+                            true,
+                            npc.getVirtualAim().getAimDirX(),
+                            npc.getVirtualAim().getAimDirY(),
+                            false,
+                            -1.0F);
+                }
+                return;
+            }
+
+            IsoZombie liveZ = B42CombatRuntime.getLiveZombie(target);
+            if (liveZ == null || !B42CombatRuntime.isShootableTarget(liveZ)) {
+                B42CombatRuntime.markThreatDead(target);
+                session.currentRangedTargetId = -1;
+                return;
+            }
+
+            ctx.combatActivityState = "COMBAT";
+            session.currentRangedTargetId = target.zombieId;
+            director.claimRangedTarget(npc.getNpcId(), target.zombieId, nowMs);
+
+            float maxRange = Math.max(4.0F, gun.getMaxRange(npc));
+            float dx = target.x - npc.getX();
+            float dy = target.y - npc.getY();
+            float dist = (float) Math.hypot(dx, dy);
+
+            npc.getVirtualAim().aimAtTarget(
+                    npc.getDirectionAngleRadians(),
+                    npc.getX(),
+                    npc.getY(),
+                    npc.getZ(),
+                    target.x,
+                    target.y,
+                    target.z,
+                    target.velX,
+                    target.velY,
+                    CombatTargetState.isProneOrCrawl(target.stateMask),
+                    maxRange,
+                    (float) Math.max(0.016, dtSim));
+            npc.setTargetVerticalAimAngle(npc.getVirtualAim().getPitchDegrees());
+
+            float aimDirX = npc.getVirtualAim().getAimDirX();
+            float aimDirY = npc.getVirtualAim().getAimDirY();
+            director.registerCorridor(
+                    npc.getNpcId(),
+                    npc.getX(),
+                    npc.getY(),
+                    npc.getX() + aimDirX * Math.min(maxRange, dist + 1.5F),
+                    npc.getY() + aimDirY * Math.min(maxRange, dist + 1.5F),
+                    npcZ,
+                    nowMs);
+
+            boolean holdActive = !ctx.guardDuty && SquadTacticalConfig.hasHoldAnchor();
+            float holdX = ctx.guardDuty ? ctx.guardAnchorX : SquadTacticalConfig.getHoldX();
+            float holdY = ctx.guardDuty ? ctx.guardAnchorY : SquadTacticalConfig.getHoldY();
+            float holdRadius = ctx.guardDuty ? GuardCombatNode.GUARD_HARD_LEASH : SQUAD_HOLD_COMBAT_RADIUS;
+
+            boolean hasLos = B42CombatRuntime.RANGED_LOS_PROBE.isLosClear(npc.getX(), npc.getY(), target.x, target.y, npcZ);
+            boolean coneBlocked = B42CombatRuntime.isLineBlockedByAllyInWorld(
+                    npc, aimDirX, aimDirY, dist, leader, liveAllies);
+            boolean narrowHold = B42CombatRuntime.shouldShooterHoldInNarrowCorridor(
+                    npc.getX(), npc.getY(), aimDirX, aimDirY, dist, liveAllies);
+
+            EmberSquadDirector.ThreatEntry closestThreat = findClosestThreatDist(npc, 3.6F);
+            float closestDist = closestThreat != null
+                    ? (float) Math.hypot(closestThreat.x - npc.getX(), closestThreat.y - npc.getY())
+                    : Float.MAX_VALUE;
+
+            boolean needRetreatHysteresis = session.moveState.rangedRetreatActive
+                    || closestDist < CombatLocomotionSolver.RANGED_RETREAT_ENTER_DIST;
+
+            boolean retreatBoxedIn = false;
+            if (closestThreat != null && needRetreatHysteresis) {
+                int allyCount = collectAllies(npc, npcZ, session.allyXs, session.allyYs, session.allyIds);
+                CombatLocomotionSolver.computeRangedRetreatStep(
+                        session.moveState,
+                        director,
+                        npc.getNpcId(),
                         npc.getX(),
                         npc.getY(),
-                        npc.getZ(),
-                        weapon.getMaxRange(npc),
-                        dtSim);
-                npc.setIsAiming(true);
-                npc.setAngleFromAim();
-                npc.getLocomotion().setCombatMove(npc, 0.0F, 0.0F, false, true, 0.0F);
+                        npcZ,
+                        closestThreat.x,
+                        closestThreat.y,
+                        closestDist,
+                        session.allyXs,
+                        session.allyYs,
+                        allyCount,
+                        holdActive,
+                        holdX,
+                        holdY,
+                        holdRadius,
+                        B42CombatRuntime.WORLD_PROBE,
+                        ctx.simTime,
+                        (float) dtSim,
+                        session.moveCmd);
+                npc.getLocomotion().setCombatAimStrafe(
+                        npc,
+                        session.moveCmd.dirX,
+                        session.moveCmd.dirY,
+                        session.moveCmd.wantMove,
+                        true,
+                        true,
+                        aimDirX,
+                        aimDirY,
+                        false,
+                        session.moveCmd.walkSpeedCap);
+                retreatBoxedIn = !session.moveCmd.wantMove && closestDist < 1.35F;
+            } else {
+                session.moveState.rangedRetreatActive = false;
+                RangedTacticsController.computeRangedReposition(
+                        npc.getX(),
+                        npc.getY(),
+                        npcZ,
+                        target.x,
+                        target.y,
+                        maxRange,
+                        CombatLocomotionSolver.RANGED_RETREAT_ENTER_DIST,
+                        hasLos,
+                        coneBlocked,
+                        holdActive,
+                        holdX,
+                        holdY,
+                        holdRadius,
+                        director,
+                        B42CombatRuntime.WORLD_PROBE,
+                        B42CombatRuntime.RANGED_LOS_PROBE,
+                        session.rangedCmd);
+                retreatBoxedIn = session.rangedCmd.retreatBlocked && closestDist < 1.35F;
+                if (session.rangedCmd.shouldMove && !session.rangedCmd.directVector) {
+                    npc.getLocomotion().clearCombatMove(npc);
+                    ctx.requestMoveTo(
+                            session.rangedCmd.goalX, session.rangedCmd.goalY, npcZ, session.rangedCmd.run);
+                } else {
+                    npc.getLocomotion().setCombatAimStrafe(
+                            npc,
+                            session.rangedCmd.dirX,
+                            session.rangedCmd.dirY,
+                            session.rangedCmd.shouldMove,
+                            true,
+                            true,
+                            aimDirX,
+                            aimDirY,
+                            false,
+                            -1.0F);
+                }
+            }
+
+            if (retreatBoxedIn
+                    && closestThreat != null
+                    && npc.getMeleeDelay() <= 0.5F
+                    && npc.CanAttack()
+                    && !npc.isCombatAttackBlocked(ctx.simTime)) {
+                MeleeAttackExecutor.commitDefensiveShove(npc, closestThreat, ctx.simTime);
                 return;
             }
-            director.unregisterCorridor(npc.getNpcId());
-        } else {
-            director.unregisterCorridor(npc.getNpcId());
+
+            if (!hasLos || coneBlocked || narrowHold) {
+                return;
+            }
+
+            BallisticsController bc = npc.getBallisticsController();
+            boolean ballisticsOk = bc == null
+                    || dist <= 1.8F
+                    || bc.isValidTarget(liveZ.getID())
+                    || bc.isValidCachedTarget(liveZ.getID());
+            if (!ballisticsOk) {
+                return;
+            }
+
+            boolean shotgun = gun.isRangeFalloff() || gun.getProjectileCount() > 1;
+            boolean ready = AiAimingReadiness.isAimReady(
+                    npc.getAimingDelay(),
+                    npc.getRecoilDelay(),
+                    npc.getVirtualAim().getErrorDegrees(),
+                    dist,
+                    maxRange,
+                    shotgun,
+                    npc.getBeenMovingFor());
+
+            if (ready && npc.CanAttack() && !npc.isCombatAttackBlocked(ctx.simTime)) {
+                NpcNullInputComponent in = npc.getNullInputComponent();
+                if (in != null) {
+                    if ("Auto".equals(gun.getFireMode())) {
+                        in.armAutoFireHold(ctx.simTime, 0.25);
+                    } else {
+                        in.clearAutoFireHold();
+                    }
+                }
+                npc.setDoShove(false);
+                B42CombatRuntime.assignAttackTargetSquare(npc, target);
+                npc.AttemptAttack(0.0F);
+            }
+        }
+    }
+
+    /** ③ 战斗子叶 4：近战单轨极坐标走位 + {@code SafeSideGuard} 倒地安全侧 + 原版命中框裁决。 */
+    private static final class CombatMeleeLeaf extends StateNode {
+        private final CombatSessionState session;
+
+        CombatMeleeLeaf(CombatSessionState session) {
+            super("COMBAT_MELEE", null, null, 0.0, false);
+            this.session = session;
         }
 
-        // 5. 近战围攻 / 硬直窗口压进 / 连续风筝拉扯
-        float desiredRange = resolvePreferredMeleeRange(weapon);
-        if (cqbEnabled
-                && CqbController.isMeleeAdvanceSuppressedByCqb(
-                        true, npc.getX(), npc.getY(), director, npc.getNpcId(), npcZ, B42CombatRuntime.WORLD_PROBE)
-                && findClosestThreatDist(npc, 2.1F) == null) {
+        @Override
+        public boolean canEnter(BrainContext ctx) {
+            return ctx.npc != null && !ctx.npc.isDead() && findClosestThreatDist(ctx.npc, 14.5F) != null;
+        }
+
+        @Override
+        public boolean canContinue(BrainContext ctx) {
+            return ctx.npc != null && !ctx.npc.isDead() && findClosestThreatDist(ctx.npc, 15.0F) != null;
+        }
+
+        @Override
+        public void onEnter(BrainContext ctx, StateScope scope) {
+            session.activeSubState = "MELEE";
+            scope.defer(() -> {
+                session.currentMeleeTargetId = -1;
+                session.targetCommitUntilSim = 0.0;
+                if (ctx.npc != null) {
+                    EmberSquadDirector director = EmberSquadDirector.getInstance();
+                    for (int i = 0; i < EmberSquadDirector.MAX_THREATS; i++) {
+                        EmberSquadDirector.ThreatEntry t = director.getThreatAt(i);
+                        if (t.active) {
+                            t.ringTable.release(ctx.npc.getNpcId());
+                        }
+                    }
+                    ctx.npc.getLocomotion().clearCombatMove(ctx.npc);
+                    ctx.npc.clearVirtualAim();
+                }
+            });
+        }
+
+        @Override
+        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
+            IsoNPC npc = ctx.npc;
+            if (npc == null || npc.isDead()) return;
+            if (npc.getPosture().isBlockingLocomotion()) {
+                ctx.requestStandUp(true);
+                return;
+            }
+
+            int npcZ = EmberTargetProjector.levelOf(npc.getZ());
+            EmberSquadDirector director = EmberSquadDirector.getInstance();
+            long nowMs = Math.round(ctx.simTime * 1000.0);
+            HandWeapon weapon = NpcWeaponSelector.getEquippedWeapon(npc);
+            MeleeWeaponMetrics metrics = B42CombatRuntime.extractWeaponMetrics(npc, weapon);
+
+            CombatLocomotionSolver.evaluateProneSafeSide(
+                    director, npc.getX(), npc.getY(), npcZ, session.safeGuard);
+
+            int allyCount = collectAllies(npc, npcZ, session.allyXs, session.allyYs, session.allyIds);
+            boolean holdActive = !ctx.guardDuty && SquadTacticalConfig.hasHoldAnchor();
+            float holdX = ctx.guardDuty ? ctx.guardAnchorX : SquadTacticalConfig.getHoldX();
+            float holdY = ctx.guardDuty ? ctx.guardAnchorY : SquadTacticalConfig.getHoldY();
+            float holdRadius = ctx.guardDuty ? GuardCombatNode.GUARD_HARD_LEASH : SQUAD_HOLD_COMBAT_RADIUS;
+
+            boolean targetCommitActive = ctx.simTime < session.targetCommitUntilSim;
+            EmberSquadDirector.ThreatEntry target = MeleeTargetSelector.select(
+                    director,
+                    npc.getNpcId(),
+                    npc.getX(),
+                    npc.getY(),
+                    npcZ,
+                    metrics.reliableRange(),
+                    metrics.groundHeadStandRadius(),
+                    14.5F,
+                    session.currentMeleeTargetId,
+                    nowMs,
+                    session.allyXs,
+                    session.allyYs,
+                    session.allyIds,
+                    allyCount,
+                    0,
+                    holdActive,
+                    holdX,
+                    holdY,
+                    holdRadius,
+                    session.safeGuard,
+                    B42CombatRuntime.WORLD_PROBE,
+                    B42CombatRuntime.MELEE_BARRIER_PROBE,
+                    targetCommitActive,
+                    session.selectedMelee);
+
+            if (target == null) {
+                npc.clearVirtualAim();
+                npc.getLocomotion().clearCombatMove(npc);
+                return;
+            }
+
+            IsoZombie liveZ = B42CombatRuntime.getLiveZombie(target);
+            if (liveZ == null) {
+                B42CombatRuntime.markThreatDead(target);
+                session.currentMeleeTargetId = -1;
+                return;
+            }
+            int liveMask = B42CombatRuntime.classifyTarget(liveZ);
+            if (liveMask == 0) {
+                B42CombatRuntime.markThreatDead(target);
+                session.currentMeleeTargetId = -1;
+                return;
+            }
+
+            if (target.zombieId != session.currentMeleeTargetId) {
+                session.currentMeleeTargetId = target.zombieId;
+                session.targetCommitUntilSim = ctx.simTime + TARGET_COMMIT_SIM;
+            }
             ctx.combatActivityState = "COMBAT";
-            EmberSquadDirector.CorridorAvoidanceResult avoid = session.moveCmd.corridor;
-            director.evaluateCorridorAvoidance(
-                    npc.getX(), npc.getY(), npcZ, npc.getNpcId(), 3.0F, B42CombatRuntime.WORLD_PROBE, avoid);
-            if (avoid.inCorridor && (avoid.pushX != 0.0F || avoid.pushY != 0.0F)) {
-                npc.getLocomotion().setCombatMove(npc, avoid.pushX, avoid.pushY, false, true, 0.78F);
-                return;
-            }
-        }
 
-        EmberSquadDirector.ThreatEntry meleeTarget = MeleeSlotAssigner.selectThreatAndSlot(
-                director,
-                npc.getNpcId(),
-                npc.getX(),
-                npc.getY(),
-                npcZ,
-                desiredRange,
-                14.0F,
-                session.currentMeleeTargetId,
-                nowMs,
-                B42CombatRuntime.WORLD_PROBE,
-                session.selectedMelee);
-        if (meleeTarget == null) {
-            ctx.combatActivityState = "";
-            npc.clearVirtualAim();
-            npc.setIsAiming(false);
-            npc.getLocomotion().clearCombatMove(npc);
-            return;
-        }
+            boolean groundAttackable = CombatTargetState.isGroundAttackable(liveMask);
+            boolean targetProne = CombatTargetState.isProneOrCrawl(liveMask);
+            boolean targetLunging = CombatTargetState.isLunging(liveMask);
+            float aimX = (groundAttackable && target.hasHeadPos) ? target.headX : liveZ.getX();
+            float aimY = (groundAttackable && target.hasHeadPos) ? target.headY : liveZ.getY();
 
-        ctx.combatActivityState = "COMBAT";
-        session.currentMeleeTargetId = meleeTarget.zombieId;
-        runMeleeCombatStep(npc, npcZ, weapon, desiredRange, meleeTarget, session, director, nowMs, dtSim);
-    }
+            npc.getVirtualAim().aimAtTarget(
+                    npc.getDirectionAngleRadians(),
+                    npc.getX(),
+                    npc.getY(),
+                    npc.getZ(),
+                    aimX,
+                    aimY,
+                    liveZ.getZ(),
+                    target.velX,
+                    target.velY,
+                    targetProne,
+                    Math.max(2.5F, metrics.maxRange() + 1.0F),
+                    (float) Math.max(0.016, dtSim));
 
-    private static void stepRetreatSpacingDuringAction(IsoNPC npc, int npcZ, float[] wallScratch) {
-        EmberSquadDirector.ThreatEntry nearest = findClosestThreatDist(npc, 4.2F);
-        if (nearest == null) {
-            npc.getLocomotion().setCombatMove(npc, 0.0F, 0.0F, false, false, 0.0F);
-            return;
-        }
-        float dx = npc.getX() - nearest.x;
-        float dy = npc.getY() - nearest.y;
-        float dist = (float) Math.hypot(dx, dy);
-        if (dist < 1.0E-4F) return;
-        SpacingController.applyWallAvoidTangentialSlide(
-                npc.getX(), npc.getY(), npcZ, dx / dist, dy / dist, B42CombatRuntime.WORLD_PROBE, wallScratch);
-        // 步行远离，runGear=false（尊重 stopOnRun=true）
-        npc.getLocomotion().setCombatMove(npc, wallScratch[0], wallScratch[1], false, false, 0.72F);
-    }
+            float aimDirX = npc.getVirtualAim().getAimDirX();
+            float aimDirY = npc.getVirtualAim().getAimDirY();
+            boolean performingSwing = npc.isPerformingHostileSwing();
+            boolean attackOnCooldown = npc.getMeleeDelay() > 0.5F || npc.isAttackStarted();
+            int nearbyEnemies = countNearbyStandingEnemies(director, npc.getX(), npc.getY(), npcZ, 3.2F);
+            int frontStandingCount = countFrontStandingEnemies(
+                    director, npc.getX(), npc.getY(), npcZ, aimDirX, aimDirY,
+                    MeleeWeaponMetrics.ARMED_MULTI_SHOVE_MAX_DIST + 0.35F);
 
-    private static void runRangedCombatStep(
-            IsoNPC npc,
-            int npcZ,
-            HandWeapon gun,
-            EmberSquadDirector.ThreatEntry target,
-            IsoPlayer leader,
-            List<IsoNPC> liveAllies,
-            CombatSessionState session,
-            EmberSquadDirector director,
-            long nowMs,
-            double dtSim) {
-        float maxRange = Math.max(4.0F, gun.getMaxRange(npc));
-        float dx = target.x - npc.getX();
-        float dy = target.y - npc.getY();
-        float dist = (float) Math.hypot(dx, dy);
+            float idealMin = metrics.idealRingMin(targetLunging);
+            float idealMax = metrics.idealRingMax(targetLunging);
+            float coolMin = metrics.cooldownRingMin(nearbyEnemies);
+            float coolMax = metrics.cooldownRingMax(nearbyEnemies);
+            float boneDist = B42CombatRuntime.getNearestBoneDistance(npc, liveZ);
 
-        aimAtThreat(npc, target, maxRange, dtSim);
-        npc.setIsAiming(true);
-        npc.setAngleFromAim();
+            float toSelfX = npc.getX() - aimX;
+            float toSelfY = npc.getY() - aimY;
+            float toSelfLen = (float) Math.hypot(toSelfX, toSelfY);
+            float closingSpeed = toSelfLen > 0.01F
+                    ? Math.max(0.0F, (target.velX * (toSelfX / toSelfLen) + target.velY * (toSelfY / toSelfLen)))
+                    : 0.0F;
+            boolean attackingMe = liveZ.getTarget() == npc || target.attackedAllyPriority == 1;
+            float stanceDist = CombatLocomotionSolver.computeDynamicStanceDist(
+                    metrics.reliableRange(),
+                    nearbyEnemies,
+                    attackingMe,
+                    CombatTargetState.isStaggered(liveMask) || CombatTargetState.isPostureTransition(liveMask),
+                    groundAttackable,
+                    CombatTargetState.isSprinter(liveMask),
+                    closingSpeed,
+                    false);
 
-        float ax = npc.getX();
-        float ay = npc.getY();
-        float bx = ax + npc.getVirtualAim().getAimDirX() * Math.min(maxRange, dist + 1.5F);
-        float by = ay + npc.getVirtualAim().getAimDirY() * Math.min(maxRange, dist + 1.5F);
-        director.registerCorridor(npc.getNpcId(), ax, ay, bx, by, npcZ, nowMs);
+            float moveNeedDist = Math.max(0.0F, boneDist - idealMax);
+            float closeMoveMs = (moveNeedDist / 2.2F) * 1000.0F;
+            float secondaryEtaMs = director.estimateNearestSecondaryArrivalMs(
+                    npc.getX(), npc.getY(), npcZ, target.zombieId);
+            float engineStaggerMs = B42CombatRuntime.readZombieStaggerRemainingMs(liveZ);
+            StaggerPressure.Decision staggerDecision = StaggerPressure.evaluateWithEngineTimer(
+                    engineStaggerMs, target.staggerStartMs, nowMs, closeMoveMs, secondaryEtaMs, liveMask);
+            boolean staggerPress = (staggerDecision == StaggerPressure.Decision.COMMIT_PRESS)
+                    && CombatTargetState.isStaggered(liveMask);
 
-        // 若近身有敌贴近或爬行者，先拉开安全步枪/手枪距离
-        EmberSquadDirector.ThreatEntry tooClose = findClosestThreatDist(npc, 2.75F);
-        if (tooClose != null) {
-            float awayX = npc.getX() - tooClose.x;
-            float awayY = npc.getY() - tooClose.y;
-            float al = (float) Math.hypot(awayX, awayY);
-            if (al > 1.0E-4F) {
-                SpacingController.applyWallAvoidTangentialSlide(
-                        npc.getX(), npc.getY(), npcZ, awayX / al, awayY / al, B42CombatRuntime.WORLD_PROBE, session.wallScratch);
-                npc.getLocomotion().setCombatMove(npc, session.wallScratch[0], session.wallScratch[1], false, true, 0.72F);
-            }
-        } else {
-            npc.getLocomotion().setCombatMove(npc, 0.0F, 0.0F, false, true, 0.0F);
-        }
+            CombatLocomotionSolver.computeMeleeStep(
+                    session.moveState,
+                    director,
+                    npc.getNpcId(),
+                    npc.getX(),
+                    npc.getY(),
+                    npcZ,
+                    target.zombieId,
+                    aimX,
+                    aimY,
+                    liveMask,
+                    session.selectedMelee.standX,
+                    session.selectedMelee.standY,
+                    idealMin,
+                    idealMax,
+                    coolMin,
+                    coolMax,
+                    attackOnCooldown && !staggerPress,
+                    performingSwing,
+                    stanceDist,
+                    session.allyXs,
+                    session.allyYs,
+                    allyCount,
+                    holdActive,
+                    holdX,
+                    holdY,
+                    holdRadius,
+                    session.safeGuard,
+                    B42CombatRuntime.WORLD_PROBE,
+                    ctx.simTime,
+                    (float) dtSim,
+                    session.moveCmd);
 
-        boolean shotgun = gun.isRangeFalloff() || gun.getProjectileCount() > 1;
-        boolean ready = AiAimingReadiness.isAimReady(
-                npc.getAimingDelay(),
-                npc.getRecoilDelay(),
-                npc.getVirtualAim().getErrorDegrees(),
-                dist,
-                maxRange,
-                shotgun);
-        boolean coneBlocked = B42CombatRuntime.isLineBlockedByAllyInWorld(
-                npc,
-                npc.getVirtualAim().getAimDirX(),
-                npc.getVirtualAim().getAimDirY(),
-                dist,
-                leader,
-                liveAllies);
-        boolean narrowHold = B42CombatRuntime.shouldShooterHoldInNarrowCorridor(
-                npc.getX(),
-                npc.getY(),
-                npc.getVirtualAim().getAimDirX(),
-                npc.getVirtualAim().getAimDirY(),
-                dist,
-                liveAllies);
-
-        if (ready && !coneBlocked && !narrowHold && npc.CanAttack()) {
-            NpcNullInputComponent in = npc.getNullInputComponent();
-            if (in != null) in.clearCombatIntents();
-            npc.setDoShove(false);
-            assignAttackTargetSquare(npc, target);
-            npc.AttemptAttack(0.0F);
-        }
-    }
-
-    private static void assignAttackTargetSquare(IsoNPC npc, EmberSquadDirector.ThreatEntry target) {
-        IsoZombie liveZ = B42CombatRuntime.getLiveZombie(target);
-        if (liveZ != null && liveZ.getCurrentSquare() != null) {
-            npc.setAttackTargetSquare(liveZ.getCurrentSquare());
-        }
-    }
-
-    private static void runMeleeCombatStep(
-            IsoNPC npc,
-            int npcZ,
-            HandWeapon weapon,
-            float desiredRange,
-            EmberSquadDirector.ThreatEntry target,
-            CombatSessionState session,
-            EmberSquadDirector director,
-            long nowMs,
-            double dtSim) {
-        float dx = target.x - npc.getX();
-        float dy = target.y - npc.getY();
-        float dist = (float) Math.hypot(dx, dy);
-
-        aimAtThreat(npc, target, Math.max(2.5F, desiredRange + 1.0F), dtSim);
-        npc.setIsAiming(true);
-        npc.setForwardDirection(session.tmpAim.set(npc.getVirtualAim().getAimDirX(), npc.getVirtualAim().getAimDirY()));
-        npc.setDirectionAngle(npc.getVirtualAim().getAimYawDeg());
-
-        boolean attackOnCooldown = npc.getMeleeDelay() > 0.5F || npc.isAttackStarted();
-        SpacingController.computeMeleeStep(
-                npc.getX(),
-                npc.getY(),
-                npcZ,
-                npc.getNpcId(),
-                session.selectedMelee.standX,
-                session.selectedMelee.standY,
-                target.x,
-                target.y,
-                target.velX,
-                target.velY,
-                target.stateMask,
-                desiredRange,
-                attackOnCooldown,
-                director,
-                B42CombatRuntime.WORLD_PROBE,
-                session.moveCmd);
-
-        if (session.moveCmd.shouldMove) {
-            float cap = session.moveCmd.runGear ? -1.0F : 0.85F;
-            npc.getLocomotion().setCombatMove(
+            npc.getLocomotion().setCombatAimStrafe(
                     npc,
                     session.moveCmd.dirX,
                     session.moveCmd.dirY,
-                    session.moveCmd.runGear,
+                    session.moveCmd.wantMove,
                     session.moveCmd.aimStrafe,
-                    cap);
-        } else {
-            npc.getLocomotion().setCombatMove(npc, 0.0F, 0.0F, false, true, 0.0F);
-        }
+                    true,
+                    aimDirX,
+                    aimDirY,
+                    session.moveCmd.runGear,
+                    session.moveCmd.walkSpeedCap);
 
-        // 外圈预备位成员如无贴脸风险先不跨槽空挥，等待主攻/侧翼位轮换
-        boolean hasMeleeSlot = session.selectedMelee.ringSlot >= 0 || dist < 1.35F;
-        if (!hasMeleeSlot || attackOnCooldown || !npc.CanAttack()) {
-            return;
-        }
+            CombatDiagLog.updateNpcStatus(
+                    npc.getNpcId(),
+                    "COMBAT_MELEE",
+                    ctx.combatActivityState,
+                    target.zombieId,
+                    liveMask,
+                    boneDist,
+                    idealMin,
+                    idealMax,
+                    npc.isAimAtFloor(),
+                    npc.isDoStomp(),
+                    session.moveCmd.radialMode.name(),
+                    nowMs);
 
-        float moveNeedDist = Math.max(0.0F, dist - desiredRange);
-        float closeMoveMs = (moveNeedDist / 2.2F) * 1000.0F;
-        float secondaryEtaMs = director.estimateNearestSecondaryArrivalMs(
-                npc.getX(), npc.getY(), npcZ, target.zombieId);
-        StaggerPressure.Decision decision = StaggerPressure.evaluate(
-                target.staggerStartMs, nowMs, closeMoveMs, secondaryEtaMs, target.stateMask);
-        if (decision != StaggerPressure.Decision.COMMIT_PRESS && dist > 1.25F) {
-            return;
-        }
-
-        float hitReach = Math.max(1.15F, (weapon != null ? weapon.getMaxRange(npc) : 1.05F) + 0.18F);
-        if (dist > hitReach) {
-            return;
-        }
-
-        assignAttackTargetSquare(npc, target);
-        NpcNullInputComponent in = npc.getNullInputComponent();
-        boolean allowStompOrShove = CombatTargetState.allowsStompOrShove(target.stateMask);
-
-        if (allowStompOrShove && CombatTargetState.isGroundAttackable(target.stateMask) && dist < 1.15F) {
-            if (in != null) {
-                in.setCombatStompIntent(true);
-                in.setCombatMeleeButtonIntent(weapon == null);
+            int closeStandingCount = countNearbyStandingEnemies(director, npc.getX(), npc.getY(), npcZ, 1.60F);
+            boolean immediateBiteThreat = !groundAttackable
+                    && CombatTargetState.allowsStompOrShove(liveMask)
+                    && boneDist <= 1.05F
+                    && (liveZ.getTarget() == npc || targetLunging);
+            if (!performingSwing && !attackOnCooldown && !npc.isCombatAttackBlocked(ctx.simTime)
+                    && npc.CanAttack() && (ctx.simTime - session.lastShoveSim) >= 0.50
+                    && !groundAttackable && CombatTargetState.allowsStompOrShove(liveMask)
+                    && (immediateBiteThreat || (closeStandingCount >= 2 && boneDist <= 1.55F))) {
+                session.lastShoveSim = ctx.simTime;
+                MeleeAttackExecutor.commitDefensiveShove(npc, target, ctx.simTime);
+                return;
             }
-            npc.setAimAtFloor(true);
-            npc.setDoShove(weapon == null);
-            npc.AttemptAttack(0.0F);
-        } else if (allowStompOrShove && (weapon == null || dist < 0.72F)) {
-            if (in != null) in.clearCombatIntents();
-            npc.setAimAtFloor(false);
-            npc.setDoShove(true);
-            npc.AttemptAttack(0.0F);
-        } else {
-            // 常规挥击（包括倒起过渡期强行普通重击白嫖）
-            if (in != null) in.clearCombatIntents();
-            npc.setAimAtFloor(false);
-            npc.setDoShove(false);
-            npc.AttemptAttack(0.55F);
+
+            boolean hasMeleeSlot = session.selectedMelee.ringSlot >= 0 || boneDist < 1.35F;
+            if (!hasMeleeSlot || performingSwing || attackOnCooldown
+                    || !npc.CanAttack() || npc.isCombatAttackBlocked(ctx.simTime)) {
+                return;
+            }
+
+            float maxSwingDist = groundAttackable
+                    ? metrics.groundHeadSwingReach()
+                    : metrics.effectiveMaxRange(targetLunging);
+            if (boneDist > maxSwingDist) {
+                return;
+            }
+            if (!B42CombatRuntime.hasVanillaMeleeHitTarget(npc, weapon, liveZ, metrics.unarmed())) {
+                return;
+            }
+
+            MeleeAttackExecutor.commit(
+                    npc, weapon, metrics, target, liveZ, liveMask,
+                    boneDist, frontStandingCount, ctx.simTime, nowMs);
         }
     }
 
-    static EmberSquadDirector.ThreatEntry findClosestThreatDist(IsoNPC npc, float maxRadius) {
-        EmberSquadDirector director = EmberSquadDirector.getInstance();
-        int npcZ = EmberTargetProjector.levelOf(npc.getZ());
-        float nx = npc.getX();
-        float ny = npc.getY();
-        EmberSquadDirector.ThreatEntry best = null;
-        float bestDistSq = maxRadius * maxRadius;
-        for (int i = 0; i < EmberSquadDirector.MAX_THREATS; i++) {
-            EmberSquadDirector.ThreatEntry t = director.getThreatAt(i);
-            if (!t.active || Math.abs(t.z - npcZ) > 0.6F) continue;
-            float dx = t.x - nx;
-            float dy = t.y - ny;
-            float dSq = dx * dx + dy * dy;
-            if (dSq <= bestDistSq) {
-                bestDistSq = dSq;
-                best = t;
-            }
-        }
-        return best;
-    }
-
-    private static EmberSquadDirector.ThreatEntry pickBestRangedLosTarget(
-            IsoNPC npc, int npcZ, HandWeapon gun, EmberSquadDirector director) {
+    private static EmberSquadDirector.ThreatEntry pickBestRangedTarget(
+            IsoNPC npc,
+            int npcZ,
+            HandWeapon gun,
+            EmberSquadDirector director,
+            long nowMs,
+            int currentTargetId) {
         float maxRange = Math.max(4.0F, Math.min(20.0F, gun.getMaxRange(npc) + 1.5F));
         float bestScore = Float.MAX_VALUE;
         EmberSquadDirector.ThreatEntry best = null;
         for (int i = 0; i < EmberSquadDirector.MAX_THREATS; i++) {
             EmberSquadDirector.ThreatEntry t = director.getThreatAt(i);
-            if (!t.active || Math.abs(t.z - npcZ) > 0.6F) continue;
+            if (!t.active || !t.perceivedBySquad || Math.abs(t.z - npcZ) > 0.6F) continue;
+            if (director.isUnreachable(npc.getNpcId(), t.zombieId, true, nowMs)) continue;
+            IsoZombie liveZ = B42CombatRuntime.getLiveZombie(t);
+            if (liveZ == null || !B42CombatRuntime.isShootableTarget(liveZ)) continue;
+
             float dx = t.x - npc.getX();
             float dy = t.y - npc.getY();
             float d = (float) Math.hypot(dx, dy);
             if (d > maxRange) continue;
-            if (IsoWorld.instance != null && IsoWorld.instance.currentCell != null) {
-                LosUtil.TestResults los = LosUtil.lineClear(
-                        IsoWorld.instance.currentCell,
-                        (int) Math.floor(npc.getX()),
-                        (int) Math.floor(npc.getY()),
-                        npcZ,
-                        (int) Math.floor(t.x),
-                        (int) Math.floor(t.y),
-                        npcZ,
-                        false);
-                if (los == LosUtil.TestResults.Blocked || los == LosUtil.TestResults.ClearThroughClosedDoor) {
-                    continue;
-                }
+            if (!B42CombatRuntime.RANGED_LOS_PROBE.isLosClear(npc.getX(), npc.getY(), t.x, t.y, npcZ)) {
+                continue;
             }
-            float score = d - (CombatTargetState.isSprinter(t.stateMask) ? 2.5F : 0.0F);
+
+            float score = d;
+            if (t.attackedAllyPriority >= 2) {
+                score *= 0.60F;
+            } else if (t.attackedAllyPriority == 1 && nowMs < t.distressPriorityUntilMs) {
+                score *= 0.78F;
+            }
+            if (CombatTargetState.isSprinter(t.stateMask)) {
+                score -= 2.5F;
+            }
+            if (t.zombieId == currentTargetId) {
+                score -= 1.2F;
+            }
+            int otherClaims = director.countOtherRangedClaims(npc.getNpcId(), t.zombieId, nowMs);
+            if (otherClaims > 0 && d > 3.5F) {
+                score += otherClaims * 3.5F;
+            }
             if (score < bestScore) {
                 bestScore = score;
                 best = t;
@@ -907,27 +1330,67 @@ public final class SquadCombatNodes {
         return best;
     }
 
-    private static void aimAtThreat(
-            IsoNPC npc, EmberSquadDirector.ThreatEntry target, float maxRange, double dtSim) {
-        npc.getVirtualAim().aimAtTarget(
-                npc.getDirectionAngleRadians(),
-                npc.getX(),
-                npc.getY(),
-                npc.getZ(),
-                target.x,
-                target.y,
-                target.z,
-                target.velX,
-                target.velY,
-                maxRange,
-                (float) Math.max(0.016, dtSim));
+    private static int collectAllies(
+            IsoNPC self, int zLvl, float[] outXs, float[] outYs, String[] outIds) {
+        List<IsoNPC> live = NpcManager.getLiveNpcsSnapshot();
+        int count = 0;
+        if (live != null) {
+            for (int i = 0, n = live.size(); i < n && count < outXs.length; i++) {
+                IsoNPC other = live.get(i);
+                if (other == null || other == self || other.isDead()) continue;
+                if (EmberTargetProjector.levelOf(other.getZ()) != zLvl) continue;
+                outXs[count] = other.getX();
+                outYs[count] = other.getY();
+                if (outIds != null) {
+                    outIds[count] = other.getNpcId();
+                }
+                count++;
+            }
+        }
+        return count;
     }
 
-    private static float resolvePreferredMeleeRange(HandWeapon weapon) {
-        if (weapon == null || weapon.isRanged()) {
-            return 0.88F;
+    private static int countNearbyStandingEnemies(
+            EmberSquadDirector director, float x, float y, int zLvl, float radius) {
+        int c = 0;
+        float rSq = radius * radius;
+        for (int i = 0; i < EmberSquadDirector.MAX_THREATS; i++) {
+            EmberSquadDirector.ThreatEntry t = director.getThreatAt(i);
+            if (!t.active || !CombatTargetState.isStanding(t.stateMask) || Math.abs(t.z - zLvl) > 0.6F) {
+                continue;
+            }
+            float dx = t.x - x;
+            float dy = t.y - y;
+            if (dx * dx + dy * dy <= rSq) {
+                c++;
+            }
         }
-        return Math.max(0.80F, Math.min(1.45F, weapon.getMaxRange() * 0.80F));
+        return c;
+    }
+
+    private static int countFrontStandingEnemies(
+            EmberSquadDirector director,
+            float selfX,
+            float selfY,
+            int zLvl,
+            float fwdX,
+            float fwdY,
+            float maxDist) {
+        int c = 0;
+        for (int i = 0; i < EmberSquadDirector.MAX_THREATS; i++) {
+            EmberSquadDirector.ThreatEntry t = director.getThreatAt(i);
+            if (!t.active || !CombatTargetState.isStanding(t.stateMask) || Math.abs(t.z - zLvl) > 0.6F) {
+                continue;
+            }
+            float dx = t.x - selfX;
+            float dy = t.y - selfY;
+            float d = (float) Math.hypot(dx, dy);
+            if (d > maxDist || d < 1.0E-4F) continue;
+            if ((dx / d) * fwdX + (dy / d) * fwdY >= 0.35F) {
+                c++;
+            }
+        }
+        return c;
     }
 
     private static IsoPlayer resolveLeader(int idx) {

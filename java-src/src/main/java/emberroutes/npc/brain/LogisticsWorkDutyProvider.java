@@ -693,7 +693,6 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
 
     private static boolean tickOrStartSelfPackIfNeeded(BrainContext ctx, NpcWorkState st, double dtSim) {
         if (st.activeSelfPack != null) {
-            st.activeSelfPack.tick(ctx, dtSim);
             if (st.activeSelfPack.isRunning()) {
                 return true;
             }
@@ -703,7 +702,7 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
         if (ctx != null && ctx.npc != null) {
             List<SelfInventoryTransferAction.TransferEntry> plan = planPackIntoEquippedBags(ctx.npc);
             if (!plan.isEmpty()) {
-                st.activeSelfPack = new SelfInventoryTransferAction(plan);
+                st.activeSelfPack = new SelfInventoryTransferAction(ctx.npc, plan);
                 st.activeSelfPack.start(ctx);
                 return st.activeSelfPack.isRunning();
             }
@@ -1156,7 +1155,6 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                     st.stopIdx = 0;
                     return;
                 }
-                st.activeTransfer.tick(ctx, dtSim);
                 if (st.activeTransfer.isRunning()) {
                     return;
                 }
@@ -1575,7 +1573,6 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                     enterDeliveryDestinationPhase(ctx, st, plan);
                     return;
                 }
-                st.activeTransfer.tick(ctx, dtSim);
                 if (st.activeTransfer.isRunning()) {
                     return;
                 }
@@ -1680,7 +1677,6 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                     finishOrChainNext(ctx, st);
                     return;
                 }
-                st.activeTransfer.tick(ctx, dtSim);
                 if (st.activeTransfer.isRunning()) {
                     return;
                 }
@@ -1708,7 +1704,6 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
                     return;
                 }
                 if (st.activeTransfer != null) {
-                    st.activeTransfer.tick(ctx, dtSim);
                     if (st.activeTransfer.isRunning()) {
                         return;
                     }
@@ -1746,7 +1741,6 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
             }
             case RETURNING_LEFTOVER -> {
                 if (st.activeTransfer != null) {
-                    st.activeTransfer.tick(ctx, dtSim);
                     if (st.activeTransfer.isRunning()) {
                         return;
                     }
@@ -1775,7 +1769,6 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
         if (st.activeTransfer == null) {
             return List.of();
         }
-        st.activeTransfer.tick(ctx, dtSim);
         if (st.activeTransfer.isRunning()) {
             return null;
         }
@@ -1804,9 +1797,12 @@ public final class LogisticsWorkDutyProvider implements WorkDutyProvider {
             List<InventoryItem> items,
             Map<InventoryItem, ItemContainer> loadTargetsByItem,
             WorkPhase nextPhase) {
+        if (ctx != null && ctx.npc != null) {
+            ctx.npc.getLocomotion().stop(ctx.npc);
+        }
         double dur = BatchTourBuilder.computeDampedTransferDuration(items.size());
         st.activeTransfer = new BatchContainerTransferAction(
-                mode, containerId, playerIndex, items, loadTargetsByItem, dur);
+                ctx != null ? ctx.npc : null, mode, containerId, playerIndex, items, loadTargetsByItem, dur);
         st.activeTransfer.start(ctx);
         st.phase = nextPhase;
         st.moveIssued = false;

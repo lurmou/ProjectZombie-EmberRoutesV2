@@ -15,6 +15,7 @@ public final class HordeRetreatPolicy {
     public static final double MIN_DWELL_SIM_SEC = 1.35;
     public static final double COOLDOWN_SIM_SEC = 4.0;
 
+    private final float[] goalScratch = new float[2];
     private boolean active;
     private double enteredAtSimSec;
     private double cooldownUntilSimSec;
@@ -39,19 +40,26 @@ public final class HordeRetreatPolicy {
         cooldownUntilSimSec = 0.0;
         targetX = 0.0F;
         targetY = 0.0F;
+        goalScratch[0] = 0.0F;
+        goalScratch[1] = 0.0F;
+    }
+
+    /** 只读判断当前是否满足进入撤退条件（不修改状态机或冷却时间戳）。 */
+    public boolean wouldTrigger(
+            float selfX, float selfY, boolean hasCluster, float clusterX, float clusterY, double simTimeSec) {
+        if (active) {
+            return true;
+        }
+        if (!hasCluster || simTimeSec < cooldownUntilSimSec) {
+            return false;
+        }
+        float dx = selfX - clusterX;
+        float dy = selfY - clusterY;
+        return dx * dx + dy * dy < TRIGGER_RADIUS_TILES * TRIGGER_RADIUS_TILES;
     }
 
     /**
      * 每帧更新撤退状态机并返回当前是否应维持撤退动作。
-     *
-     * @param selfX NPC 当前 X
-     * @param selfY NPC 当前 Y
-     * @param selfZ NPC 当前楼层
-     * @param hasCluster 周边是否存在满足条件的活跃尸潮聚类
-     * @param clusterX 最近危险尸潮质心 X
-     * @param clusterY 最近危险尸潮质心 Y
-     * @param simTimeSec 当前仿真时钟（秒）
-     * @param probe 可通行性探针（为 null 时按开阔地外推）
      */
     public boolean update(
             float selfX,
@@ -62,6 +70,22 @@ public final class HordeRetreatPolicy {
             float clusterY,
             double simTimeSec,
             EmberSquadDirector.PassabilityProbe probe) {
+        return update(selfX, selfY, selfZ, hasCluster, clusterX, clusterY, simTimeSec, probe, null);
+    }
+
+    /**
+     * 每帧更新撤退状态机（接入导演威胁评价避免退进背后的其余散尸群）。
+     */
+    public boolean update(
+            float selfX,
+            float selfY,
+            int selfZ,
+            boolean hasCluster,
+            float clusterX,
+            float clusterY,
+            double simTimeSec,
+            EmberSquadDirector.PassabilityProbe probe,
+            EmberSquadDirector director) {
         if (active) {
             double elapsed = simTimeSec - enteredAtSimSec;
             float distToGoalSq = (targetX - selfX) * (targetX - selfX) + (targetY - selfY) * (targetY - selfY);
@@ -98,46 +122,12 @@ public final class HordeRetreatPolicy {
             dirY = 0.0F;
         }
 
-        float[] chosen = pickRetreatGoal(selfX, selfY, selfZ, dirX, dirY, probe);
-        this.targetX = chosen[0];
-        this.targetY = chosen[1];
+        CombatLocomotionSolver.pickSafeRetreatGoal(
+                selfX, selfY, selfZ, dirX, dirY, RETREAT_DISTANCE_TILES, director, probe, goalScratch);
+        this.targetX = goalScratch[0];
+        this.targetY = goalScratch[1];
         this.enteredAtSimSec = simTimeSec;
         this.active = true;
         return true;
-    }
-
-    private static float[] pickRetreatGoal(
-            float selfX,
-            float selfY,
-            int selfZ,
-            float awayX,
-            float awayY,
-            EmberSquadDirector.PassabilityProbe probe) {
-        if (probe == null) {
-            return new float[]{selfX + awayX * RETREAT_DISTANCE_TILES, selfY + awayY * RETREAT_DISTANCE_TILES};
-        }
-        double baseAng = Math.atan2(awayY, awayX);
-        double[] offsetsRad = {
-            0.0,
-            Math.PI * 0.25,
-            -Math.PI * 0.25,
-            Math.PI * 0.5,
-            -Math.PI * 0.5,
-            Math.PI * 0.75,
-            -Math.PI * 0.75
-        };
-        float[] scales = {RETREAT_DISTANCE_TILES, 2.0F, 1.2F};
-        for (int si = 0; si < scales.length; si++) {
-            float dist = scales[si];
-            for (int oi = 0; oi < offsetsRad.length; oi++) {
-                double ang = baseAng + offsetsRad[oi];
-                float gx = selfX + (float) Math.cos(ang) * dist;
-                float gy = selfY + (float) Math.sin(ang) * dist;
-                if (probe.isLineClear(selfX, selfY, gx, gy, selfZ)) {
-                    return new float[]{gx, gy};
-                }
-            }
-        }
-        return new float[]{selfX + awayX * 1.2F, selfY + awayY * 1.2F};
     }
 }

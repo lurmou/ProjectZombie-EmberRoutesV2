@@ -21,6 +21,20 @@ public final class AiAimingReadiness {
             float targetDistTiles,
             float maxWeaponRange,
             boolean shotgun) {
+        return isAimReady(
+                engineAimingDelay, engineRecoilDelay, virtualAimErrorDeg,
+                targetDistTiles, maxWeaponRange, shotgun, 0.0F);
+    }
+
+    /** 结合引擎 {@code beenMovingFor} 动态收紧中远距移动射击精度门控。 */
+    public static boolean isAimReady(
+            float engineAimingDelay,
+            float engineRecoilDelay,
+            float virtualAimErrorDeg,
+            float targetDistTiles,
+            float maxWeaponRange,
+            boolean shotgun,
+            float beenMovingFor) {
         if (engineRecoilDelay > 0.5F) {
             return false;
         }
@@ -31,12 +45,16 @@ public final class AiAimingReadiness {
         float allowedAimingDelay = (targetDistTiles <= 2.4F)
                 ? (shotgun ? 14.0F : 9.0F)
                 : (3.5F * (1.0F - normRange * 0.72F));
-        if (engineAimingDelay > allowedAimingDelay) {
-            return false;
-        }
         float maxAngleErrDeg = (targetDistTiles <= 2.6F)
                 ? (shotgun ? 14.0F : 10.0F)
                 : (shotgun ? 9.0F : Math.max(3.2F, 6.5F * (1.0F - normRange * 0.45F)));
+        if (beenMovingFor > 0.15F && targetDistTiles > 3.0F) {
+            allowedAimingDelay *= 0.75F;
+            maxAngleErrDeg *= 0.85F;
+        }
+        if (engineAimingDelay > allowedAimingDelay) {
+            return false;
+        }
         return virtualAimErrorDeg <= maxAngleErrDeg;
     }
 

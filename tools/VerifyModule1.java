@@ -1280,7 +1280,7 @@ public final class VerifyModule1 {
                     }
                 }
             }
-            check(patchCount == 43, "Expected exact 43 @Patch classes in root package 'emberroutes', got " + patchCount);
+            check(patchCount == 48, "Expected exact 48 @Patch classes in root package 'emberroutes', got " + patchCount);
             // 验证 EMB-30 C3/C7 运行时反射目标在 B42 JAR 中稳定存在
             Class<?> combatMgrCls = Class.forName("zombie.CombatManager", false, VerifyModule1.class.getClassLoader());
             combatMgrCls.getDeclaredMethod("checkPVP", zombie.iso.IsoMovingObject.class, zombie.iso.IsoMovingObject.class, boolean.class);

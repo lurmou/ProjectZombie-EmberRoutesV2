@@ -3,7 +3,11 @@ package emberroutes.npc.combat;
 import emberroutes.npc.IsoNPC;
 import zombie.characters.IsoGameCharacter;
 import zombie.characters.IsoPlayer;
+import zombie.characters.IsoZombie;
+import zombie.characters.action.ActionContext;
+import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoMovingObject;
+import zombie.iso.LosUtil;
 import zombie.vehicles.BaseVehicle;
 
 /**
@@ -15,6 +19,8 @@ public final class CombatHookContext {
     private static final ThreadLocal<IsoNPC> ACTIVE_BALLISTICS_NPC = new ThreadLocal<>();
     private static final ThreadLocal<Integer> NPC_COMBAT_DEPTH = ThreadLocal.withInitial(() -> 0);
     private static final ThreadLocal<Integer> NPC_UPDATE_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final ThreadLocal<IsoPlayer> SEPARATING_PLAYER = new ThreadLocal<>();
+    private static final ThreadLocal<IsoMovingObject> SEPARATE_OTHER = new ThreadLocal<>();
 
     private CombatHookContext() {}
 
@@ -22,6 +28,8 @@ public final class CombatHookContext {
         ACTIVE_BALLISTICS_NPC.remove();
         NPC_COMBAT_DEPTH.remove();
         NPC_UPDATE_DEPTH.remove();
+        SEPARATING_PLAYER.remove();
+        SEPARATE_OTHER.remove();
     }
 
     public static IsoNPC getActiveBallisticsNpc() {
@@ -165,5 +173,127 @@ public final class CombatHookContext {
             }
         }
         return null;
+    }
+
+    /**
+     * 为非玩家槽位 {@link IsoNPC} 提供与原版 {@code IsoZombie.isTargetVisible()} 等价的视线判定，
+     * 避免原版单人分支调用 {@code getCurrentSquare().isCouldSee(player.getIndex())} 误读 Player 0 视野导致离屏断咬。
+     */
+    public static boolean isZombieTargetNpcVisible(IsoZombie zombie, IsoNPC npc) {
+        if (zombie == null || npc == null || npc.isDead()) {
+            return false;
+        }
+        IsoGridSquare zSq = zombie.getCurrentSquare();
+        IsoGridSquare npcSq = npc.getCurrentSquare();
+        if (zSq == null || npcSq == null) {
+            return false;
+        }
+        if (zSq == npcSq) {
+            return true;
+        }
+        if (Math.abs(zSq.getZ() - npcSq.getZ()) > 2) {
+            return false;
+        }
+        try {
+            if (zombie.getCell() == null) {
+                return false;
+            }
+            LosUtil.TestResults los = LosUtil.lineClear(
+                    zombie.getCell(),
+                    zSq.getX(), zSq.getY(), zSq.getZ(),
+                    npcSq.getX(), npcSq.getY(), npcSq.getZ(),
+                    false);
+            return los != LosUtil.TestResults.Blocked && los != LosUtil.TestResults.ClearThroughClosedDoor;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 隔离非本地槽位 {@link IsoNPC} 在 {@code IsoPlayer.updateCursorVisibility()} 隐藏真玩家鼠标光标的调用。 */
+    public static boolean shouldSkipCursorVisibility(IsoPlayer self) {
+        return self instanceof IsoNPC;
+    }
+
+    public static IsoPlayer swapSeparatingPlayer(IsoPlayer next) {
+        IsoPlayer prev = SEPARATING_PLAYER.get();
+        if (next == null) {
+            SEPARATING_PLAYER.remove();
+        } else {
+            SEPARATING_PLAYER.set(next);
+        }
+        return prev;
+    }
+
+    public static IsoMovingObject swapSeparateCandidate(IsoMovingObject next) {
+        IsoMovingObject prev = SEPARATE_OTHER.get();
+        if (next == null) {
+            SEPARATE_OTHER.remove();
+        } else {
+            SEPARATE_OTHER.set(next);
+        }
+        return prev;
+    }
+
+    public static void restoreSeparateContext(IsoPlayer prevPlayer, IsoMovingObject prevOther) {
+        if (prevPlayer == null) {
+            SEPARATING_PLAYER.remove();
+        } else {
+            SEPARATING_PLAYER.set(prevPlayer);
+        }
+        if (prevOther == null) {
+            SEPARATE_OTHER.remove();
+        } else {
+            SEPARATE_OTHER.set(prevOther);
+        }
+    }
+
+    public static void recordSeparateCandidate(IsoMovingObject candidate) {
+        IsoPlayer separating = SEPARATING_PLAYER.get();
+        if (separating != null && candidate != null && candidate != separating) {
+            SEPARATE_OTHER.set(candidate);
+        }
+    }
+
+    public static boolean isAlreadyBumpedStateName(String stateName) {
+        return "bumped".equalsIgnoreCase(stateName) || "bumped-bump".equalsIgnoreCase(stateName);
+    }
+
+    public static boolean shouldSuppressSeparateBumpFlags(
+            boolean selfIsHumanPlayer,
+            boolean selfIsNpc,
+            boolean otherIsHumanPlayer,
+            boolean otherIsNpc,
+            String selfActionStateName) {
+        boolean friendlyNpcPair = selfIsHumanPlayer && otherIsHumanPlayer && (selfIsNpc || otherIsNpc);
+        boolean alreadyBumpedNpc = selfIsNpc && isAlreadyBumpedStateName(selfActionStateName);
+        return friendlyNpcPair || alreadyBumpedNpc;
+    }
+
+    /**
+     * 仅在 {@code IsoMovingObject.separate()} 作用域内抑制友方（玩家↔NPC、NPC↔NPC）绊倒及 NPC 连续重撞刷新，
+     * 保留 {@code isSolidForSeparate() == true} 与后续物理推开（{@code setNextX/Y}）及 {@code collideWith}。
+     */
+    public static boolean shouldSuppressSeparateBump(IsoPlayer self) {
+        if (self == null || SEPARATING_PLAYER.get() != self) {
+            return false;
+        }
+        IsoMovingObject other = SEPARATE_OTHER.get();
+        if (other == null || other == self) {
+            return false;
+        }
+        boolean selfIsHumanPlayer = !self.isAnimal() && !self.isZombie();
+        boolean selfIsNpc = self instanceof IsoNPC;
+        boolean otherIsHumanPlayer = (other instanceof IsoPlayer p) && !p.isAnimal() && !p.isZombie();
+        boolean otherIsNpc = other instanceof IsoNPC;
+        if (selfIsHumanPlayer && otherIsHumanPlayer && (selfIsNpc || otherIsNpc)) {
+            return true;
+        }
+        if (selfIsNpc) {
+            ActionContext ctx = self.getActionContext();
+            String stateName = (ctx != null) ? ctx.getCurrentStateName() : null;
+            return shouldSuppressSeparateBumpFlags(
+                    selfIsHumanPlayer, true, otherIsHumanPlayer, otherIsNpc, stateName);
+        }
+        return false;
     }
 }

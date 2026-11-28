@@ -73,4 +73,28 @@ public final class StaggerPressure {
         }
         return Decision.COMMIT_PRESS;
     }
+
+    /** 优先依据 B42 引擎实测 {@code stateEventDelayTimer} 剩余硬直毫秒做裁决（{@code <0} 时退回时间戳窗）。 */
+    public static Decision evaluateWithEngineTimer(
+            float remainingEngineStaggerMs,
+            long staggerStartMs,
+            long nowMs,
+            float closeMoveMs,
+            float nearestSecondaryEtaMs,
+            int targetMask) {
+        if (remainingEngineStaggerMs < 0.0F) {
+            return evaluate(staggerStartMs, nowMs, closeMoveMs, nearestSecondaryEtaMs, targetMask);
+        }
+        if (!CombatTargetState.isValid(targetMask)) {
+            return Decision.ABORT_THREAT;
+        }
+        float requiredMs = computeCommitBudgetMs(closeMoveMs) + SAFETY_MARGIN_MS;
+        if (Float.isFinite(nearestSecondaryEtaMs) && nearestSecondaryEtaMs <= requiredMs) {
+            return Decision.HOLD_KITE;
+        }
+        if (remainingEngineStaggerMs <= requiredMs && CombatTargetState.isStanding(targetMask)) {
+            return Decision.HOLD_KITE;
+        }
+        return Decision.COMMIT_PRESS;
+    }
 }
