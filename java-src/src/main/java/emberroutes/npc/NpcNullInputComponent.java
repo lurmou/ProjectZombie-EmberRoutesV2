@@ -2,26 +2,143 @@ package emberroutes.npc;
 
 import zombie.characters.CharacterInputMode;
 import zombie.characters.component.CharacterInputComponent;
+import zombie.core.skinnedmodel.animation.debug.AnimationPlayerRecorder;
 import zombie.iso.Vector2;
 
 /**
  * {@link IsoNPC} 专用零输入 ECS 组件（0 {@code @Patch} 隔离全部真玩家键鼠/手柄输入窜扰）：
- * <p>
- * B42 原版 {@code IsoPlayer.updateInternal2()} 中的 {@code enterExitVehicle()}、{@code updateWhileInVehicle()}、
- * {@code checkReloading()}、{@code updateSneakKey()} 与 {@code checkWalkTo()} 未检查 {@code isNpc()}。
- * 通过在 {@link IsoNPC#registerECSComponents()} 中以同类 {@code ECSComponent} 覆盖注册，
- * 彻底阻断真玩家按 {@code E} / 瞄准 / 开火 / 蹲伏 / 换弹时对在场与同车 NPC 的输入与光标劫持。
- * </p>
+ * <ul>
+ *   <li>彻底阻断真玩家按 {@code E} / 瞄准 / 开火 / 蹲伏 / 换弹时对在场与同车 NPC 的输入与光标劫持；</li>
+ *   <li>以带过期保护的 armed intent 向下一帧 {@code SwipeStatePlayer.enter()} 稳定透传
+ *       {@link #isMeleeButtonDown()} 与 {@link #isManualFloorAtkButtonDown()}（根治关闭 {@code AutoProneAtk} 时踩踏/打地失效）；</li>
+ *   <li>为全自动连发枪械提供短窗 {@link #armAutoFireHold(double, double)}，避免 {@code IsoPlayer.updateAttackLoopSound:7396} 次帧截断枪声；</li>
+ *   <li>仅在用户手动开启 {@code AnimationPlayerRecorder} 时向 {@code *_Vars_values.csv} 写出原生与运动状态字段。</li>
+ * </ul>
  */
 public final class NpcNullInputComponent extends CharacterInputComponent {
-    private boolean combatStompIntent;
+    private final IsoNPC ownerNpc;
 
-    public void setCombatStompIntent(boolean combatStompIntent) {
-        this.combatStompIntent = combatStompIntent;
+    private boolean combatMeleeButtonIntent;
+    private boolean combatManualFloorAtkIntent;
+    private double combatIntentExpireSim = -1.0;
+
+    private double autoFireHoldUntilSim = -1.0;
+    private double lastObservedSimTime = 0.0;
+
+    public NpcNullInputComponent() {
+        this(null);
     }
 
-    public boolean isCombatStompIntent() {
-        return combatStompIntent;
+    public NpcNullInputComponent(IsoNPC ownerNpc) {
+        this.ownerNpc = ownerNpc;
+    }
+
+    /**
+     * 武装一次近战/推击/手动打地意图，维持至下一帧 {@code SwipeStatePlayer.enter()} 消费完成或超时过期。
+     */
+    public void armCombatIntents(boolean meleeButton, boolean manualFloorAtk, double nowSim, double ttlSim) {
+        this.lastObservedSimTime = nowSim;
+        this.combatMeleeButtonIntent = meleeButton;
+        this.combatManualFloorAtkIntent = manualFloorAtk;
+        this.combatIntentExpireSim = nowSim + Math.max(0.05, ttlSim);
+    }
+
+    /** 兼容旧单测/调用点设置单帧意图。 */
+    public void setCombatMeleeButtonIntent(boolean combatMeleeButtonIntent) {
+        this.combatMeleeButtonIntent = combatMeleeButtonIntent;
+        if (combatMeleeButtonIntent && combatIntentExpireSim < 0.0) {
+            this.combatIntentExpireSim = Double.MAX_VALUE;
+        }
+    }
+
+    public boolean isCombatMeleeButtonIntent() {
+        return combatMeleeButtonIntent;
+    }
+
+    public void setCombatManualFloorAtkIntent(boolean combatManualFloorAtkIntent) {
+        this.combatManualFloorAtkIntent = combatManualFloorAtkIntent;
+        if (combatManualFloorAtkIntent && combatIntentExpireSim < 0.0) {
+            this.combatIntentExpireSim = Double.MAX_VALUE;
+        }
+    }
+
+    public boolean isCombatManualFloorAtkIntent() {
+        return combatManualFloorAtkIntent;
+    }
+
+    /** 在 {@code SwipeStatePlayer.enter()} 退出钩子中消费武装的近战/打地意图（确保 {@code isStompingDisabled} 读到真值）。 */
+    public void consumeOnSwipeEnter() {
+        this.combatMeleeButtonIntent = false;
+        this.combatManualFloorAtkIntent = false;
+        this.combatIntentExpireSim = -1.0;
+    }
+
+    /** 为 {@code "Auto"} 连发枪械保持短促开火输入窗，防止 {@code IsoPlayer.updateAttackLoopSound:7396} 次帧掐断枪声。 */
+    public void armAutoFireHold(double nowSim, double holdDurationSim) {
+        this.lastObservedSimTime = nowSim;
+        this.autoFireHoldUntilSim = nowSim + Math.max(0.08, holdDurationSim);
+    }
+
+    public void clearAutoFireHold() {
+        this.autoFireHoldUntilSim = -1.0;
+    }
+
+    /** 每帧检查意图与全自动连发保持窗过期（纯 O(1)，无分配）。 */
+    public void tickTime(double nowSim) {
+        this.lastObservedSimTime = nowSim;
+        if (combatIntentExpireSim >= 0.0 && nowSim >= combatIntentExpireSim) {
+            consumeOnSwipeEnter();
+        }
+        if (autoFireHoldUntilSim >= 0.0 && nowSim >= autoFireHoldUntilSim) {
+            autoFireHoldUntilSim = -1.0;
+        }
+    }
+
+    public boolean isAutoFireHoldActive() {
+        return autoFireHoldUntilSim >= 0.0 && lastObservedSimTime < autoFireHoldUntilSim;
+    }
+
+    public void clearCombatIntents() {
+        this.combatMeleeButtonIntent = false;
+        this.combatManualFloorAtkIntent = false;
+        this.combatIntentExpireSim = -1.0;
+        this.autoFireHoldUntilSim = -1.0;
+    }
+
+    @Override
+    public void logVariablesToRecording(AnimationPlayerRecorder recorder) {
+        if (recorder == null || ownerNpc == null) {
+            return;
+        }
+        try {
+            recorder.logVariable("er.npcId", ownerNpc.getNpcId() != null ? ownerNpc.getNpcId() : "");
+            recorder.logVariable("er.brainMode", ownerNpc.getBrain().getMode().name());
+            recorder.logVariable("er.brainPath", ownerNpc.getBrain().getActivePathString());
+            recorder.logVariable("er.posture", ownerNpc.getPosture().getState().name());
+            recorder.logVariable("er.posX", ownerNpc.getX());
+            recorder.logVariable("er.posY", ownerNpc.getY());
+            recorder.logVariable("er.posZ", ownerNpc.getZ());
+            recorder.logVariable("er.fwdX", ownerNpc.getForwardDirectionX());
+            recorder.logVariable("er.fwdY", ownerNpc.getForwardDirectionY());
+            recorder.logVariable("er.dirAngleDeg", ownerNpc.getDirectionAngle());
+            recorder.logVariable("er.animAngleDeg", ownerNpc.getAnimAngle());
+            recorder.logVariable("er.isAiming", ownerNpc.isAiming());
+            recorder.logVariable("er.isStrafing", ownerNpc.isStrafing());
+            recorder.logVariable("er.isJustMoved", ownerNpc.isJustMoved());
+            recorder.logVariable("er.isPlayerMoving", ownerNpc.isPlayerMoving());
+            recorder.logVariable("er.meleeDelay", ownerNpc.getMeleeDelay());
+            recorder.logVariable("er.recoilDelay", ownerNpc.getRecoilDelay());
+            recorder.logVariable("er.combatSpeed", ownerNpc.getCombatSpeed());
+
+            EmberLocomotionController loco = ownerNpc.getLocomotion();
+            recorder.logVariable("er.locoCombatActive", loco.isCombatStrafeActive());
+            recorder.logVariable("er.locoCombatMoving", loco.isCombatMoveMoving());
+            recorder.logVariable("er.locoCombatAimStrafe", loco.isCombatAimStrafing());
+            recorder.logVariable("er.locoCombatRun", loco.isCombatRunGear());
+            recorder.logVariable("er.locoCombatDirX", loco.getCombatMoveDirX());
+            recorder.logVariable("er.locoCombatDirY", loco.getCombatMoveDirY());
+            recorder.logVariable("er.locoPathActive", loco.isNormalPathActive());
+        } catch (Throwable ignored) {}
     }
 
     @Override
@@ -87,7 +204,7 @@ public final class NpcNullInputComponent extends CharacterInputComponent {
 
     @Override
     public boolean isAimKeyDown() {
-        return false;
+        return isAutoFireHoldActive();
     }
 
     @Override
@@ -132,12 +249,12 @@ public final class NpcNullInputComponent extends CharacterInputComponent {
 
     @Override
     public boolean isAnyAimKeyDown() {
-        return false;
+        return isAutoFireHoldActive();
     }
 
     @Override
     public boolean isMeleeButtonDown() {
-        return false;
+        return combatMeleeButtonIntent;
     }
 
     @Override
@@ -147,7 +264,7 @@ public final class NpcNullInputComponent extends CharacterInputComponent {
 
     @Override
     public boolean isAttackButtonDown() {
-        return false;
+        return isAutoFireHoldActive();
     }
 
     @Override
@@ -232,56 +349,6 @@ public final class NpcNullInputComponent extends CharacterInputComponent {
 
     @Override
     public boolean isManualFloorAtkButtonDown() {
-        return combatStompIntent;
-    }
-
-    @Override
-    public boolean isZoomInButtonPressed() {
-        return false;
-    }
-
-    @Override
-    public boolean isZoomOutButtonPressed() {
-        return false;
-    }
-
-    @Override
-    public boolean isLShiftKeyDown() {
-        return false;
-    }
-
-    @Override
-    public boolean isRShiftKeyDown() {
-        return false;
-    }
-
-    @Override
-    public boolean isShiftKeyDown() {
-        return false;
-    }
-
-    @Override
-    public boolean isLCtrlKeyDown() {
-        return false;
-    }
-
-    @Override
-    public boolean isRCtrlKeyDown() {
-        return false;
-    }
-
-    @Override
-    public boolean isCtrlKeyDown() {
-        return false;
-    }
-
-    @Override
-    public boolean isF12KeyDown() {
-        return false;
-    }
-
-    @Override
-    public boolean isChangeCharacterKeyDown() {
-        return false;
+        return combatManualFloorAtkIntent;
     }
 }

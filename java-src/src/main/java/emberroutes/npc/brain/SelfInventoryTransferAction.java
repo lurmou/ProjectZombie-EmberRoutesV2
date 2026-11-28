@@ -27,8 +27,11 @@ public final class SelfInventoryTransferAction extends BaseAction {
     private double itemElapsedSimSec;
     private int movedCount;
 
-    public SelfInventoryTransferAction(List<TransferEntry> entries) {
-        super(1.0, "TransferItemOnSelf");
+    public SelfInventoryTransferAction(IsoNPC npc, List<TransferEntry> entries) {
+        super(npc, 1.0, "TransferItemOnSelf");
+        this.stopOnWalk = false;
+        this.stopOnRun = true;
+        this.stopOnAim = false;
         this.entries = entries != null ? new ArrayList<>(entries) : Collections.emptyList();
     }
 
@@ -38,10 +41,15 @@ public final class SelfInventoryTransferAction extends BaseAction {
         itemElapsedSimSec = 0.0;
         movedCount = 0;
 
-        IsoNPC npc = ctx != null ? ctx.npc : null;
-        if (npc == null || npc.isDead() || entries.isEmpty()) {
+        IsoNPC targetNpc = this.npc != null ? this.npc : (ctx != null ? ctx.npc : null);
+        if (targetNpc == null || targetNpc.isDead()) {
             itemDurations = new double[0];
-            setDurationSimSec(0.05);
+            failOnStart();
+            return;
+        }
+        if (entries.isEmpty()) {
+            itemDurations = new double[0];
+            forceComplete();
             return;
         }
 
@@ -51,16 +59,16 @@ public final class SelfInventoryTransferAction extends BaseAction {
         if (firstSrc != null) {
             String takeSound = firstSrc.getTakeSound();
             if (takeSound != null && !takeSound.isEmpty()) {
-                playOneShotSound(npc, takeSound);
+                playOneShotSound(targetNpc, takeSound);
             }
         }
-        playLoopingActionSound(npc, "RummageInInventory");
+        playLoopingActionSound(targetNpc, "RummageInInventory");
 
         int n = entries.size();
         this.itemDurations = new double[n];
-        boolean dextrous = npc.hasTrait(CharacterTrait.DEXTROUS);
-        boolean clumsy = npc.hasTrait(CharacterTrait.ALL_THUMBS) || npc.isWearingAwkwardGloves();
-        ItemContainer mainInv = npc.getInventory();
+        boolean dextrous = targetNpc.hasTrait(CharacterTrait.DEXTROUS);
+        boolean clumsy = targetNpc.hasTrait(CharacterTrait.ALL_THUMBS) || targetNpc.isWearingAwkwardGloves();
+        ItemContainer mainInv = targetNpc.getInventory();
 
         double totalSec = 0.0;
         for (int i = 0; i < n; i++) {
@@ -81,19 +89,19 @@ public final class SelfInventoryTransferAction extends BaseAction {
 
     @Override
     protected void onTick(BrainContext ctx, double dtSim) {
-        IsoNPC npc = ctx != null ? ctx.npc : null;
-        if (npc == null || npc.isDead()) {
-            setDurationSimSec(getElapsedSimSec());
+        IsoNPC targetNpc = this.npc != null ? this.npc : (ctx != null ? ctx.npc : null);
+        if (targetNpc == null || targetNpc.isDead()) {
+            forceStop();
             return;
         }
-        npc.setMetabolicTarget(Metabolics.LightWork);
+        targetNpc.setMetabolicTarget(Metabolics.LightWork);
         if (itemDurations == null || currentIdx >= entries.size()) {
             return;
         }
         this.itemElapsedSimSec += Math.max(0.0, dtSim);
         while (currentIdx < entries.size() && this.itemElapsedSimSec >= itemDurations[currentIdx]) {
             this.itemElapsedSimSec -= itemDurations[currentIdx];
-            transferSingleEntry(npc, entries.get(currentIdx++));
+            transferSingleEntry(targetNpc, entries.get(currentIdx++));
         }
     }
 

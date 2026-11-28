@@ -5,6 +5,9 @@ import emberroutes.npc.EmberTargetProjector;
 import emberroutes.npc.IsoNPC;
 import emberroutes.npc.NpcPostureController;
 import emberroutes.npc.brain.NeedsPolicy.UrgentNeed;
+import emberroutes.npc.combat.GuardCombatNode;
+import emberroutes.npc.combat.EmberSquadDirector;
+import emberroutes.npc.combat.SquadCombatNodes;
 import emberroutes.warehouse.SmartObjectRegistry;
 import emberroutes.warehouse.SmartSlot.SlotKind;
 import emberroutes.warehouse.SmartSlot.SmartSlotLease;
@@ -12,7 +15,6 @@ import emberroutes.warehouse.WarehouseFastIndex;
 import java.util.List;
 import java.util.function.Function;
 import java.util.function.Predicate;
-import java.util.function.Supplier;
 import zombie.characters.CharacterStat;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
@@ -40,20 +42,21 @@ public final class SettlementBrainBuilder {
         StateEvaluator rootDangerEval = SettlementDangerField::evaluate;
         StateEvaluator rootNeedsEval = SettlementBrainBuilder::evaluateNeedsAndBorrowedTools;
 
+        StateNode guardCombat = new GuardCombatNode();
         StateNode threatEvade = new ThreatEvadeNode();
-        StateNode bandageNode = new SurvivalActionNode(
+        StateNode bandageNode = SelfAidActionNode.forSingleAction(
                 "BANDAGE",
                 BandageSelfAction::new,
                 BandageSelfAction::findBestBandage,
                 ctx -> ctx.bleeding && BandageSelfAction.findBestBandage(ctx.npc) != null,
                 ctx -> ctx.bleeding && BandageSelfAction.findBestBandage(ctx.npc) != null);
-        StateNode eatNode = new SurvivalActionNode(
+        StateNode eatNode = SelfAidActionNode.forSingleAction(
                 "EAT",
                 EatFoodAction::new,
                 EatFoodAction::findBestEdibleFood,
                 ctx -> ctx.urgentNeed == UrgentNeed.EAT && EatFoodAction.findBestEdibleFood(ctx.npc) != null,
                 ctx -> ctx.hunger > NeedsPolicy.HUNGER_EXIT && EatFoodAction.findBestEdibleFood(ctx.npc) != null);
-        StateNode drinkNode = new SurvivalActionNode(
+        StateNode drinkNode = SelfAidActionNode.forSingleAction(
                 "DRINK",
                 DrinkWaterAction::new,
                 DrinkWaterAction::findCleanWaterContainer,
@@ -78,7 +81,7 @@ public final class SettlementBrainBuilder {
 
         StateNode root = new RootNode(
                 "SETTLEMENT",
-                new StateNode[]{threatEvade, survivalBranch, returnTool, workDuty, leisureBranch},
+                new StateNode[]{guardCombat, threatEvade, survivalBranch, returnTool, workDuty, leisureBranch},
                 new StateEvaluator[]{rootDangerEval, rootNeedsEval});
         return new StateTreeRunner(root);
     }
@@ -142,6 +145,7 @@ public final class SettlementBrainBuilder {
         private float sentGoalX;
         private float sentGoalY;
         private int sentGoalZ;
+        private double lastSelfDefenseShoveSim = -10.0;
 
         ThreatEvadeNode() {
             super("THREAT_EVADE", null, null, 0.0, true);
@@ -172,6 +176,20 @@ public final class SettlementBrainBuilder {
             if (!ctx.hasSafeAnchor || ctx.npc == null) {
                 return;
             }
+            // 平民撤退途中若被丧尸贴脸堵死角（<1.35m），执行一次短促原版推搡自卫脱困，然后继续逃向安全室
+            if (ctx.simTime - lastSelfDefenseShoveSim >= 0.90
+                    && ctx.npc.CanAttack()
+                    && ctx.npc.getMeleeDelay() <= 0.5F
+                    && !ctx.npc.isCombatAttackBlocked(ctx.simTime)) {
+                EmberSquadDirector.ThreatEntry blocker =
+                        SquadCombatNodes.findClosestThreatDist(ctx.npc, 1.35F);
+                if (blocker != null) {
+                    lastSelfDefenseShoveSim = ctx.simTime;
+                    SquadCombatNodes.performQuickDefensiveShove(ctx.npc, blocker, ctx.simTime);
+                    sentGoalX = Float.NaN;
+                    return;
+                }
+            }
             float distToGoal = (float) Math.hypot(ctx.safeAnchorX - ctx.npc.getX(), ctx.safeAnchorY - ctx.npc.getY());
             if (distToGoal > 1.1F) {
                 double shift = Float.isNaN(sentGoalX) ? 999.0
@@ -190,210 +208,6 @@ public final class SettlementBrainBuilder {
             sentGoalY = ctx.safeAnchorY;
             sentGoalZ = ctx.safeAnchorZ;
             ctx.requestMoveTo(ctx.safeAnchorX, ctx.safeAnchorY, ctx.safeAnchorZ, true);
-        }
-    }
-
-    /** 复用型确定性定时生存动作叶（供 {@code BANDAGE / EAT / DRINK} 共享，严格按原版 {@code TransferItemOnSelf} 取放背包物品）。 */
-    private static final class SurvivalActionNode extends StateNode {
-        private enum SurvivalPhase {
-            IDLE,
-            UNPACKING,
-            EXECUTING,
-            REPACKING
-        }
-
-        private final Supplier<BaseAction> factory;
-        private final Function<IsoNPC, BaseAction.ItemLocation> itemFinder;
-        private final Predicate<BrainContext> enterGuard;
-        private final Predicate<BrainContext> continueGuard;
-        private SurvivalPhase phase = SurvivalPhase.IDLE;
-        private SelfInventoryTransferAction transferAction;
-        private InventoryItem unpackedItem;
-        private ItemContainer unpackedFromBag;
-        private BaseAction action;
-        private boolean failed;
-
-        SurvivalActionNode(
-                String id,
-                Supplier<BaseAction> factory,
-                Function<IsoNPC, BaseAction.ItemLocation> itemFinder,
-                Predicate<BrainContext> enterGuard,
-                Predicate<BrainContext> continueGuard) {
-            super(id, null, null, 0.0, true);
-            this.factory = factory;
-            this.itemFinder = itemFinder;
-            this.enterGuard = enterGuard;
-            this.continueGuard = continueGuard;
-        }
-
-        @Override
-        public boolean canEnter(BrainContext ctx) {
-            return ctx.npc != null && enterGuard.test(ctx);
-        }
-
-        @Override
-        public boolean canContinue(BrainContext ctx) {
-            if (ctx.npc == null || failed) {
-                return false;
-            }
-            if (phase == SurvivalPhase.REPACKING && transferAction != null && transferAction.isRunning()) {
-                return true;
-            }
-            return continueGuard.test(ctx);
-        }
-
-        @Override
-        public void onEnter(BrainContext ctx, StateScope scope) {
-            ctx.working = false;
-            this.phase = SurvivalPhase.IDLE;
-            this.transferAction = null;
-            this.unpackedItem = null;
-            this.unpackedFromBag = null;
-            this.action = null;
-            this.failed = false;
-            if (ctx.npc != null) {
-                ctx.npc.getLocomotion().stop(ctx.npc);
-                if (ctx.npc.getPosture().isBlockingLocomotion()) {
-                    ctx.requestStandUp(true);
-                }
-            }
-            scope.defer(() -> {
-                if (this.transferAction != null) {
-                    this.transferAction.interrupt(ctx, "SCOPE_EXIT");
-                    this.transferAction = null;
-                }
-                if (this.action != null) {
-                    this.action.interrupt(ctx, "SCOPE_EXIT");
-                    this.action = null;
-                }
-                this.unpackedItem = null;
-                this.unpackedFromBag = null;
-                this.phase = SurvivalPhase.IDLE;
-            });
-        }
-
-        @Override
-        public void onTick(BrainContext ctx, StateScope scope, double dtSim) {
-            if (ctx.npc == null || failed) {
-                return;
-            }
-            if (phase == SurvivalPhase.IDLE && ctx.npc.getPosture().isActive()) {
-                ctx.requestStandUp(false);
-                return;
-            }
-            switch (phase) {
-                case IDLE -> startNextCycle(ctx);
-                case UNPACKING -> {
-                    if (transferAction == null) {
-                        failed = true;
-                        return;
-                    }
-                    transferAction.tick(ctx, dtSim);
-                    if (transferAction.isRunning()) {
-                        return;
-                    }
-                    boolean ok = transferAction.getStatus() == BaseAction.ActionStatus.COMPLETED;
-                    transferAction = null;
-                    if (!ok) {
-                        unpackedItem = null;
-                        unpackedFromBag = null;
-                        failed = true;
-                        return;
-                    }
-                    phase = SurvivalPhase.EXECUTING;
-                    action = factory.get();
-                    action.start(ctx);
-                }
-                case EXECUTING -> {
-                    if (action == null) {
-                        failed = true;
-                        return;
-                    }
-                    action.tick(ctx, dtSim);
-                    if (action.isRunning()) {
-                        return;
-                    }
-                    BaseAction.ActionStatus st = action.getStatus();
-                    action = null;
-                    if (st == BaseAction.ActionStatus.FAILED) {
-                        failed = true;
-                        return;
-                    }
-                    ItemContainer mainInv = ctx.npc.getInventory();
-                    if (unpackedItem != null
-                            && unpackedFromBag != null
-                            && mainInv != null
-                            && mainInv.contains(unpackedItem)) {
-                        boolean stillNeededSameItem = false;
-                        if (continueGuard.test(ctx)) {
-                            BaseAction.ItemLocation nextLoc = itemFinder.apply(ctx.npc);
-                            stillNeededSameItem = nextLoc != null && nextLoc.item() == unpackedItem;
-                        }
-                        if (!stillNeededSameItem) {
-                            if (unpackedFromBag.hasRoomFor(ctx.npc, unpackedItem)
-                                    && unpackedFromBag.isItemAllowed(unpackedItem)) {
-                                phase = SurvivalPhase.REPACKING;
-                                transferAction = new SelfInventoryTransferAction(List.of(
-                                        new SelfInventoryTransferAction.TransferEntry(
-                                                unpackedItem, mainInv, unpackedFromBag)));
-                                unpackedItem = null;
-                                unpackedFromBag = null;
-                                transferAction.start(ctx);
-                                return;
-                            }
-                            unpackedItem = null;
-                            unpackedFromBag = null;
-                        }
-                    } else {
-                        unpackedItem = null;
-                        unpackedFromBag = null;
-                    }
-                    if (continueGuard.test(ctx)) {
-                        startNextCycle(ctx);
-                    } else {
-                        phase = SurvivalPhase.IDLE;
-                    }
-                }
-                case REPACKING -> {
-                    if (transferAction == null) {
-                        phase = SurvivalPhase.IDLE;
-                        return;
-                    }
-                    transferAction.tick(ctx, dtSim);
-                    if (transferAction.isRunning()) {
-                        return;
-                    }
-                    transferAction = null;
-                    if (continueGuard.test(ctx)) {
-                        startNextCycle(ctx);
-                    } else {
-                        phase = SurvivalPhase.IDLE;
-                    }
-                }
-            }
-        }
-
-        private void startNextCycle(BrainContext ctx) {
-            IsoNPC npc = ctx.npc;
-            ItemContainer mainInv = npc != null ? npc.getInventory() : null;
-            BaseAction.ItemLocation loc = itemFinder.apply(npc);
-            if (mainInv == null || loc == null || loc.item() == null) {
-                failed = true;
-                return;
-            }
-            ItemContainer src = loc.item().getContainer() != null ? loc.item().getContainer() : loc.container();
-            if (src != null && src != mainInv) {
-                this.unpackedItem = loc.item();
-                this.unpackedFromBag = src;
-                this.phase = SurvivalPhase.UNPACKING;
-                this.transferAction = new SelfInventoryTransferAction(List.of(
-                        new SelfInventoryTransferAction.TransferEntry(loc.item(), src, mainInv)));
-                this.transferAction.start(ctx);
-            } else {
-                this.phase = SurvivalPhase.EXECUTING;
-                this.action = factory.get();
-                this.action.start(ctx);
-            }
         }
     }
 
@@ -645,7 +459,6 @@ public final class SettlementBrainBuilder {
             double distToContainer = Math.hypot((targetX + 0.5) - npc.getX(), (targetY + 0.5) - npc.getY());
 
             if (this.transferAction != null) {
-                this.transferAction.tick(ctx, dtSim);
                 if (this.transferAction.isRunning()) {
                     return;
                 }
@@ -697,6 +510,7 @@ public final class SettlementBrainBuilder {
                         sourceContainerKey, targetLoc.item(), targetX, targetY, targetZ);
                 if (destContainerId != null) {
                     this.transferAction = new BatchContainerTransferAction(
+                            npc,
                             BatchContainerTransferAction.TransferMode.UNLOAD_TO_CONTAINER,
                             destContainerId,
                             -1,

@@ -117,6 +117,18 @@ end
 local function resolveActivityStyle(activityState)
     if activityState == "RIDING" then
         return Theme.selected or Theme.primary, Theme.borderFocus or Theme.accent, Theme.textColor
+    elseif activityState == "COMBAT" then
+        local dc = Theme.danger or Theme.warning or Theme.gold
+        return Theme.badgeBg or Theme.well, dc, dc
+    elseif activityState == "RELOADING" or activityState == "RETREATING" then
+        local wc = Theme.warning or Theme.gold
+        return Theme.badgeBg or Theme.well, wc, wc
+    elseif activityState == "CQB_SWEEP" then
+        local ac = Theme.accent or Theme.primary
+        return Theme.badgeBg or Theme.well, ac, ac
+    elseif activityState == "FIRST_AID" then
+        local sc = Theme.success or Theme.accent
+        return Theme.badgeBg or Theme.well, sc, sc
     elseif activityState == "BOARDING" or activityState == "EXITING" then
         return Theme.badgeBg or Theme.well, Theme.warning or Theme.gold, Theme.warning or Theme.gold
     elseif activityState == "HOLDING" or activityState == "WAIT_VEHICLE" then

@@ -21,6 +21,13 @@ local function loadSavedNpcs()
     return 0
 end
 
+local function clearVanillaActionQueue(npcObj)
+    if not npcObj or not ISTimedActionQueue or not ISTimedActionQueue.queues then
+        return
+    end
+    ISTimedActionQueue.queues[npcObj] = nil
+end
+
 function NpcRuntime.spawn(x, y, z, female, optionalName)
     if not EmberRoutesJava then return nil end
     return EmberRoutesJava.spawnNpc(x, y, z or 0, female == true, optionalName)
@@ -28,11 +35,18 @@ end
 
 function NpcRuntime.despawn(npcId)
     if not EmberRoutesJava or not npcId then return false end
+    clearVanillaActionQueue(NpcRuntime.getLiveObject(npcId))
     return EmberRoutesJava.despawnNpc(npcId) == true
 end
 
 function NpcRuntime.despawnAll()
     if not EmberRoutesJava then return 0 end
+    if ISTimedActionQueue and ISTimedActionQueue.queues then
+        local ids = NpcRuntime.listIds()
+        for i = 1, #ids do
+            clearVanillaActionQueue(NpcRuntime.getLiveObject(ids[i]))
+        end
+    end
     return EmberRoutesJava.despawnAllNpcs()
 end
 
@@ -96,6 +110,7 @@ end
 
 function NpcRuntime.phaseOut(npcId)
     if not EmberRoutesJava or not npcId then return false end
+    clearVanillaActionQueue(NpcRuntime.getLiveObject(npcId))
     return EmberRoutesJava.phaseOutNpc(npcId) == true
 end
 
@@ -106,6 +121,7 @@ end
 
 function NpcRuntime.kill(npcId)
     if not EmberRoutesJava or not npcId then return false end
+    clearVanillaActionQueue(NpcRuntime.getLiveObject(npcId))
     return EmberRoutesJava.killNpc(npcId) == true
 end
 
@@ -164,6 +180,16 @@ function NpcRuntime.toggleAnimRecorder(npcId)
     return EmberRoutesJava.toggleNpcAnimRecorder(npcId) or "UNAVAILABLE"
 end
 
+function NpcRuntime.isAllAnimRecorderEnabled()
+    if not EmberRoutesJava or not EmberRoutesJava.isAllNpcAnimRecorderEnabled then return false end
+    return EmberRoutesJava.isAllNpcAnimRecorderEnabled() == true
+end
+
+function NpcRuntime.setAllAnimRecorderEnabled(enabled)
+    if not EmberRoutesJava or not EmberRoutesJava.setAllNpcAnimRecorderEnabled then return "UNAVAILABLE" end
+    return EmberRoutesJava.setAllNpcAnimRecorderEnabled(enabled == true) or "UNAVAILABLE"
+end
+
 function NpcRuntime.setBrainMode(npcId, modeName)
     if not EmberRoutesJava or not EmberRoutesJava.setNpcBrainMode or not npcId or not modeName then return false end
     return EmberRoutesJava.setNpcBrainMode(npcId, modeName) == true
@@ -201,11 +227,28 @@ function NpcRuntime.getAssignedSettlement(npcId)
     return EmberRoutesJava.getNpcAssignedSettlement(npcId) or ""
 end
 
+function NpcRuntime.setGuardDuty(npcId, enabled)
+    if not EmberRoutesJava or not EmberRoutesJava.setNpcGuardDuty or not npcId then return false end
+    return EmberRoutesJava.setNpcGuardDuty(npcId, enabled == true) == true
+end
+
+function NpcRuntime.isGuardDuty(npcId)
+    if not EmberRoutesJava or not EmberRoutesJava.isNpcGuardDuty or not npcId then return false end
+    return EmberRoutesJava.isNpcGuardDuty(npcId) == true
+end
+
 Kernel.exposeApi("npc", NpcRuntime)
 Kernel.registerModule({
     id = "npc-runtime",
-    onWorldReady = function()
+    onWorldReady = function(scope)
         loadSavedNpcs()
+        if scope and Events and Events.OnCharacterDeath then
+            scope:on(Events.OnCharacterDeath, function(chr)
+                if chr and NpcRuntime.getNpcId(chr) then
+                    clearVanillaActionQueue(chr)
+                end
+            end)
+        end
     end,
     ticks = {
         { stage = "PHYSICS_MOVE", fn = tickNpcs },

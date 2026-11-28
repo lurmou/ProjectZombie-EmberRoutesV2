@@ -22,8 +22,11 @@ public final class DrinkWaterAction extends BaseAction {
     private float targetConsumedRatio;
     private String drinkSound;
 
-    public DrinkWaterAction() {
-        super(2.2, "drink", "FoodType", "bottle");
+    public DrinkWaterAction(IsoNPC npc) {
+        super(npc, 2.2, "drink", "FoodType", "bottle");
+        this.stopOnWalk = false;
+        this.stopOnRun = true;
+        this.stopOnAim = false;
         setReportEventName("EventEating");
     }
 
@@ -46,20 +49,25 @@ public final class DrinkWaterAction extends BaseAction {
 
     @Override
     protected void onStart(BrainContext ctx) {
-        IsoNPC npc = ctx != null ? ctx.npc : null;
-        if (npc == null || npc.isDead()) {
+        IsoNPC targetNpc = this.npc != null ? this.npc : (ctx != null ? ctx.npc : null);
+        if (targetNpc == null || targetNpc.isDead()) {
+            failOnStart();
             return;
         }
-        ItemLocation loc = findCleanWaterContainer(npc);
-        if (loc == null || npc.getInventory() == null || !npc.getInventory().contains(loc.item())) {
+        ItemLocation loc = findCleanWaterContainer(targetNpc);
+        if (loc == null || targetNpc.getInventory() == null || !targetNpc.getInventory().contains(loc.item())) {
+            failOnStart();
             return;
         }
         this.activeItem = loc.item();
         this.activeContainer = activeItem.getFluidContainer();
         if (this.activeContainer == null || this.activeContainer.isEmpty()) {
+            failOnStart();
             return;
         }
-        float curThirst = npc.getStats() != null ? npc.getStats().get(CharacterStat.THIRST) : ctx.thirst;
+        float curThirst = targetNpc.getStats() != null
+                ? targetNpc.getStats().get(CharacterStat.THIRST)
+                : (ctx != null ? ctx.thirst : 0.0F);
         // 原版 fluids.txt: Fluid.Water ThirstChange = -50.0 -> 1.0L 降低 0.50 口渴 (autoDrink: amountNeeded = thirst * 2.0F)
         float amountNeeded = Math.max(0.20F, curThirst * 2.0F);
         float availAmount = Math.max(0.001F, activeContainer.getAmount());
@@ -103,7 +111,7 @@ public final class DrinkWaterAction extends BaseAction {
             }
         }
         if (this.drinkSound != null && !this.drinkSound.isBlank()) {
-            playActionSound(npc, this.drinkSound);
+            playActionSound(targetNpc, this.drinkSound);
         }
     }
 

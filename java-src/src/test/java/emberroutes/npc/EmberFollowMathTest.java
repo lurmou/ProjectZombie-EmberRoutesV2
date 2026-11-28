@@ -449,6 +449,29 @@ class EmberFollowMathTest {
         return (o1 * o2 < -1.0E-5) && (o3 * o4 < -1.0E-5);
     }
 
+    @Test
+    void leaderTrailStableHeadingFiltersFinalMicroStepNoiseAndSharesStopClock() {
+        EmberLeaderTrail trail = new EmberLeaderTrail();
+        long t = 1000L;
+        // 领队沿东北方向 (+1, +1) 连续行进 2.26m
+        for (int i = 0; i <= 6; i++) {
+            float p = i * 0.25F;
+            trail.record(10.0F + p, 10.0F + p, 0, t + i * 100L);
+        }
+        // 松开斜走键最后一帧产生朝东 +0.05m 噪声微步
+        trail.record(11.55F, 11.50F, 0, 1620L);
+
+        float[] heading = new float[2];
+        assertTrue(trail.getStableHeading(heading));
+        float expected = (float) (1.0 / Math.sqrt(2.0));
+        float dot = heading[0] * expected + heading[1] * expected;
+        assertTrue(dot >= Math.cos(Math.toRadians(10.0)), "Expected stable heading near NE, got (" + heading[0] + "," + heading[1] + ")");
+
+        // 统一停步时钟：<240ms 为移动中，>=240ms 为停步
+        assertTrue(trail.isLeaderMoving(1800L));
+        assertFalse(trail.isLeaderMoving(1860L));
+    }
+
     private static double orient(double ax, double ay, double bx, double by, double cx, double cy) {
         return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
     }

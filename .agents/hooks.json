@@ -1,0 +1,11 @@
+{
+  "emberroutes-dirty-gate": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python ../tools/stop_gate_hook.py",
+        "timeout": 15
+      }
+    ]
+  }
+}

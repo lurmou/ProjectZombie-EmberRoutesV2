@@ -132,6 +132,19 @@ public final class EmberLocomotionController {
     private long precisionStopStartedMs;
     private final Vector2 scratchDeferred = new Vector2();
 
+    private boolean combatStrafeActive;
+    private boolean combatAimStrafing;
+    private boolean combatMoveMoving;
+    private float combatMoveDirX;
+    private float combatMoveDirY;
+    private boolean combatHasAimDir;
+    private float combatAimDirX = 1.0F;
+    private float combatAimDirY;
+    private boolean combatRunGear;
+    private float combatWalkSpeedCap = -1.0F;
+    private float combatMoveTtlSec;
+    private final Vector2 combatAimScratch = new Vector2();
+
     String formatCorridorNode() {
         return corridor != null ? corridor.formatCurrentNode() : "NONE";
     }
@@ -566,6 +579,116 @@ public final class EmberLocomotionController {
         return true;
     }
 
+    /**
+     * 唯一战斗身体控制入口（移动矢量 + 架势 + 瞄准朝向统一经 {@link #beforeUpdate} 同帧同步下发，禁止外部直写朝向）。
+     */
+    public void setCombatAimStrafe(
+            IsoNPC npc,
+            float moveDirX,
+            float moveDirY,
+            boolean wantMove,
+            boolean aimMode,
+            boolean hasAimDir,
+            float aimDirX,
+            float aimDirY,
+            boolean runGear,
+            float walkSpeedCap) {
+        if (npc == null) return;
+        this.combatStrafeActive = true;
+        this.combatAimStrafing = aimMode;
+        if (wantMove) {
+            float len = (float) Math.hypot(moveDirX, moveDirY);
+            if (len > 1.0E-4F && Float.isFinite(len)) {
+                this.combatMoveMoving = true;
+                this.combatMoveDirX = moveDirX / len;
+                this.combatMoveDirY = moveDirY / len;
+            } else {
+                this.combatMoveMoving = false;
+                this.combatMoveDirX = 0.0F;
+                this.combatMoveDirY = 0.0F;
+            }
+        } else {
+            this.combatMoveMoving = false;
+            this.combatMoveDirX = 0.0F;
+            this.combatMoveDirY = 0.0F;
+        }
+        if (hasAimDir) {
+            float aLen = (float) Math.hypot(aimDirX, aimDirY);
+            if (aLen > 1.0E-4F && Float.isFinite(aLen)) {
+                this.combatHasAimDir = true;
+                this.combatAimDirX = aimDirX / aLen;
+                this.combatAimDirY = aimDirY / aLen;
+            } else {
+                this.combatHasAimDir = false;
+            }
+        } else {
+            this.combatHasAimDir = false;
+        }
+        this.combatRunGear = runGear;
+        this.combatWalkSpeedCap = walkSpeedCap;
+        this.combatMoveTtlSec = 0.30F;
+        if (active) {
+            this.active = false;
+            this.corridor = null;
+            cancelAsyncRequest(npc);
+        }
+        this.arrivedLatched = false;
+    }
+
+    /** 兼容无显式瞄准向量的战斗移动/撤退意图下发。 */
+    public void setCombatMove(
+            IsoNPC npc, float dirX, float dirY, boolean runGear, boolean aimStrafe, float walkSpeedCap) {
+        float len = (float) Math.hypot(dirX, dirY);
+        setCombatAimStrafe(npc, dirX, dirY, len > 1.0E-4F && Float.isFinite(len),
+                aimStrafe, false, 0.0F, 0.0F, runGear, walkSpeedCap);
+    }
+
+    public void clearCombatMove(IsoNPC npc) {
+        boolean wasActive = this.combatStrafeActive || this.combatAimStrafing;
+        this.combatStrafeActive = false;
+        this.combatAimStrafing = false;
+        this.combatMoveMoving = false;
+        this.combatMoveDirX = 0.0F;
+        this.combatMoveDirY = 0.0F;
+        this.combatHasAimDir = false;
+        this.combatRunGear = false;
+        this.combatWalkSpeedCap = -1.0F;
+        this.combatMoveTtlSec = 0.0F;
+        if (wasActive && npc != null && !active) {
+            contextSteering.reset();
+            applyZeroMoveInput(npc);
+            npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
+        }
+    }
+
+    public boolean isCombatAimStrafing() {
+        return combatStrafeActive && combatAimStrafing && combatMoveTtlSec > 0.0F;
+    }
+
+    public boolean isCombatStrafeActive() {
+        return combatStrafeActive;
+    }
+
+    public boolean isCombatMoveMoving() {
+        return combatMoveMoving;
+    }
+
+    public boolean isCombatRunGear() {
+        return combatRunGear;
+    }
+
+    public float getCombatMoveDirX() {
+        return combatMoveDirX;
+    }
+
+    public float getCombatMoveDirY() {
+        return combatMoveDirY;
+    }
+
+    public boolean isNormalPathActive() {
+        return active;
+    }
+
     public void beforeUpdate(IsoNPC npc) {
         if (npc == null) return;
         if (npc.getPosture().isBlockingLocomotion()) {
@@ -574,10 +697,115 @@ public final class EmberLocomotionController {
             resetStuckMonitor(npc);
             return;
         }
-        if (npc.getVehicle() != null || !npc.getCharacterActions().isEmpty()) {
+        boolean hasActions = !npc.getCharacterActions().isEmpty();
+        boolean blockedByAction = hasActions && npc.getCharacterActions().get(0).stopOnWalk;
+        if (npc.getVehicle() != null || blockedByAction) {
             if (npc.getVehicle() != null) {
                 npc.setEmberControlActive(false);
             }
+            npc.clearManualMovementClamp();
+            npc.setEmberDesiredRunning(false);
+            npc.setEmberDesiredSprinting(false);
+            npc.setEmberWalkSpeedCap(-1.0F);
+            npc.setEmberTrackSpeedScale(1.0F);
+            npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
+            applyZeroMoveInput(npc);
+            resetStuckMonitor(npc);
+            return;
+        }
+        if (npc.isInVanillaHitReactionState() || npc.getIgnoreMovement()) {
+            this.combatStrafeActive = false;
+            this.combatAimStrafing = false;
+            this.combatMoveMoving = false;
+            this.combatHasAimDir = false;
+            this.combatMoveTtlSec = 0.0F;
+            npc.clearManualMovementClamp();
+            npc.setEmberDesiredRunning(false);
+            npc.setEmberDesiredSprinting(false);
+            npc.setEmberWalkSpeedCap(-1.0F);
+            npc.setEmberTrackSpeedScale(1.0F);
+            npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
+            applyZeroMoveInput(npc);
+            resetStuckMonitor(npc);
+            return;
+        }
+        if (npc.hasHitReaction()) {
+            return;
+        }
+        if (combatStrafeActive) {
+            float dt = (GameTime.instance != null && Float.isFinite(GameTime.instance.getTimeDelta()))
+                    ? Math.max(0.0F, Math.min(0.1F, GameTime.instance.getTimeDelta()))
+                    : (1.0F / 60.0F);
+            combatMoveTtlSec -= dt;
+            if (combatMoveTtlSec <= 0.0F) {
+                clearCombatMove(npc);
+            }
+        }
+        if (combatStrafeActive) {
+            npc.setEmberControlActive(true);
+            npc.setNativeSmoothPathUnlock(true);
+            npc.clearManualMovementClamp();
+
+            boolean swinging = npc.isPerformingHostileSwing();
+            boolean effAim = combatAimStrafing && !combatRunGear && !hasActions;
+            if (!swinging) {
+                npc.setIsAiming(effAim);
+                if (combatHasAimDir) {
+                    // 仅写 forwardDirection，绝不冗余双写 setDirectionAngle，交由 AnimationPlayer 平滑收敛
+                    npc.setForwardDirection(combatAimScratch.set(combatAimDirX, combatAimDirY));
+                }
+            }
+
+            // 仅在非瞄准/踩踏期间锁定移动以防转身跑；举架瞄准期允许边退边挥刀（走 A）
+            boolean movementLockedByEngine = npc.getIgnoreMovement() || npc.isPerformingStompAnimation()
+                    || (swinging && !npc.isAiming());
+            if (combatMoveMoving && !movementLockedByEngine) {
+                EmberContextSteering.SteerOutput combatAvoid = contextSteering.evaluate(
+                        npc, combatMoveDirX, combatMoveDirY, steerLeader, steerLeaderMoving, false);
+                if (combatAvoid.yielding()) {
+                    npc.setEmberDesiredRunning(false);
+                    npc.setEmberDesiredSprinting(false);
+                    npc.setEmberWalkSpeedCap(-1.0F);
+                    npc.setEmberTrackSpeedScale(1.0F);
+                    npc.setEmberMotionState(false, 0.25F, EmberParams.TURN_GAIN);
+                    applyZeroMoveInput(npc);
+                } else {
+                    boolean allowRun = combatRunGear && !swinging && !hasActions && !npc.isAiming()
+                            && !combatAvoid.precisionWalk();
+                    float effCap = combatWalkSpeedCap;
+                    if (combatAvoid.speedCap() < 0.99F) {
+                        effCap = (effCap >= 0.0F)
+                                ? Math.min(effCap, combatAvoid.speedCap())
+                                : combatAvoid.speedCap();
+                    }
+                    if (npc.isAiming()) {
+                        driveAimStrafeCharacter(npc, combatAvoid.dirX(), combatAvoid.dirY(), effCap);
+                    } else {
+                        driveNativeCharacter(
+                                npc,
+                                combatAvoid.dirX(),
+                                combatAvoid.dirY(),
+                                false,
+                                allowRun,
+                                false,
+                                1.0F,
+                                EmberParams.TURN_GAIN,
+                                effCap,
+                                1.0F);
+                    }
+                }
+            } else {
+                npc.setEmberDesiredRunning(false);
+                npc.setEmberDesiredSprinting(false);
+                npc.setEmberWalkSpeedCap(-1.0F);
+                npc.setEmberTrackSpeedScale(1.0F);
+                npc.setEmberMotionState(false, 1.0F, EmberParams.TURN_GAIN);
+                applyZeroMoveInput(npc);
+            }
+            resetStuckMonitor(npc);
+            return;
+        }
+        if (hasActions) {
             npc.clearManualMovementClamp();
             npc.setEmberDesiredRunning(false);
             npc.setEmberDesiredSprinting(false);
@@ -771,7 +999,7 @@ public final class EmberLocomotionController {
 
         boolean bypassAvoidForPrecisionDock = precisionMode && corridor.isAtFinalGoal() && sample.distToGoal() <= 0.65F;
         EmberContextSteering.SteerOutput avoid = bypassAvoidForPrecisionDock
-                ? new EmberContextSteering.SteerOutput(rawDirX, rawDirY, 1.0F, false)
+                ? new EmberContextSteering.SteerOutput(rawDirX, rawDirY, 1.0F, false, false)
                 : contextSteering.evaluate(npc, rawDirX, rawDirY, steerLeader, steerLeaderMoving);
         if (avoid.yielding()) {
             if (nearStairs) {
@@ -847,7 +1075,7 @@ public final class EmberLocomotionController {
         int curZ = EmberTargetProjector.levelOf(npc.getZ());
         IsoGridSquare curSq = npc.getCurrentSquare();
         boolean onStairs = curSq != null && curSq.HasStairs();
-        if (onStairs && allowFastGait) {
+        if ((onStairs || avoid.precisionWalk()) && allowFastGait) {
             wantSprint = false;
             wantRun = false;
             allowFastGait = false;
@@ -1044,6 +1272,7 @@ public final class EmberLocomotionController {
     }
 
     private void stopInternal(IsoNPC npc) {
+        clearCombatMove(null);
         clearPrecisionState(npc, false);
         active = false;
         arrivedLatched = false;
@@ -1388,6 +1617,28 @@ public final class EmberLocomotionController {
         try { npc.setVariable("bPathfind", false); } catch (Throwable ignored) {}
     }
 
+    /**
+     * 原版 B42 {@code IsoPlayer.java:2437, 2849-2862} 瞄准平移驱动：
+     * 瞄准态置 {@code moving=false}、仅写 {@code justMoved=true} 与旋转投影后的 {@code strafeX/strafeY}。
+     */
+    private static void driveAimStrafeCharacter(
+            IsoNPC npc, float dirX, float dirY, float walkSpeedCap) {
+        cancelVanillaPathBehavior(npc);
+        npc.setEmberMoveDir(dirX, dirY);
+        npc.playerMoveDir.set(dirX, dirY);
+        npc.setJustMoved(true);
+        npc.setMoving(false);
+        npc.setSneaking(false);
+        npc.setEmberDesiredRunning(false);
+        npc.setEmberDesiredSprinting(false);
+        npc.setEmberWalkSpeedCap(walkSpeedCap);
+        npc.setEmberTrackSpeedScale(1.0F);
+        npc.setEmberMotionState(true, 1.0F, EmberParams.TURN_GAIN);
+        npc.setRunning(false);
+        npc.setSprinting(false);
+        writeStrafeControlVars(npc, dirX, dirY, false);
+    }
+
     private static void driveNativeCharacter(
             IsoNPC npc, float dirX, float dirY,
             boolean sneak, boolean runGear, boolean sprintGear,
@@ -1400,6 +1651,7 @@ public final class EmberLocomotionController {
             npc.set(PlayerStrafeState.STRAFE_SPEED, 1.0F);
             npc.setVariable("StrafeSpeed", 1.0F);
         }
+        npc.setEmberMoveDir(dirX, dirY);
         npc.playerMoveDir.set(dirX, dirY);
         npc.setJustMoved(true);
         npc.setMoving(true);
@@ -1411,13 +1663,16 @@ public final class EmberLocomotionController {
         npc.setEmberMotionState(true, animScalar, turnGain);
         npc.setRunning(runGear);
         npc.setSprinting(sprintGear);
+        writeStrafeControlVars(npc, dirX, dirY, runGear);
+    }
 
+    private static void writeStrafeControlVars(IsoNPC npc, float dirX, float dirY, boolean runGear) {
         AIComponent ai = npc.tryGetECSComponent(AIComponent.class);
         if (ai != null && ai.getHumanControlVars() != null) {
             AIBrainPlayerControlVars vars = ai.getHumanControlVars();
             vars.justMoved = true;
             vars.running = runGear;
-            float animRad = npc.getDirectionAngleRadians();
+            float animRad = npc.getDirectionAngleRadians() + (float) (Math.PI * 0.5);
             try {
                 if (npc.hasAnimationPlayer() && npc.getAnimationPlayer() != null) {
                     animRad = npc.getAnimationPlayer().getRenderedAngle();
@@ -1434,6 +1689,7 @@ public final class EmberLocomotionController {
 
     private static void applyZeroMoveInput(IsoNPC npc) {
         if (npc == null) return;
+        npc.clearEmberMoveDir();
         npc.playerMoveDir.set(0.0F, 0.0F);
         npc.setJustMoved(false);
         npc.setMoving(false);

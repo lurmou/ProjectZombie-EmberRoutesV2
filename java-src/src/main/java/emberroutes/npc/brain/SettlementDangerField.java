@@ -12,10 +12,11 @@ import zombie.iso.areas.isoregion.regions.IWorldRegion;
 import zombie.iso.areas.isoregion.regions.IsoWorldRegion;
 
 /**
- * 轻量据点危险场评估器（250ms 共享采样缓存 + 14 格粗筛 + {@code IsoRegions} {@code isEnclosed()} 室内避险锚点定位）。
+ * 轻量据点危险场评估器（0.25s 共享采样缓存 + 14 格粗筛 + {@code IsoRegions} {@code isEnclosed()} 室内避险锚点定位）。
  */
 public final class SettlementDangerField {
-    private static final long SCAN_INTERVAL_MS = 250L;
+    private static final double SCAN_INTERVAL_SIM_SEC = 0.25;
+    private static final double DIRECTOR_FEED_TTL_SIM_SEC = 0.30;
     private static final float THREAT_RADIUS = 11.5F;
     private static final float THREAT_Z_TOL = 1.5F;
     private static final int MAX_ZOMBIE_SAMPLES = 256;
@@ -24,13 +25,68 @@ public final class SettlementDangerField {
     private static final float[] Z_Y = new float[MAX_ZOMBIE_SAMPLES];
     private static final float[] Z_Z = new float[MAX_ZOMBIE_SAMPLES];
     private static int cachedCount;
-    private static long lastScanMs;
+    private static double lastScanSimSec = -10.0;
+
+    private static float latestClusterX;
+    private static float latestClusterY;
+    private static float latestClusterZ;
+    private static int latestClusterCount;
+    private static double directorFeedUntilSimSec = -10.0;
 
     private SettlementDangerField() {}
 
-    public static void reset() {
+    public static synchronized void reset() {
         cachedCount = 0;
-        lastScanMs = 0L;
+        lastScanSimSec = -10.0;
+        latestClusterCount = 0;
+        directorFeedUntilSimSec = -10.0;
+    }
+
+    /** 由集中式战术导演每 80ms 写入粗筛与聚类的存活威胁点（统一使用 {@code simTimeSec}，避免 3x 倍速时钟域错位）。 */
+    public static synchronized void ingestDirectorThreats(
+            double simTimeSec,
+            float[] xs,
+            float[] ys,
+            float[] zs,
+            int count,
+            boolean hasCluster,
+            float clusterX,
+            float clusterY,
+            float clusterZ,
+            int clusterCount) {
+        int n = Math.max(0, Math.min(MAX_ZOMBIE_SAMPLES, count));
+        for (int i = 0; i < n; i++) {
+            Z_X[i] = xs[i];
+            Z_Y[i] = ys[i];
+            Z_Z[i] = zs[i];
+        }
+        cachedCount = n;
+        lastScanSimSec = simTimeSec;
+        directorFeedUntilSimSec = simTimeSec + DIRECTOR_FEED_TTL_SIM_SEC;
+        if (hasCluster) {
+            latestClusterX = clusterX;
+            latestClusterY = clusterY;
+            latestClusterZ = clusterZ;
+            latestClusterCount = clusterCount;
+        } else {
+            latestClusterCount = 0;
+        }
+    }
+
+    public static synchronized int getLatestClusterCount() {
+        return latestClusterCount;
+    }
+
+    public static synchronized float getLatestClusterX() {
+        return latestClusterX;
+    }
+
+    public static synchronized float getLatestClusterY() {
+        return latestClusterY;
+    }
+
+    public static synchronized float getLatestClusterZ() {
+        return latestClusterZ;
     }
 
     /** 刷新全据点周边存活丧尸缓存，并以 O(N_sample) 无堆分配判定当前 NPC 是否处于直接威胁半径内。 */
@@ -42,9 +98,9 @@ public final class SettlementDangerField {
             }
             return;
         }
-        long now = System.currentTimeMillis();
-        if (now - lastScanMs >= SCAN_INTERVAL_MS) {
-            refreshSamples(now);
+        double nowSim = ctx.simTime;
+        if (nowSim > directorFeedUntilSimSec && (nowSim - lastScanSimSec) >= SCAN_INTERVAL_SIM_SEC) {
+            refreshSamples(nowSim);
         }
 
         IsoNPC npc = ctx.npc;
@@ -97,11 +153,11 @@ public final class SettlementDangerField {
         findSafeAnchor(npc, ctx);
     }
 
-    private static synchronized void refreshSamples(long nowMs) {
-        if (nowMs - lastScanMs < SCAN_INTERVAL_MS) {
+    private static synchronized void refreshSamples(double nowSim) {
+        if ((nowSim - lastScanSimSec) < SCAN_INTERVAL_SIM_SEC) {
             return;
         }
-        lastScanMs = nowMs;
+        lastScanSimSec = nowSim;
         cachedCount = 0;
         IsoCell cell = IsoWorld.instance != null ? IsoWorld.instance.currentCell : null;
         if (cell == null) {

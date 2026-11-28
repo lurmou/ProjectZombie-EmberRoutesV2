@@ -266,6 +266,13 @@ function EmberRoutesJava.isNpcAnimRecorderActive(npcId) end
 ---@return string
 function EmberRoutesJava.toggleNpcAnimRecorder(npcId) end
 
+---@return boolean
+function EmberRoutesJava.isAllNpcAnimRecorderEnabled() end
+
+---@param enabled boolean
+---@return string
+function EmberRoutesJava.setAllNpcAnimRecorderEnabled(enabled) end
+
 ---@param obj any
 ---@return boolean
 function EmberRoutesJava.isSittableFurniture(obj) end
@@ -309,6 +316,15 @@ function EmberRoutesJava.assignNpcToSettlement(npcId, settlementId) end
 ---@param npcId string
 ---@return string
 function EmberRoutesJava.getNpcAssignedSettlement(npcId) end
+
+---@param npcId string
+---@param guard boolean
+---@return boolean
+function EmberRoutesJava.setNpcGuardDuty(npcId, guard) end
+
+---@param npcId string
+---@return boolean
+function EmberRoutesJava.isNpcGuardDuty(npcId) end
 
 ---@param settlementId string
 ---@return number
@@ -473,4 +489,17 @@ function EmberRoutesJava.listSquadMembers() end
 ---@param npcId string
 ---@return any
 function EmberRoutesJava.getNpcPortraitTexture(npcId) end
+
+---@return boolean
+function EmberRoutesJava.isCombatDiagEnabled() end
+
+---@param enabled boolean
+---@return boolean
+function EmberRoutesJava.setCombatDiagEnabled(enabled) end
+
+---@return table
+function EmberRoutesJava.getCombatDebugSnapshot() end
+
+---@return string
+function EmberRoutesJava.dumpCombatDebugSnapshot() end
 

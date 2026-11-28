@@ -4,15 +4,28 @@ import emberroutes.npc.brain.BrainContext;
 import emberroutes.npc.brain.BrainRouter;
 import emberroutes.npc.brain.TempPropHelper;
 import emberroutes.npc.brain.VehicleCoRideHelper;
+import emberroutes.npc.combat.B42CombatRuntime;
+import emberroutes.npc.combat.CombatHookContext;
+import emberroutes.npc.combat.EmberSquadDirector;
+import emberroutes.npc.combat.NpcVirtualAim;
 import emberroutes.npc.perception.NpcPerception;
+import java.util.ArrayList;
 import java.util.List;
 import zombie.GameTime;
 import zombie.Lua.LuaEventManager;
 import zombie.UpdateSchedulerSimulationLevel;
+import zombie.ai.states.BumpedState;
+import zombie.ai.states.PlayerGetUpState;
+import zombie.ai.states.PlayerHitReactionPVPState;
+import zombie.ai.states.PlayerHitReactionState;
 import zombie.ai.states.PlayerStrafeState;
+import zombie.ai.states.SwipeStatePlayer;
 import zombie.characters.IsoGameCharacter;
 import zombie.characters.IsoPlayer;
+import zombie.characters.IsoZombie;
 import zombie.characters.SurvivorDesc;
+import zombie.characters.component.AIComponent;
+import zombie.core.physics.BallisticsController;
 import zombie.core.skinnedmodel.advancedanimation.AdvancedAnimator;
 import zombie.core.skinnedmodel.advancedanimation.AnimLayer;
 import zombie.core.skinnedmodel.advancedanimation.LiveAnimNode;
@@ -21,9 +34,11 @@ import zombie.iso.IsoCamera;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoGridSquare;
 import zombie.iso.IsoMovingObject;
+import zombie.iso.LosUtil;
 import zombie.iso.Vector2;
 import zombie.iso.sprite.IsoReticle;
 import zombie.iso.sprite.IsoReticleMode;
+import zombie.ui.UIManager;
 
 /**
  * 余烬商路非玩家槽 NPC 物理躯壳（IsoPlayer 子类）：
@@ -42,10 +57,16 @@ public final class IsoNPC extends IsoPlayer {
     private final NpcPerception perception;
     private final BrainRouter brain = new BrainRouter();
     private final BrainContext brainContext;
+    private final NpcVirtualAim virtualAim = new NpcVirtualAim();
+    private final BallisticsController.AimingVectorParameters npcAimingVectorParams =
+            new BallisticsController.AimingVectorParameters();
+    private final Vector2 virtualAimTempVec = new Vector2();
 
     private boolean attached;
     private boolean runningMode;
     private boolean forceLocalForRootMotion;
+    private boolean forceLocalForCombat;
+    private int lastAttackerZombieId = -1;
 
     private volatile boolean nativeSmoothPathUnlock = true;
     private boolean emberControlActive;
@@ -58,6 +79,9 @@ public final class IsoNPC extends IsoPlayer {
     private boolean inPreMovementRatesPhase;
     private float emberAnimSpeedScalar = 1.0F;
     private float emberTurnDelta = EmberParams.TURN_GAIN;
+    private boolean emberHasMoveDir;
+    private float emberDesiredMoveX;
+    private float emberDesiredMoveY;
 
     private boolean manualMovementClampActive;
     private float manualMovementClampX;
@@ -83,6 +107,7 @@ public final class IsoNPC extends IsoPlayer {
         setGodMod(false);
         setInvisible(false);
         setNoDamage(false);
+        setVariable("hitpvp", false);
         if (getFitness() != null) {
             getFitness().init();
         }
@@ -92,7 +117,7 @@ public final class IsoNPC extends IsoPlayer {
     public void registerECSComponents() {
         super.registerECSComponents();
         // 0-@Patch 屏蔽真玩家键鼠/手柄输入窜扰，避免同车或车旁集体抢 E / 瞄准 / 换弹 / 隐藏光标
-        this.setECSComponent(new NpcNullInputComponent());
+        this.setECSComponent(new NpcNullInputComponent(this));
     }
 
     public NpcNullInputComponent getNullInputComponent() {
@@ -160,9 +185,22 @@ public final class IsoNPC extends IsoPlayer {
             this.emberWalkSpeedCap = -1.0F;
             this.emberTrackSpeedScale = 1.0F;
             this.emberAnimSpeedScalar = 1.0F;
+            clearEmberMoveDir();
             clearManualMovementClamp();
             applyEmberTrackSpeedScale();
         }
+    }
+
+    void setEmberMoveDir(float x, float y) {
+        this.emberHasMoveDir = true;
+        this.emberDesiredMoveX = x;
+        this.emberDesiredMoveY = y;
+    }
+
+    void clearEmberMoveDir() {
+        this.emberHasMoveDir = false;
+        this.emberDesiredMoveX = 0.0F;
+        this.emberDesiredMoveY = 0.0F;
     }
 
     public void setEmberMotionState(boolean moving, float animSpeedScalar, float turnDelta) {
@@ -309,11 +347,42 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public boolean isLocalPlayer() {
-        return forceLocalForRootMotion;
+        return forceLocalForRootMotion || forceLocalForCombat;
+    }
+
+    public boolean isForceLocalForCombat() {
+        return forceLocalForCombat;
+    }
+
+    public void setForceLocalForCombat(boolean forceLocalForCombat) {
+        this.forceLocalForCombat = forceLocalForCombat;
+    }
+
+    public NpcVirtualAim getVirtualAim() {
+        return virtualAim;
+    }
+
+    public boolean hasVirtualAim() {
+        return virtualAim.isActive();
+    }
+
+    public void clearVirtualAim() {
+        virtualAim.clear();
+    }
+
+    public int getVirtualReticleScreenX() {
+        return emberroutes.npc.combat.B42CombatRuntime.projectReticleScreenX(virtualAim);
+    }
+
+    public int getVirtualReticleScreenY() {
+        return emberroutes.npc.combat.B42CombatRuntime.projectReticleScreenY(virtualAim);
     }
 
     @Override
     public boolean isNpc() {
+        if (forceLocalForCombat) {
+            return false;
+        }
         if (nativeSmoothPathUnlock) {
             String tn = Thread.currentThread().getName();
             if ("PathfindNativeThread".equals(tn) || "PolyPathThread".equals(tn)) {
@@ -324,11 +393,48 @@ public final class IsoNPC extends IsoPlayer {
     }
 
     @Override
+    public void setInitiateAttack(boolean initiate) {
+        super.setInitiateAttack(initiate);
+        AIComponent ai = tryGetECSComponent(AIComponent.class);
+        if (ai != null && ai.getHumanControlVars() != null) {
+            ai.getHumanControlVars().initiateAttack = initiate;
+        }
+    }
+
+    @Override
+    public void setIsAiming(boolean isAiming) {
+        super.setIsAiming(isAiming);
+        this.isCharging = isAiming;
+        AIComponent ai = tryGetECSComponent(AIComponent.class);
+        if (ai != null && ai.getHumanControlVars() != null) {
+            ai.getHumanControlVars().aiming = isAiming;
+        }
+    }
+
+    @Override
+    public void clearHandToHandAttack() {
+        super.clearHandToHandAttack();
+        setDoShove(false);
+        if (getAttackVars() != null) {
+            getAttackVars().clear();
+        }
+        AIComponent ai = tryGetECSComponent(AIComponent.class);
+        if (ai != null && ai.getHumanControlVars() != null) {
+            ai.getHumanControlVars().melee = false;
+            ai.getHumanControlVars().initiateAttack = false;
+        }
+    }
+
+    @Override
     public boolean isJustMoved() {
-        if (emberControlActive && emberMoving
-                && playerMoveDir != null
-                && (playerMoveDir.x != 0.0F || playerMoveDir.y != 0.0F)) {
-            return true;
+        if (emberControlActive && emberMoving) {
+            if (playerMoveDir != null && (playerMoveDir.x != 0.0F || playerMoveDir.y != 0.0F)) {
+                return true;
+            }
+            AIComponent ai = tryGetECSComponent(AIComponent.class);
+            if (ai != null && ai.getHumanControlVars() != null && ai.getHumanControlVars().justMoved) {
+                return true;
+            }
         }
         return super.isJustMoved();
     }
@@ -365,6 +471,12 @@ public final class IsoNPC extends IsoPlayer {
     public void updateMovementRates() {
         inPreMovementRatesPhase = false;
         super.updateMovementRates();
+        if (emberControlActive && emberMoving && emberHasMoveDir && playerMoveDir != null) {
+            float spd = isSprinting() ? 1.5F : (isRunning() ? 1.0F : 0.5F);
+            playerMoveDir.set(emberDesiredMoveX * spd, emberDesiredMoveY * spd);
+        } else if (emberControlActive && !emberMoving && playerMoveDir != null) {
+            playerMoveDir.set(0.0F, 0.0F);
+        }
     }
 
     @Override
@@ -374,7 +486,7 @@ public final class IsoNPC extends IsoPlayer {
             set(PlayerStrafeState.STRAFE_SPEED, 1.0F);
             setVariable("StrafeSpeed", 1.0F);
         }
-        if (emberControlActive && emberMoving) {
+        if (emberControlActive && emberMoving && !isAiming()) {
             float physCap = getVariableFloat("WalkSpeed", 1.0F);
             float effCap = (emberWalkSpeedCap >= 0.0F) ? Math.min(physCap, emberWalkSpeedCap) : physCap;
             float minFloor = (emberWalkSpeedCap >= 0.0F && emberWalkSpeedCap < 0.05F) ? 0.0F : 0.05F;
@@ -389,6 +501,17 @@ public final class IsoNPC extends IsoPlayer {
             return true;
         }
         return super.isStrafing();
+    }
+
+    @Override
+    public boolean isWeaponReady() {
+        if (isHandModelOverriddenByCurrentCharacterAction()) {
+            return false;
+        }
+        if (getPrimaryHandItem() == null) {
+            return true;
+        }
+        return super.isWeaponReady();
     }
 
     @Override
@@ -425,11 +548,103 @@ public final class IsoNPC extends IsoPlayer {
 
     @Override
     public Vector2 getAimVector(Vector2 vec) {
+        if (virtualAim.isActive()) {
+            return vec.set(virtualAim.getAimDirX(), virtualAim.getAimDirY());
+        }
         return vec.set(getForwardDirectionX(), getForwardDirectionY());
     }
 
     @Override
     public void setAngleFromAim() {
+        if (virtualAim.isActive()) {
+            Vector2 dir = virtualAimTempVec.set(virtualAim.getAimDirX(), virtualAim.getAimDirY());
+            if (dir.getLengthSquared() > 1.0E-6F) {
+                dir.normalize();
+                BallisticsController bc = getBallisticsController();
+                if (bc != null && bc.updateAimingVector(this, npcAimingVectorParams)) {
+                    setTargetVerticalAimAngle(npcAimingVectorParams.desiredForwardPitchRads * (180.0F / (float) Math.PI));
+                } else {
+                    setTargetVerticalAimAngle(virtualAim.getPitchDegrees());
+                }
+                setForwardDirection(dir);
+            }
+        }
+    }
+
+    @Override
+    public void setHitReaction(String hitReaction) {
+        if (hitReaction != null && !hitReaction.isEmpty() && !getVariableBoolean("hitpvp")) {
+            setVariable("hitpvp", false);
+        }
+        super.setHitReaction(hitReaction);
+        if (hitReaction != null && !hitReaction.isEmpty() && !isDead()) {
+            if (brainContext != null && getAttackedBy() instanceof IsoZombie z && !z.isDead()) {
+                this.lastAttackerZombieId = z.getID();
+                EmberSquadDirector.getInstance().broadcastAllyDistress(
+                        z.getID(),
+                        z.getX(),
+                        z.getY(),
+                        z.getZ(),
+                        false,
+                        Math.round(brainContext.simTime * 1000.0));
+            }
+        }
+    }
+
+    /** 是否已由原版 ActionContext 切入 PlayerHitReactionState / PlayerHitReactionPVPState 受击硬直态。 */
+    public boolean isInVanillaHitReactionState() {
+        return isCurrentState(PlayerHitReactionState.instance())
+                || isCurrentState(PlayerHitReactionPVPState.instance());
+    }
+
+    /** 是否处于原版受击状态机或其 1 帧进入过渡窗口。 */
+    public boolean isInHitInterrupt(double simTime) {
+        return isInVanillaHitReactionState() || hasHitReaction();
+    }
+
+    /** 是否已进入不可行动的被撞/倒地/起身原版状态。 */
+    public boolean isInEnteredIncapacitatedState() {
+        return isCurrentState(BumpedState.instance())
+                || isCurrentState(PlayerGetUpState.instance())
+                || isOnFloor()
+                || isKnockedDown();
+    }
+
+    /** 是否处于被撞、倒地或起身（含 wasBumped 过渡帧），期间严禁发起任何攻击/推搡。 */
+    public boolean isInCombatIncapacitatedState() {
+        return isInEnteredIncapacitatedState() || isBumped();
+    }
+
+    /** 统一攻击禁入判定：受击硬直或被撞/倒地/起身期间均不可发起攻击。 */
+    public boolean isCombatAttackBlocked(double simTime) {
+        return isInHitInterrupt(simTime) || isInCombatIncapacitatedState();
+    }
+
+    /** 是否正在执行近战挥击、推搡或踩踏动作动画。 */
+    public boolean isPerformingHostileSwing() {
+        return !isDead()
+                && !isInVanillaHitReactionState()
+                && !isInCombatIncapacitatedState()
+                && (isCurrentState(SwipeStatePlayer.instance())
+                        || isPerformingAttackAnimation()
+                        || isPerformingShoveAnimation()
+                        || isPerformingStompAnimation());
+    }
+
+    public int getLastAttackerZombieId() {
+        return lastAttackerZombieId;
+    }
+
+    public void resetLastAttackerZombieId() {
+        this.lastAttackerZombieId = -1;
+    }
+
+    /** 释放战斗态全部瞬态控制权与 C++ 弹道控制器（死亡/离屏/注销/重制统一收口）。 */
+    public void cleanupCombatResources() {
+        B42CombatRuntime.cleanupNpcCombat(this, null);
+        try {
+            releaseBallisticsController();
+        } catch (Throwable ignored) {}
     }
 
     @Override
@@ -472,6 +687,7 @@ public final class IsoNPC extends IsoPlayer {
         posture.forceImmediateReset(this, "DEATH", true);
         follow.stop(this, "DEATH");
         locomotion.interrupt(this, "DEATH");
+        cleanupCombatResources();
         StopAllActionQueue();
         if (isAsleep()) {
             setAsleep(false);
@@ -499,8 +715,17 @@ public final class IsoNPC extends IsoPlayer {
         IsoGameCharacter cameraBefore = IsoCamera.getCameraCharacter();
         IsoReticle reticle = IsoReticle.getInstance(getIndex());
         IsoReticleMode reticleBefore = reticle != null ? reticle.getTargetReticleMode() : null;
+        int savedGameSpeed = -1;
+        if (UIManager.speedControls != null) {
+            savedGameSpeed = UIManager.speedControls.getCurrentGameSpeed();
+        }
+        CombatHookContext.enterNpcUpdate();
         try {
             if (!isDead()) {
+                NpcNullInputComponent nullInput = getNullInputComponent();
+                if (nullInput != null) {
+                    nullInput.tickTime(brainContext.simTime);
+                }
                 posture.beforeUpdate(this);
                 gaze.beforeUpdate(this);
                 if (!posture.isBlockingLocomotion()) {
@@ -512,7 +737,13 @@ public final class IsoNPC extends IsoPlayer {
             inPreMovementRatesPhase = true;
             super.update();
         } finally {
+            CombatHookContext.exitNpcUpdate();
             inPreMovementRatesPhase = false;
+            if (savedGameSpeed > 0
+                    && UIManager.speedControls != null
+                    && UIManager.speedControls.getCurrentGameSpeed() != savedGameSpeed) {
+                UIManager.speedControls.SetCurrentGameSpeed(savedGameSpeed);
+            }
             IsoPlayer.setInstance(playerBefore);
             if (cameraBefore == null) {
                 IsoCamera.clearCameraCharacter();
@@ -523,6 +754,77 @@ public final class IsoNPC extends IsoPlayer {
                 reticle.setTargetReticleMode(reticleBefore);
             }
         }
+    }
+
+    /**
+     * 与原版 {@code IsoPlayer.updateLOS()} 保持逐帧调用契约（通过 {@code cell.getZombieList()} 与无状态
+     * {@link LosUtil#lineClear} 隔离本地玩家渲染透明度、惊吓音效与强制 1x 降速副作用），禁止节流，
+     * 确保 {@code IsoZombie.spottedNew/Old} 按真实单帧时间步长累加 {@code targetSeenTime} 且
+     * {@code closestZombie}/{@code numChasingZombies} 逐帧准确。
+     */
+    @Override
+    public void updateLOS() {
+        this.spottedList.clear();
+        this.stats.numVisibleZombies = 0;
+        this.stats.setLastNumberChasingZombies(this.stats.numChasingZombies);
+        this.stats.numChasingZombies = 0;
+        this.closestZombie = 1000000.0F;
+
+        IsoGridSquare npcSq = getCurrentSquare();
+        IsoCell cell = getCell();
+        if (npcSq == null || cell == null || isDead()) {
+            this.stats.lastNumVisibleZombies = 0;
+            return;
+        }
+        this.spottedList.add(this);
+
+        float locX = getX();
+        float locY = getY();
+        float locZ = getZ();
+        float rawViewDist = GameTime.getInstance() != null ? GameTime.getInstance().getViewDist() : 20.0F;
+        float viewDist = (Float.isFinite(rawViewDist) && rawViewDist >= 10.0F) ? rawViewDist : 20.0F;
+        float viewDistSq = viewDist * viewDist;
+
+        ArrayList<IsoZombie> zombies = cell.getZombieList();
+        if (zombies != null) {
+            for (int i = 0, n = zombies.size(); i < n; i++) {
+                IsoZombie z = zombies.get(i);
+                if (z == null || z.isDead() || z.isUseless() || z.isReanimatedForGrappleOnly()) {
+                    continue;
+                }
+                if (Math.abs(z.getZ() - locZ) > 2.0F) {
+                    continue;
+                }
+                float dx = z.getX() - locX;
+                float dy = z.getY() - locY;
+                float distSq = dx * dx + dy * dy;
+                if (distSq > viewDistSq) {
+                    continue;
+                }
+                IsoGridSquare zSq = z.getCurrentSquare();
+                if (zSq == null) {
+                    continue;
+                }
+                if (zSq != npcSq) {
+                    LosUtil.TestResults los = LosUtil.lineClear(
+                            cell,
+                            npcSq.getX(), npcSq.getY(), npcSq.getZ(),
+                            zSq.getX(), zSq.getY(), zSq.getZ(),
+                            false);
+                    if (los == LosUtil.TestResults.Blocked || los == LosUtil.TestResults.ClearThroughClosedDoor) {
+                        continue;
+                    }
+                }
+                this.TestZombieSpotPlayer(z);
+                if (!z.ghost && !z.isFakeDead()) {
+                    this.spottedList.add(z);
+                    if (z.getZ() >= locZ - 1.0F && distSq < 49.0F && zSq.getRoom() == npcSq.getRoom()) {
+                        this.stats.numVisibleZombies++;
+                    }
+                }
+            }
+        }
+        this.stats.lastNumVisibleZombies = this.stats.numVisibleZombies;
     }
 
     @Override
@@ -562,6 +864,14 @@ public final class IsoNPC extends IsoPlayer {
         }
     }
 
+    @Override
+    public boolean shouldAnimRecorderBeActive() {
+        if (isDead() || !attached || getCurrentSquare() == null || IsoPlayer.getInstance() == null) {
+            return false;
+        }
+        return super.shouldAnimRecorderBeActive();
+    }
+
     /** 释放挂载到该 NPC 的原版动画调试监控器与录像器句柄，防止死亡/离屏/注销后泄漏。 */
     public void detachAnimDebugTools() {
         try {
@@ -570,10 +880,8 @@ public final class IsoNPC extends IsoPlayer {
             }
         } catch (Throwable ignored) {}
         try {
-            if (isAnimationRecorderActive()) {
-                setAnimRecorderActive(false, false);
-                closeAnimationRecorder();
-            }
+            setAnimRecorderActive(false, false);
+            closeAnimationRecorder();
         } catch (Throwable ignored) {}
     }
 }

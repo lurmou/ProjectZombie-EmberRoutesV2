@@ -1280,7 +1280,40 @@ public final class VerifyModule1 {
                     }
                 }
             }
-            check(patchCount == 27, "Expected exact 27 @Patch classes in root package 'emberroutes', got " + patchCount);
+            check(patchCount == 48, "Expected exact 48 @Patch classes in root package 'emberroutes', got " + patchCount);
+            // 验证 EMB-30 C3/C7 运行时反射目标在 B42 JAR 中稳定存在
+            Class<?> combatMgrCls = Class.forName("zombie.CombatManager", false, VerifyModule1.class.getClassLoader());
+            combatMgrCls.getDeclaredMethod("checkPVP", zombie.iso.IsoMovingObject.class, zombie.iso.IsoMovingObject.class, boolean.class);
+            Class<?> ballisticsCls = Class.forName("zombie.core.physics.BallisticsController", false, VerifyModule1.class.getClassLoader());
+            check(!zombie.characters.IsoPlayer.getCoopPVP(), "Default SP CoopPVP should start false");
+            check(!emberroutes.npc.combat.CombatHookContext.isFriendlyPvpBlocked(null, null),
+                    "Null checkPVP inputs must fail open (false)");
+            check(!emberroutes.npc.combat.CombatHookContext.isFriendlyPair(null, null),
+                    "Null CombatHookContext.isFriendlyPair must return false");
+            emberroutes.npc.combat.CombatHookContext.resetAll();
+            check(!emberroutes.npc.combat.CombatHookContext.isNpcCombatActive()
+                            && !emberroutes.npc.combat.CombatHookContext.isNpcUpdateOrCombatActive(),
+                    "CombatHookContext stacks must start empty after resetAll");
+            emberroutes.npc.combat.CombatHookContext.enterNpcUpdate();
+            check(emberroutes.npc.combat.CombatHookContext.isNpcUpdateOrCombatActive()
+                            && !emberroutes.npc.combat.CombatHookContext.isNpcCombatActive(),
+                    "enterNpcUpdate should activate update flag only");
+            emberroutes.npc.combat.CombatHookContext.enterNpcCombat();
+            check(emberroutes.npc.combat.CombatHookContext.isNpcCombatActive(),
+                    "enterNpcCombat should activate combat flag");
+            emberroutes.npc.combat.CombatHookContext.exitNpcCombat();
+            check(!emberroutes.npc.combat.CombatHookContext.isNpcCombatActive(),
+                    "exitNpcCombat should balance combat flag");
+            emberroutes.npc.combat.CombatHookContext.exitNpcUpdate();
+            check(!emberroutes.npc.combat.CombatHookContext.isNpcUpdateOrCombatActive(),
+                    "exitNpcUpdate should restore balanced idle flags");
+            check(emberroutes.npc.combat.B42CombatRuntime.classifyTarget(null) == 0,
+                    "classifyTarget(null) must return 0");
+            emberroutes.npc.combat.GuardCombatNode guardProbe = new emberroutes.npc.combat.GuardCombatNode();
+            emberroutes.npc.brain.BrainContext guardCtx = new emberroutes.npc.brain.BrainContext("guard_test");
+            guardCtx.guardDuty = false;
+            check(!guardProbe.canEnter(guardCtx), "GuardCombatNode must refuse entry when guardDuty is false");
+            check(ballisticsCls.getDeclaredField("isoGameCharacter") != null, "BallisticsController.isoGameCharacter field missing");
             // 验证 NpcManager 防空写存档门闩：未成功 loadFromCurrentSave 前，saveAllToDisk 必须拒绝覆写返回 false
             NpcManager.reset();
             check(!NpcManager.isLoadedForCurrentSave(), "After reset, loadedForCurrentSave must be false");

@@ -34,9 +34,9 @@
   * **C2（`SwipeStatePlayer.enter` 强设 1x 倍速）**：`SwipeStatePlayer.java:164-166` 无条件调用 `UIManager.speedControls.SetCurrentGameSpeed(1)`；必须在 `IsoNPC.update()` 用 `try/finally` 保存并恢复游戏倍速；
   * **C3（`BallisticsController` 绑死真玩家准星与屏幕高亮）**：`BallisticsController.java:95-102` 读 `AimingReticle` 鼠标坐标且 `CombatManager.java:2188,2235,2401` 校验 `isValidTarget` 并调 `highlightTarget`；须由 `Patch_BallisticsController` 注入 `NPCVirtualAim` 虚拟准星，并在 `Patch_CombatManager` 对 `IsoNPC` 屏蔽 `highlightTarget`；
   * **C4（`CombatManager` 抖动玩家 Moodles）**：`CombatManager.java:949-1058` 在 NPC 疲惫挥刀时调用 `MoodlesUI.getInstance().wiggle`，须对 `IsoNPC` 屏蔽；
-  * **C5（`UIManager.getPicked` 与 `DoAttack` 静态主角指针）**：`SwipeStatePlayer.java:136-145` 覆盖 `attackTargetSquare`、`IsoLivingCharacter.java:118-145` 引用 `IsoPlayer.getInstance()` 扣子弹；发招前后须锁死目标格，且**仅在无 Lua 事件派发的最小扣弹字节码点用 `@Patch` 替换为 `this`（严禁在整个 `DoAttack()` 外层包裹切换 `IsoPlayer.setInstance(npc)` 污染第三方 Lua 事件 `getPlayer()`）**；
-  * **C6（地面踩踏受 `AutoProneAtk` 玩家设置阻塞）**：`SwipeStatePlayer.java:637-639` 检查 `!owner.isManualFloorAtkButtonDown()`；`IsoNPC` 须覆写该方法返回状态树托管的 `combatStompIntent`；
-  * **C7（单人 `checkPVP` 天然免友伤）**：`CombatManager.java:1495-1565` 对 `IsoPlayer` 子类间在单人 `coopPVP == false` 下天然返回 `false`（100% 免疫队友误伤），由 JUnit 单测锁死该契约。
+  * **C5（`UIManager.getPicked` 与 `DoAttack` 静态主角指针）**：`SwipeStatePlayer.java:136-145` 在 `isLocalPlayer()` 时覆盖 `attackTargetSquare`（须在 `SwipeStatePlayerEnter` 按 `savedTargetSq` 保住预先锁定的目标格）；`IsoPlayer.updateInternal2:2292` / `IsoLivingCharacter.java:118-145` 中通过按 `this` 与 `isNpc()` 走非静态主键扣弹及发射结算（严禁在整个 `DoAttack()` 外层切换 `IsoPlayer.setInstance(npc)` 污染第三方 Lua 事件 `getPlayer()`）；
+  * **C6（地面踩踏受 `AutoProneAtk` 玩家设置阻塞）**：`SwipeStatePlayer.java:637-639` 检查 `!owner.isManualFloorAtkButtonDown()`；`IsoNPC` 须通过 `NpcNullInputComponent` 武装带 TTL 的 `combatManualFloorAtkIntent` / `combatMeleeButtonIntent` 直到下一帧 `SwipeStatePlayerEnter.exit()` 消费；
+  * **C7（`CombatCheckPvp` 硬阻断友伤）**：单人原版 `CombatManager.checkPVP` 对非玩家/NPC 在部分标志组合下由 `Patch_CombatHooks.CombatCheckPvp` 硬锁 `false` 阻断全部玩家↔NPC、NPC↔NPC 友伤（含霰弹散射），由 `CheckPvpContractTest` 锁定该契约。
 
 ---
 

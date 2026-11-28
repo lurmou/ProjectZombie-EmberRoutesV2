@@ -13,6 +13,12 @@ public final class EmberLeaderTrail {
     public static final float SPACING_SQ = 0.0625F;
     /** 断段阈值平方：2.5^2 = 6.25 格（瞬移/传送/载具位移不插值连线）。 */
     public static final float JUMP_SQ = 6.25F;
+    /** 领队停步判据超时（ms）：单一权威停步时钟，消除多模块各自计时导致的错相改标。 */
+    public static final long LEADER_STOP_TIMEOUT_MS = 240L;
+    /** 领队位移触发刷新停步时钟的最小步长平方（0.04^2 格）。 */
+    public static final float MOTION_EPS_SQ = 0.0016F;
+    /** 稳定航向弦回溯距离（格）：过滤斜走松键最后单帧 0.05m 刹车步长造成的 45° 甩尾。 */
+    public static final float STABLE_HEADING_LOOKBACK = 0.85F;
 
     private static final int MAX_LOCAL_PLAYERS = 4;
     private static final EmberLeaderTrail[] SHARED = new EmberLeaderTrail[MAX_LOCAL_PLAYERS];
@@ -20,11 +26,19 @@ public final class EmberLeaderTrail {
     private final float[] xs = new float[CAPACITY];
     private final float[] ys = new float[CAPACITY];
     private final int[] zs = new int[CAPACITY];
+    private final float[] headingSampleScratch = new float[4];
     private int head = -1;
     private int count;
     private float lastX;
     private float lastY;
     private int lastZ;
+    private float motionRefX;
+    private float motionRefY;
+    private int motionRefZ = Integer.MIN_VALUE;
+    private long lastMovedAtMs;
+    private float headingX;
+    private float headingY = 1.0F;
+    private boolean hasHeading;
     private WeakReference<Object> ownerRef;
 
     public static synchronized EmberLeaderTrail forLeader(int playerIndex, Object ownerIdentity) {
@@ -66,12 +80,50 @@ public final class EmberLeaderTrail {
     public void reset() {
         head = -1;
         count = 0;
+        motionRefX = 0.0F;
+        motionRefY = 0.0F;
+        motionRefZ = Integer.MIN_VALUE;
+        lastMovedAtMs = 0L;
+        headingX = 0.0F;
+        headingY = 1.0F;
+        hasHeading = false;
     }
 
     public void record(float x, float y, int floor) {
+        record(x, y, floor, System.currentTimeMillis());
+    }
+
+    public void record(float x, float y, int floor, long nowMs) {
         if (!Float.isFinite(x) || !Float.isFinite(y)) {
             return;
         }
+        if (motionRefZ == Integer.MIN_VALUE) {
+            motionRefX = x;
+            motionRefY = y;
+            motionRefZ = floor;
+        } else if (floor != motionRefZ) {
+            motionRefX = x;
+            motionRefY = y;
+            motionRefZ = floor;
+            lastMovedAtMs = nowMs;
+            hasHeading = false;
+        } else {
+            float mdx = x - motionRefX;
+            float mdy = y - motionRefY;
+            float mSq = mdx * mdx + mdy * mdy;
+            if (mSq > MOTION_EPS_SQ) {
+                if (!hasHeading && mSq <= JUMP_SQ && mSq > 1.0E-5F) {
+                    float len = (float) Math.sqrt(mSq);
+                    headingX = mdx / len;
+                    headingY = mdy / len;
+                    hasHeading = true;
+                }
+                motionRefX = x;
+                motionRefY = y;
+                lastMovedAtMs = nowMs;
+            }
+        }
+
         if (count == 0) {
             push(x, y, floor);
             return;
@@ -81,6 +133,7 @@ public final class EmberLeaderTrail {
         float distSq = dx * dx + dy * dy;
         if (floor != lastZ || distSq > JUMP_SQ) {
             count = 0;
+            hasHeading = false;
             push(x, y, floor);
             return;
         }
@@ -88,6 +141,75 @@ public final class EmberLeaderTrail {
             return;
         }
         push(x, y, floor);
+        updateStableHeading(x, y);
+    }
+
+    public boolean isLeaderMoving(long nowMs) {
+        return lastMovedAtMs > 0L && (nowMs - lastMovedAtMs) < LEADER_STOP_TIMEOUT_MS;
+    }
+
+    public void forceStopped() {
+        lastMovedAtMs = 0L;
+    }
+
+    public void seedHeadingIfUnset(float fx, float fy) {
+        if (hasHeading) {
+            return;
+        }
+        float len = (float) Math.hypot(fx, fy);
+        if (len > 1.0E-3F) {
+            headingX = fx / len;
+            headingY = fy / len;
+            hasHeading = true;
+        }
+    }
+
+    public boolean getStableHeading(float[] outDir) {
+        if (!hasHeading || outDir == null || outDir.length < 2) {
+            return false;
+        }
+        outDir[0] = headingX;
+        outDir[1] = headingY;
+        return true;
+    }
+
+    private void updateStableHeading(float curX, float curY) {
+        if (sample(STABLE_HEADING_LOOKBACK, headingSampleScratch)) {
+            float cx = curX - headingSampleScratch[0];
+            float cy = curY - headingSampleScratch[1];
+            float lenSq = cx * cx + cy * cy;
+            if (lenSq >= 0.25F * 0.25F) {
+                float len = (float) Math.sqrt(lenSq);
+                headingX = cx / len;
+                headingY = cy / len;
+                hasHeading = true;
+                return;
+            }
+        }
+        if (sample(0.35F, headingSampleScratch)) {
+            float cx = curX - headingSampleScratch[0];
+            float cy = curY - headingSampleScratch[1];
+            float lenSq = cx * cx + cy * cy;
+            if (lenSq >= 0.20F * 0.20F) {
+                float len = (float) Math.sqrt(lenSq);
+                headingX = cx / len;
+                headingY = cy / len;
+                hasHeading = true;
+                return;
+            }
+        }
+        if (count >= 2) {
+            int oldestIdx = indexBack(count - 1);
+            float cx = curX - xs[oldestIdx];
+            float cy = curY - ys[oldestIdx];
+            float lenSq = cx * cx + cy * cy;
+            if (lenSq >= 0.25F * 0.25F) {
+                float len = (float) Math.sqrt(lenSq);
+                headingX = cx / len;
+                headingY = cy / len;
+                hasHeading = true;
+            }
+        }
     }
 
     /**

@@ -44,9 +44,6 @@ public final class EmberFollowController {
     private boolean holding;
     private boolean catchUpDirectLatched;
 
-    private float lastLeaderX;
-    private float lastLeaderY;
-    private int lastLeaderZ = Integer.MIN_VALUE;
     private float prevSampleLeaderX;
     private float prevSampleLeaderY;
     private int prevSampleLeaderZ = Integer.MIN_VALUE;
@@ -58,8 +55,10 @@ public final class EmberFollowController {
     private float accumNpcStep;
     private float lastDirX;
     private float lastDirY = 1.0F;
-    private long leaderMovedAtMs;
     private boolean leaderMoving;
+    private boolean prevLeaderMoving;
+    private boolean pendingConfigRealign;
+    private final float[] headingScratch = new float[2];
 
     private long nextPlanMs;
     private long lastRetargetMs;
@@ -132,13 +131,14 @@ public final class EmberFollowController {
         this.state = FollowState.FOLLOWING;
         this.holding = false;
         this.catchUpDirectLatched = false;
-        this.lastLeaderZ = Integer.MIN_VALUE;
         this.prevSampleLeaderZ = Integer.MIN_VALUE;
         this.prevSampleNpcZ = Integer.MIN_VALUE;
         this.speedWindowDt = 0.0F;
         this.accumLeaderStep = 0.0F;
         this.accumNpcStep = 0.0F;
         this.leaderMoving = false;
+        this.prevLeaderMoving = false;
+        this.pendingConfigRealign = false;
         this.nextPlanMs = 0L;
         this.lastRetargetMs = 0L;
         this.hasPlannedTarget = false;
@@ -173,6 +173,9 @@ public final class EmberFollowController {
         this.accumNpcStep = 0.0F;
         this.outsideVehicleForming = false;
         this.lastAppliedConfigVersion = -1L;
+        this.leaderMoving = false;
+        this.prevLeaderMoving = false;
+        this.pendingConfigRealign = false;
         resetCongestionSettle();
         this.gaitControl.reset();
         this.state = FollowState.INACTIVE;
@@ -249,6 +252,7 @@ public final class EmberFollowController {
         long cfgVer = SquadTacticalConfig.getVersion();
         if (cfgVer != lastAppliedConfigVersion) {
             lastAppliedConfigVersion = cfgVer;
+            pendingConfigRealign = true;
             holding = false;
             hasPlannedTarget = false;
             plannedSlotValidated = false;
@@ -274,7 +278,6 @@ public final class EmberFollowController {
 
         SquadTacticalConfig.OrderMode orderMode = SquadTacticalConfig.getOrderMode();
         boolean isHoldMode = (orderMode == SquadTacticalConfig.OrderMode.HOLD_POSITION && SquadTacticalConfig.hasHoldAnchor());
-        FormationType formation = SquadTacticalConfig.getFormation();
         FormationSpacing spacing = SquadTacticalConfig.getSpacing();
 
         float lx;
@@ -358,6 +361,10 @@ public final class EmberFollowController {
             }
         }
 
+        FormationType formation = isHoldMode
+                ? SquadTacticalConfig.getFormation()
+                : NpcManager.resolveEffectiveFormation(lx, ly, lz);
+
         long now = System.currentTimeMillis();
         float simDt = EmberLocomotionController.deltaSeconds();
         if (!isHoldMode) {
@@ -404,16 +411,26 @@ public final class EmberFollowController {
             }
 
             EmberLeaderTrail trail = EmberLeaderTrail.forLeader(leaderPlayerIndex, leader);
-            trail.record(lx, ly, lz);
-            updateLeaderMotion(leader, lx, ly, lz, now);
+            trail.record(lx, ly, lz, now);
+            trail.seedHeadingIfUnset(leader.getForwardDirectionX(), leader.getForwardDirectionY());
+            if (trail.getStableHeading(headingScratch)) {
+                lastDirX = headingScratch[0];
+                lastDirY = headingScratch[1];
+            } else {
+                seedDirFromLeader(leader);
+            }
 
-            if (outsideVehMode && leader.getVehicle() != null
-                    && Math.abs(leader.getVehicle().getCurrentSpeedKmHour()) <= 0.80F) {
-                leaderMoving = false;
-                gaitControl.resetLeaderSpeed();
-            } else if (leaderMoving && (now - leaderMovedAtMs) >= 240L) {
-                leaderMoving = false;
-                gaitControl.resetLeaderSpeed();
+            if (outsideVehMode && leader.getVehicle() != null) {
+                leaderMoving = Math.abs(leader.getVehicle().getCurrentSpeedKmHour()) > 0.80F;
+                if (!leaderMoving) {
+                    trail.forceStopped();
+                    gaitControl.resetLeaderSpeed();
+                }
+            } else {
+                leaderMoving = trail.isLeaderMoving(now);
+                if (!leaderMoving) {
+                    gaitControl.resetLeaderSpeed();
+                }
             }
             loco.setFollowSteerHint(leader, leaderMoving);
         } else {
@@ -423,6 +440,12 @@ public final class EmberFollowController {
             accumLeaderStep = 0.0F;
             accumNpcStep = 0.0F;
             loco.setFollowSteerHint(null, false);
+        }
+
+        boolean leaderJustStopped = prevLeaderMoving && !leaderMoving;
+        prevLeaderMoving = leaderMoving;
+        if (leaderMoving) {
+            pendingConfigRealign = false;
         }
 
         EmberLeaderTrail trail = (!isHoldMode && leader != null)
@@ -507,7 +530,7 @@ public final class EmberFollowController {
         boolean staleStairExitSlot = sameFloor && hasPlannedTarget && plannedTargetZ == lz
                 && EmberStairDiag.isStairOrExitTile((int) Math.floor(plannedTargetX), (int) Math.floor(plannedTargetY), lz)
                 && Math.hypot(plannedTargetX - lx, plannedTargetY - ly) > 1.15F;
-        if (!hasPlannedTarget || now >= nextPlanMs || plannedTargetZ != lz || staleStairExitSlot) {
+        if (!hasPlannedTarget || now >= nextPlanMs || plannedTargetZ != lz || staleStairExitSlot || leaderJustStopped) {
             nextPlanMs = now + PLAN_INTERVAL_MS;
             planTarget(
                     npc, trail, lx, ly, lz, sameFloor, distToAnchor, myRank,
@@ -548,6 +571,25 @@ public final class EmberFollowController {
                 && updateHoldHysteresis(holding, distToSlot, HOLD_ENTER_DIST, HOLD_EXIT_DIST)
                 && canHoldSlot) {
             logHoldNearStair(npc, myRank, "STOP_HOLD", lx, ly, lz, distToSlot, clearLosToAnchor, now);
+            pendingConfigRealign = false;
+            holding = true;
+            state = FollowState.WAITING;
+            loco.holdFollowIdle(npc, sneakIntent);
+            return;
+        }
+        if (!pendingConfigRealign && !isHoldMode && !outsideVehMode && allowStairAreaHold
+                && !leaderMoving && sameFloor && hasPlannedTarget && plannedTargetZ == nz
+                && canHoldSlot && clearLosToAnchor
+                && distToSlot <= 1.05F
+                && distToAnchor >= 1.05F && distToAnchor <= nominalRadius + 0.85F
+                && EmberTargetProjector.canStandFormationSlot(npc, npc.getX(), npc.getY(), nz)
+                && NpcManager.isClearOfOtherFollowers(
+                        npc, leaderPlayerIndex, npc.getX(), npc.getY(), nz, SquadSlotSolver.MIN_SLOT_SEPARATION)) {
+            logHoldNearStair(npc, myRank, "STOP_SETTLE", lx, ly, lz, distToSlot, clearLosToAnchor, now);
+            congestionSettled = true;
+            settledAnchorX = lx;
+            settledAnchorY = ly;
+            settledAnchorZ = lz;
             holding = true;
             state = FollowState.WAITING;
             loco.holdFollowIdle(npc, sneakIntent);
@@ -556,6 +598,7 @@ public final class EmberFollowController {
         if (allowStairAreaHold && !leaderMoving && sameFloor && hasPlannedTarget && plannedTargetZ == nz
                 && !loco.isMoving() && distToSlot <= EmberParams.ARRIVE_RADIUS) {
             logHoldNearStair(npc, myRank, "ARRIVED_HOLD", lx, ly, lz, distToSlot, clearLosToAnchor, now);
+            pendingConfigRealign = false;
             state = FollowState.WAITING;
             loco.holdFollowIdle(npc, sneakIntent);
             return;
@@ -633,7 +676,8 @@ public final class EmberFollowController {
         int steerZ = hasPlannedTarget ? plannedTargetZ : lz;
         if (!isHoldMode && !outsideVehMode && hasPlannedTarget && sameFloor && leaderMoving && !catchUpDirectLatched
                 && clearLosToAnchor && alongLag < 0.45F) {
-            float desiredLead = Math.max(0.0F, 0.90F - alongLag);
+            float leadScale = Math.max(0.0F, Math.min(1.0F, (gaitControl.getLeaderSpeedEma() - 0.85F) / 1.15F));
+            float desiredLead = Math.max(0.0F, (0.90F - alongLag) * leadScale);
             float leaderProjection = (lx - plannedTargetX) * lastDirX + (ly - plannedTargetY) * lastDirY;
             float maxSafeLead = Math.max(0.0F, leaderProjection - 0.85F);
             float forwardLead = Math.min(desiredLead, maxSafeLead);
@@ -658,6 +702,7 @@ public final class EmberFollowController {
         } else {
             boolean lockOnStairsRetarget = onStairs && loco.isMoving() && lastSentZ == steerZ;
             boolean needsRetarget = !lockOnStairsRetarget && (!loco.isMoving()
+                    || leaderJustStopped
                     || lastSentZ != steerZ
                     || (now - lastRetargetMs >= RETARGET_INTERVAL_MS
                     && Math.hypot(steerX - lastSentX, steerY - lastSentY) > RETARGET_SHIFT_DIST));
@@ -878,30 +923,6 @@ public final class EmberFollowController {
             }
         }
         return false;
-    }
-
-    private void updateLeaderMotion(IsoPlayer leader, float lx, float ly, int lz, long now) {
-        if (lastLeaderZ == Integer.MIN_VALUE || lastLeaderZ != lz) {
-            lastLeaderX = lx;
-            lastLeaderY = ly;
-            lastLeaderZ = lz;
-            leaderMovedAtMs = now;
-            leaderMoving = false;
-            seedDirFromLeader(leader);
-            return;
-        }
-        float dx = lx - lastLeaderX;
-        float dy = ly - lastLeaderY;
-        float movedSq = dx * dx + dy * dy;
-        if (movedSq > 0.0016F) {
-            float len = (float) Math.sqrt(movedSq);
-            lastDirX = dx / len;
-            lastDirY = dy / len;
-            lastLeaderX = lx;
-            lastLeaderY = ly;
-            leaderMovedAtMs = now;
-            leaderMoving = true;
-        }
     }
 
     private void seedDirFromLeader(IsoPlayer leader) {

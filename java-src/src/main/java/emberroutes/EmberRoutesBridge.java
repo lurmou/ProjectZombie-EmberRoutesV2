@@ -12,6 +12,8 @@ import emberroutes.npc.SquadTacticalConfig.OrderMode;
 import emberroutes.npc.SquadTacticalConfig.VehicleCommandMode;
 import emberroutes.npc.brain.DeliveryOrderManager;
 import emberroutes.npc.brain.LogisticsWorkDutyProvider;
+import emberroutes.npc.combat.CombatDiagLog;
+import emberroutes.npc.combat.EmberSquadDirector;
 import emberroutes.warehouse.ContainerDirtyQueue;
 import emberroutes.warehouse.ContainerRole;
 import emberroutes.warehouse.SmartObjectRegistry;
@@ -451,6 +453,14 @@ public final class EmberRoutesBridge {
         return NpcManager.toggleNpcAnimRecorder(npcId);
     }
 
+    public static boolean isAllNpcAnimRecorderEnabled() {
+        return NpcManager.isAllNpcAnimRecorderEnabled();
+    }
+
+    public static String setAllNpcAnimRecorderEnabled(boolean enabled) {
+        return NpcManager.setAllNpcAnimRecorderEnabled(enabled);
+    }
+
     public static boolean isSittableFurniture(IsoObject obj) {
         return NpcPostureController.isSittableFurniture(obj);
     }
@@ -491,6 +501,14 @@ public final class EmberRoutesBridge {
 
     public static String getNpcAssignedSettlement(String npcId) {
         return NpcManager.getAssignedSettlementId(npcId);
+    }
+
+    public static boolean setNpcGuardDuty(String npcId, boolean guard) {
+        return NpcManager.setGuardDuty(npcId, guard);
+    }
+
+    public static boolean isNpcGuardDuty(String npcId) {
+        return NpcManager.isGuardDuty(npcId);
     }
 
     public static double clearSettlementNpcAssignments(String settlementId) {
@@ -843,5 +861,83 @@ public final class EmberRoutesBridge {
 
     public static Texture getNpcPortraitTexture(String npcId) {
         return NpcPortraitBakery.getPortraitTexture(npcId);
+    }
+
+    // ==================== 10. 战斗只读遥测与诊断端口 ====================
+
+    public static boolean isCombatDiagEnabled() {
+        return CombatDiagLog.isEnabled();
+    }
+
+    public static boolean setCombatDiagEnabled(boolean enabled) {
+        return CombatDiagLog.setEnabled(enabled);
+    }
+
+    public static KahluaTable getCombatDebugSnapshot() {
+        J2SEPlatform platform = J2SEPlatform.getInstance();
+        KahluaTable out = platform.newTable();
+        EmberSquadDirector dir = EmberSquadDirector.getInstance();
+        out.rawset("combatDiagEnabled", Boolean.valueOf(CombatDiagLog.isEnabled()));
+        out.rawset("allAnimRecEnabled", Boolean.valueOf(NpcManager.isAllNpcAnimRecorderEnabled()));
+        out.rawset("threatCount", Double.valueOf(dir.getActiveThreatCount()));
+        out.rawset("clusterCount", Double.valueOf(dir.getActiveClusterCount()));
+        out.rawset("corridorCount", Double.valueOf(dir.getActiveCorridorCount()));
+
+        List<CombatDiagLog.NpcCombatDiagStatus> rows = CombatDiagLog.snapshotNpcStatuses();
+        KahluaTable npcs = platform.newTable();
+        for (int i = 0; i < rows.size(); i++) {
+            CombatDiagLog.NpcCombatDiagStatus s = rows.get(i);
+            KahluaTable row = platform.newTable();
+            row.rawset("npcId", s.npcId);
+            row.rawset("state", s.state);
+            row.rawset("activity", s.activity);
+            row.rawset("targetId", Double.valueOf(s.targetId));
+            row.rawset("targetPosture", s.targetPosture);
+            row.rawset("dist", Double.valueOf(s.dist));
+            row.rawset("minRange", Double.valueOf(s.minRange));
+            row.rawset("maxRange", Double.valueOf(s.maxRange));
+            row.rawset("aimFloor", Boolean.valueOf(s.aimFloor));
+            row.rawset("stomp", Boolean.valueOf(s.stomp));
+            row.rawset("radialMode", s.radialMode);
+            npcs.rawset(Double.valueOf(i + 1), row);
+        }
+        out.rawset("npcs", npcs);
+        return out;
+    }
+
+    public static String dumpCombatDebugSnapshot() {
+        EmberSquadDirector dir = EmberSquadDirector.getInstance();
+        int threats = dir.getActiveThreatCount();
+        int clusters = dir.getActiveClusterCount();
+        int corridors = dir.getActiveCorridorCount();
+        List<CombatDiagLog.NpcCombatDiagStatus> rows = CombatDiagLog.snapshotNpcStatuses();
+        String summary = String.format(
+                java.util.Locale.ROOT,
+                "diag=%s rec=%s threats=%d clusters=%d corridors=%d npcs=%d",
+                CombatDiagLog.isEnabled(),
+                NpcManager.isAllNpcAnimRecorderEnabled(),
+                threats,
+                clusters,
+                corridors,
+                rows.size());
+        System.out.println("[EmberRoutes][COMBAT_SNAPSHOT] " + summary);
+        for (int i = 0; i < rows.size(); i++) {
+            CombatDiagLog.NpcCombatDiagStatus s = rows.get(i);
+            System.out.println(String.format(
+                    java.util.Locale.ROOT,
+                    "[EmberRoutes][COMBAT_SNAPSHOT]   %s state=%s act=%s tgt=%d(%s) dist=%.2f [%.2f..%.2f] rad=%s flr=%s stp=%s",
+                    s.npcId,
+                    s.state,
+                    s.activity,
+                    s.targetId,
+                    s.targetPosture,
+                    s.dist,
+                    s.minRange,
+                    s.maxRange,
+                    s.radialMode,
+                    s.aimFloor,
+                    s.stomp));
+        }
+        return summary;
     }
 }

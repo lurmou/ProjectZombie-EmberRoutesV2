@@ -8,11 +8,13 @@ require "EmberRoutes/Npc/NpcRuntime"
 require "EmberRoutes/Squad/SquadKeys"
 require "EmberRoutes/Squad/SquadService"
 require "EmberRoutes/Compat/HaloTextGuard"
+require "EmberRoutes/Compat/NpcRackGuard"
 require "EmberRoutes/UI/NpcMedicalPanel"
 require "EmberRoutes/UI/NpcInventoryPanel"
 require "EmberRoutes/UI/SquadHUD"
 require "EmberRoutes/UI/SquadWheel"
 require "EmberRoutes/UI/NpcContextMenu"
+require "EmberRoutes/UI/DebugPanel"
 require "EmberRoutes/UI/DebugContextMenu"
 
 -- 唯一权威核心模块启动顺序表（零魔法数字，肉眼即见确定性顺序；
@@ -28,6 +30,7 @@ Kernel.setBootOrder({
     "squad-hud",
     "squad-wheel",
     "npc-context-menu",
+    "debug-panel",
     "debug-context-menu",
 })
 

@@ -2,22 +2,21 @@ package emberroutes.npc.brain;
 
 import emberroutes.npc.IsoNPC;
 import java.util.List;
-import java.util.Stack;
 import java.util.function.Predicate;
+import zombie.GameTime;
 import zombie.characters.CharacterStat;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
 import zombie.inventory.types.InventoryContainer;
 
 /**
- * M3 纯 Java 确定性动作器基类（直接挂载原版 {@link zombie.characters.CharacterTimedActions.BaseAction} 驱动手模与动画 + 严格倍速对齐计时结算）：
- * <ul>
- *   <li>通过向 {@code npc.getCharacterActions()} 挂载无进度条（{@code useProgressBar = false}）的原版 {@code CharacterTimedActions.BaseAction}，
- *       100% 复用原版 {@code ModelManager#ResetCharacterEquippedHands} 渲染管线（自动隐藏原武器、按 {@code FluidContainer > 0.5F} 选 {@code _Fluid} 水位模型、初始化 {@code SmartTexture} 贴图并挂载至 {@code Bip01_Prop1 / Bip01_Prop2}）；</li>
- *   <li>由本类根据 {@code dtSim} 推进进度并在完成/打断时直接调用原版 {@code stopTimedActionAnim()} + 从 {@code characterActions} 移除，绝不触发原版 {@code UIManager.getProgressBar} 污染真玩家 HUD。</li>
- * </ul>
+ * M3 原版直继 TimedAction 基类：直接继承 {@link zombie.characters.CharacterTimedActions.BaseAction}
+ * 并经 {@code npc.StartAction(this)} 交由引擎统一推进、清理手模与响应 {@code stopOnWalk / stopOnRun / stopOnAim}。
+ *
+ * <p>进度条写保护由 {@code BaseActionStopProgressGuard / BaseActionPerformProgressGuard}
+ * 在原版方法外围统一拦截，此处不再自建平行哑壳动作或双套推进时钟。</p>
  */
-public abstract class BaseAction {
+public abstract class BaseAction extends zombie.characters.CharacterTimedActions.BaseAction {
     public enum ActionStatus {
         IDLE,
         RUNNING,
@@ -28,34 +27,52 @@ public abstract class BaseAction {
 
     public record ItemLocation(ItemContainer container, InventoryItem item) {}
 
-    private double durationSimSec;
+    protected final IsoNPC npc;
+    private BrainContext ctx;
     private String performingActionAnim;
     private String extraVarKey;
     private String extraVarValue;
     private String reportEventName;
-    private InventoryItem overridePrimaryItem;
-    private InventoryItem overrideSecondaryItem;
-    private boolean handModelsConfigured;
-    private zombie.characters.CharacterTimedActions.BaseAction nativeAction;
-    private long soundHandle = -1L;
     private boolean loopSoundImmediateStop;
-
+    private boolean failedOnStart;
+    private boolean terminated;
+    private String interruptReason = "INTERRUPTED";
     private ActionStatus status = ActionStatus.IDLE;
-    private double elapsedSimSec;
 
-    protected BaseAction(double durationSimSec, String performingActionAnim) {
-        this(durationSimSec, performingActionAnim, null, null);
+    protected BaseAction(IsoNPC npc, double durationSimSec, String performingActionAnim) {
+        this(npc, durationSimSec, performingActionAnim, null, null);
     }
 
     protected BaseAction(
+            IsoNPC npc,
             double durationSimSec,
             String performingActionAnim,
             String extraVarKey,
             String extraVarValue) {
-        this.durationSimSec = Math.max(0.05, durationSimSec);
+        super(npc);
+        this.npc = npc;
         this.performingActionAnim = performingActionAnim;
         this.extraVarKey = extraVarKey;
         this.extraVarValue = extraVarValue;
+        this.useProgressBar = false;
+        this.forceProgressBar = false;
+        this.stopOnWalk = false;
+        this.stopOnRun = true;
+        this.stopOnAim = false;
+        setDurationSimSec(durationSimSec);
+    }
+
+    private static double ticksPerSimSec() {
+        try {
+            if (GameTime.getInstance() != null) {
+                float ticks = GameTime.getInstance().getMultiplierFromTimeDelta(1.0F);
+                if (Float.isFinite(ticks) && ticks > 1.0F) {
+                    return ticks;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return 48.0;
     }
 
     public final ActionStatus getStatus() {
@@ -63,19 +80,25 @@ public abstract class BaseAction {
     }
 
     public final boolean isRunning() {
-        return status == ActionStatus.RUNNING;
+        return status == ActionStatus.RUNNING && !terminated;
     }
 
     public final double getElapsedSimSec() {
-        return elapsedSimSec;
+        return Math.max(0.0, Math.max(0.0F, this.currentTime) / ticksPerSimSec());
     }
 
     public final double getDurationSimSec() {
-        return durationSimSec;
+        return Math.max(0.05, Math.max(1, this.maxTime) / ticksPerSimSec());
     }
 
     protected final void setDurationSimSec(double durationSimSec) {
-        this.durationSimSec = Math.max(0.05, durationSimSec);
+        double clamped = Math.max(0.05, durationSimSec);
+        this.maxTime = Math.max(1, (int) Math.round(clamped * ticksPerSimSec()));
+    }
+
+    /** 启用原版事件驱动模式（{@code maxTime = -1}），交由 {@code OnAnimEvent} 或看门狗调用 {@code forceComplete()} 收口。 */
+    protected final void enableEventDrivenMode() {
+        this.maxTime = -1;
     }
 
     protected final void setPerformingActionAnim(String performingActionAnim) {
@@ -83,128 +106,230 @@ public abstract class BaseAction {
     }
 
     public final float getProgress01() {
-        return (float) Math.min(1.0, Math.max(0.0, elapsedSimSec / durationSimSec));
+        if (this.maxTime > 0) {
+            return Math.max(0.0F, Math.min(1.0F, Math.max(0.0F, this.currentTime) / (float) this.maxTime));
+        }
+        return Math.max(0.0F, Math.min(1.0F, this.delta));
     }
 
     protected final void setExtraAnimVar(String key, String value) {
         this.extraVarKey = key;
         this.extraVarValue = value;
+        if (this.started && key != null && !key.isEmpty() && value != null) {
+            setAnimVariable(key, value);
+        }
     }
 
     protected final void setReportEventName(String eventName) {
         this.reportEventName = eventName;
     }
 
-    /** 配置动作期间左右手临时显示的真实物品原件（对应原版 {@code setOverrideHandModels(primaryHand, secondaryHand)}）。 */
-    protected final void configureHandModels(InventoryItem primaryHand, InventoryItem secondaryHand) {
-        this.overridePrimaryItem = primaryHand;
-        this.overrideSecondaryItem = secondaryHand;
-        this.handModelsConfigured = true;
+    protected final void failOnStart() {
+        this.failedOnStart = true;
+        forceStop();
     }
 
-    protected final void playActionSound(IsoNPC npc, String soundName) {
-        if (npc == null || soundName == null || soundName.isEmpty() || npc.getEmitter() == null) {
+    /** 配置动作期间左右手临时显示的真实物品原件（直调原版 {@code setOverrideHandModels}）。 */
+    protected final void configureHandModels(InventoryItem primaryHand, InventoryItem secondaryHand) {
+        setOverrideHandModels(primaryHand, secondaryHand);
+    }
+
+    protected final void playActionSound(IsoNPC targetNpc, String soundName) {
+        if (targetNpc == null || soundName == null || soundName.isEmpty() || targetNpc.getEmitter() == null) {
             return;
         }
         try {
             this.loopSoundImmediateStop = false;
-            this.soundHandle = npc.getEmitter().playSound(soundName);
+            this.soundEffect = targetNpc.getEmitter().playSound(soundName);
         } catch (Throwable ignored) {
         }
     }
 
     /** 播放需要 {@code emitter.stopSound()} 硬停的循环动作音效（对齐 {@code ISInventoryTransferAction} 的 {@code RummageInInventory}）。 */
-    protected final void playLoopingActionSound(IsoNPC npc, String soundName) {
-        if (npc == null || soundName == null || soundName.isEmpty() || npc.getEmitter() == null) {
+    protected final void playLoopingActionSound(IsoNPC targetNpc, String soundName) {
+        if (targetNpc == null || soundName == null || soundName.isEmpty() || targetNpc.getEmitter() == null) {
             return;
         }
         try {
             this.loopSoundImmediateStop = true;
-            this.soundHandle = npc.getEmitter().playSound(soundName);
+            this.soundEffect = targetNpc.getEmitter().playSound(soundName);
         } catch (Throwable ignored) {
         }
     }
 
     /** 播放单次容器拿取/放入音效，不覆盖主动作循环音句柄。 */
-    protected final void playOneShotSound(IsoNPC npc, String soundName) {
-        if (npc == null || soundName == null || soundName.isEmpty() || npc.getEmitter() == null) {
+    protected final void playOneShotSound(IsoNPC targetNpc, String soundName) {
+        if (targetNpc == null || soundName == null || soundName.isEmpty() || targetNpc.getEmitter() == null) {
             return;
         }
         try {
-            if (!npc.getEmitter().isPlaying(soundName)) {
-                npc.getEmitter().playSound(soundName);
+            if (!targetNpc.getEmitter().isPlaying(soundName)) {
+                targetNpc.getEmitter().playSound(soundName);
             }
         } catch (Throwable ignored) {
         }
     }
 
-    protected final void ensureActionSoundPlaying(IsoNPC npc, String soundName) {
-        if (npc == null || soundName == null || soundName.isEmpty() || npc.getEmitter() == null) {
+    protected final void ensureActionSoundPlaying(IsoNPC targetNpc, String soundName) {
+        if (targetNpc == null || soundName == null || soundName.isEmpty() || targetNpc.getEmitter() == null) {
             return;
         }
         try {
-            if (this.soundHandle != -1L && !npc.getEmitter().isPlaying(this.soundHandle)) {
-                this.soundHandle = npc.getEmitter().playSound(soundName);
+            if (this.soundEffect != -1L && !targetNpc.getEmitter().isPlaying(this.soundEffect)) {
+                this.soundEffect = targetNpc.getEmitter().playSound(soundName);
             }
         } catch (Throwable ignored) {
         }
     }
 
-    public final void start(BrainContext ctx) {
-        this.elapsedSimSec = 0.0;
-        this.status = ActionStatus.RUNNING;
-        this.handModelsConfigured = false;
-        this.overridePrimaryItem = null;
-        this.overrideSecondaryItem = null;
-        this.soundHandle = -1L;
+    private void stopActionSound() {
+        long handle = this.soundEffect;
+        this.soundEffect = -1L;
+        if (handle > -1L && npc != null && npc.getEmitter() != null) {
+            try {
+                if (this.loopSoundImmediateStop) {
+                    npc.getEmitter().stopSound(handle);
+                } else if (npc.getEmitter().isPlaying(handle)) {
+                    npc.stopOrTriggerSound(handle);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
         this.loopSoundImmediateStop = false;
-        if (ctx != null) {
-            ctx.activeAction = this;
+    }
+
+    /** 由状态树节点发起：挂载至原版 {@code npc.StartAction(this)}，后续推进由 {@code IsoGameCharacter.updateInternal()} 自动执行。 */
+    public final void start(BrainContext context) {
+        this.ctx = context;
+        this.terminated = false;
+        this.failedOnStart = false;
+        this.interruptReason = "INTERRUPTED";
+        this.loopSoundImmediateStop = false;
+        this.soundEffect = -1L;
+        this.status = ActionStatus.RUNNING;
+        if (context != null) {
+            context.activeAction = this;
+        }
+        if (npc == null || npc.isDead()) {
+            this.failedOnStart = true;
+            stop();
+            return;
+        }
+        npc.StartAction(this);
+    }
+
+    public final void interrupt(BrainContext context, String reason) {
+        if (terminated || (status != ActionStatus.RUNNING && status != ActionStatus.IDLE)) {
+            return;
+        }
+        if (this.ctx == null) {
+            this.ctx = context;
+        }
+        this.interruptReason = (reason != null && !reason.isEmpty()) ? reason : "INTERRUPTED";
+        forceStop();
+        if (npc != null && !npc.getCharacterActions().isEmpty() && npc.getCharacterActions().get(0) == this) {
+            npc.StopAllActionQueue();
+        }
+        if (!terminated) {
+            if (this.started) {
+                stop();
+            } else {
+                interruptWaitToStart();
+            }
+        }
+    }
+
+    @Override
+    public boolean valid() {
+        return !terminated && !failedOnStart && npc != null && !npc.isDead();
+    }
+
+    @Override
+    public final void start() {
+        super.start();
+        if (extraVarKey != null && !extraVarKey.isEmpty() && extraVarValue != null) {
+            setAnimVariable(extraVarKey, extraVarValue);
         }
         onStart(ctx);
-        if (ctx != null && status == ActionStatus.RUNNING) {
-            applyAnimVarsAndNativeAction(ctx.npc);
+        if (failedOnStart || forceStop) {
+            forceStop();
+            return;
+        }
+        if (forceComplete) {
+            return;
+        }
+        if (performingActionAnim != null && !performingActionAnim.isEmpty()) {
+            setActionAnim(performingActionAnim);
+        }
+        if (reportEventName != null && !reportEventName.isEmpty() && npc != null) {
+            npc.reportEvent(reportEventName);
         }
     }
 
-    public final void tick(BrainContext ctx, double dtSim) {
-        if (status != ActionStatus.RUNNING) {
+    @Override
+    public final void update() {
+        super.update();
+        if (terminated || forceStop || forceComplete) {
             return;
         }
-        this.elapsedSimSec += Math.max(0.0, dtSim);
+        double dtSim = (GameTime.getInstance() != null)
+                ? Math.max(0.0, GameTime.getInstance().getTimeDelta())
+                : (1.0 / 60.0);
         onTick(ctx, dtSim);
-        if (status == ActionStatus.RUNNING && this.elapsedSimSec >= this.durationSimSec) {
-            boolean ok = false;
-            try {
-                ok = onComplete(ctx);
-            } finally {
-                if (ctx != null) {
-                    clearAnimVarsAndNativeAction(ctx.npc);
-                    refreshContextStats(ctx);
-                    if (ctx.activeAction == this) {
-                        ctx.activeAction = null;
-                    }
-                }
-            }
+    }
+
+    @Override
+    public final void perform() {
+        if (terminated) {
+            return;
+        }
+        terminated = true;
+        stopActionSound();
+        boolean ok = false;
+        try {
+            ok = onComplete(ctx);
+        } finally {
             this.status = ok ? ActionStatus.COMPLETED : ActionStatus.FAILED;
+            refreshContextStats(ctx);
+            if (ctx != null && ctx.activeAction == this) {
+                ctx.activeAction = null;
+            }
+            super.perform();
         }
     }
 
-    public final void interrupt(BrainContext ctx, String reason) {
-        if (status != ActionStatus.RUNNING && status != ActionStatus.IDLE) {
+    @Override
+    public final void stop() {
+        if (terminated) {
             return;
         }
+        terminated = true;
         try {
-            onInterrupt(ctx, reason);
-        } finally {
-            if (ctx != null) {
-                clearAnimVarsAndNativeAction(ctx.npc);
-                refreshContextStats(ctx);
-                if (ctx.activeAction == this) {
-                    ctx.activeAction = null;
-                }
+            if (!failedOnStart) {
+                onInterrupt(ctx, interruptReason);
             }
-            this.status = ActionStatus.INTERRUPTED;
+        } finally {
+            stopActionSound();
+            this.status = failedOnStart ? ActionStatus.FAILED : ActionStatus.INTERRUPTED;
+            refreshContextStats(ctx);
+            if (ctx != null && ctx.activeAction == this) {
+                ctx.activeAction = null;
+            }
+            super.stop();
+        }
+    }
+
+    @Override
+    public final void interruptWaitToStart() {
+        if (terminated) {
+            return;
+        }
+        terminated = true;
+        stopActionSound();
+        this.status = failedOnStart ? ActionStatus.FAILED : ActionStatus.INTERRUPTED;
+        refreshContextStats(ctx);
+        if (ctx != null && ctx.activeAction == this) {
+            ctx.activeAction = null;
         }
     }
 
@@ -223,94 +348,6 @@ public abstract class BaseAction {
             ctx.fatigue = ctx.npc.getStats().get(CharacterStat.FATIGUE);
             ctx.endurance = ctx.npc.getStats().get(CharacterStat.ENDURANCE);
         }
-    }
-
-    private void applyAnimVarsAndNativeAction(IsoNPC npc) {
-        if (npc == null) {
-            return;
-        }
-        try {
-            zombie.characters.CharacterTimedActions.BaseAction act =
-                    new zombie.characters.CharacterTimedActions.BaseAction(npc);
-            act.useProgressBar = false;
-            act.forceProgressBar = false;
-            // maxTime = -1 使 IsoGameCharacter.updateInternal 中 act.finished() 恒为 false，完全由本类 dtSim 驱动生命周期
-            act.maxTime = -1;
-            act.started = true;
-            act.stopOnWalk = false;
-            act.stopOnRun = false;
-            act.stopOnAim = false;
-
-            Stack<zombie.characters.CharacterTimedActions.BaseAction> stack = npc.getCharacterActions();
-            if (stack != null) {
-                stack.clear();
-                stack.push(act);
-            }
-            this.nativeAction = act;
-
-            if (extraVarKey != null && !extraVarKey.isEmpty() && extraVarValue != null) {
-                act.setAnimVariable(extraVarKey, extraVarValue);
-            }
-            if (performingActionAnim != null && !performingActionAnim.isEmpty()) {
-                act.setActionAnim(performingActionAnim);
-            }
-            if (handModelsConfigured) {
-                act.setOverrideHandModels(overridePrimaryItem, overrideSecondaryItem);
-            }
-
-            if (reportEventName != null && !reportEventName.isEmpty()) {
-                npc.reportEvent(reportEventName);
-            }
-        } catch (Throwable ignored) {
-            // 脱机单测环境（无完整引擎实例）退化为直接写变量
-            if (performingActionAnim != null && !performingActionAnim.isEmpty()) {
-                npc.setVariable("PerformingAction", performingActionAnim);
-            }
-            if (extraVarKey != null && !extraVarKey.isEmpty() && extraVarValue != null) {
-                npc.setVariable(extraVarKey, extraVarValue);
-            }
-            npc.setVariable("IsPerformingAnAction", true);
-        }
-    }
-
-    private void clearAnimVarsAndNativeAction(IsoNPC npc) {
-        if (npc == null) {
-            return;
-        }
-        if (this.soundHandle != -1L && npc.getEmitter() != null) {
-            try {
-                if (this.loopSoundImmediateStop) {
-                    npc.getEmitter().stopSound(this.soundHandle);
-                } else if (npc.getEmitter().isPlaying(this.soundHandle)) {
-                    npc.stopOrTriggerSound(this.soundHandle);
-                }
-            } catch (Throwable ignored) {
-            }
-            this.soundHandle = -1L;
-        }
-        this.loopSoundImmediateStop = false;
-        zombie.characters.CharacterTimedActions.BaseAction act = this.nativeAction;
-        this.nativeAction = null;
-        if (act != null) {
-            try {
-                act.stopTimedActionAnim();
-            } catch (Throwable ignored) {
-            }
-            try {
-                Stack<zombie.characters.CharacterTimedActions.BaseAction> stack = npc.getCharacterActions();
-                if (stack != null) {
-                    stack.removeElement(act);
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-        if (performingActionAnim != null && !performingActionAnim.isEmpty()) {
-            npc.clearVariable("PerformingAction");
-        }
-        if (extraVarKey != null && !extraVarKey.isEmpty()) {
-            npc.clearVariable(extraVarKey);
-        }
-        npc.setVariable("IsPerformingAnAction", false);
     }
 
     /** 递归扫描 NPC 主背包与嵌套随身容器，零重复查找首个满足条件的真物品原件及所属容器。 */

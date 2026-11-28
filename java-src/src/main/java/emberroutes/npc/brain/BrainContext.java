@@ -43,6 +43,13 @@ public class BrainContext {
     public boolean pendingDismissAfterExit;
     public boolean manualExitVehicleRequested;
 
+    // 战斗与守卫黑板（M4-②）
+    public boolean guardDuty;
+    public String combatActivityState = "";
+    public float guardAnchorX;
+    public float guardAnchorY;
+    public int guardAnchorZ;
+
     public BrainContext(String npcId) {
         this.npcId = npcId;
     }

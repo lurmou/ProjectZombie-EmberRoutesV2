@@ -54,22 +54,27 @@ public final class BatchContainerTransferAction extends BaseAction {
     private IsoObject facingTarget;
 
     public BatchContainerTransferAction(
+            IsoNPC npc,
             TransferMode mode,
             String worldContainerId,
             int targetPlayerIndex,
             List<InventoryItem> items,
             double durationSimSec) {
-        this(mode, worldContainerId, targetPlayerIndex, items, null, durationSimSec);
+        this(npc, mode, worldContainerId, targetPlayerIndex, items, null, durationSimSec);
     }
 
     public BatchContainerTransferAction(
+            IsoNPC npc,
             TransferMode mode,
             String worldContainerId,
             int targetPlayerIndex,
             List<InventoryItem> items,
             Map<InventoryItem, ItemContainer> loadTargetsByItem,
             double durationSimSec) {
-        super(durationSimSec, "Loot");
+        super(npc, durationSimSec, "Loot");
+        this.stopOnWalk = true;
+        this.stopOnRun = true;
+        this.stopOnAim = false;
         this.mode = mode;
         this.worldContainerId = worldContainerId;
         this.targetPlayerIndex = targetPlayerIndex;
@@ -102,10 +107,11 @@ public final class BatchContainerTransferAction extends BaseAction {
         itemElapsedSimSec = 0.0;
         facingTarget = null;
 
-        IsoNPC npc = ctx != null ? ctx.npc : null;
-        if (npc == null || npc.isDead()) {
+        IsoNPC targetNpc = this.npc != null ? this.npc : (ctx != null ? ctx.npc : null);
+        if (targetNpc == null || targetNpc.isDead()) {
+            abortRemainingAsLeftover();
             itemDurations = new double[0];
-            setDurationSimSec(0.05);
+            failOnStart();
             return;
         }
 
@@ -115,15 +121,15 @@ public final class BatchContainerTransferAction extends BaseAction {
             if (targetPlayer == null
                     || targetPlayer.isDead()
                     || targetPlayer.getInventory() == null
-                    || !canReachPlayer(npc, targetPlayer)) {
+                    || !canReachPlayer(targetNpc, targetPlayer)) {
                 abortRemainingAsLeftover();
                 itemDurations = new double[0];
-                setDurationSimSec(0.05);
+                failOnStart();
                 return;
             }
             worldCont = targetPlayer.getInventory();
             facingTarget = targetPlayer;
-            npc.faceThisObject(targetPlayer);
+            targetNpc.faceThisObject(targetPlayer);
             setPerformingActionAnim("TransferItemOnSelf");
             setReportEventName(null);
         } else {
@@ -132,13 +138,13 @@ public final class BatchContainerTransferAction extends BaseAction {
                 containerMissing = true;
                 abortRemainingAsLeftover();
                 itemDurations = new double[0];
-                setDurationSimSec(0.05);
+                failOnStart();
                 return;
             }
-            if (!canReachContainer(npc, ref.square())) {
+            if (!canReachContainer(targetNpc, ref.square())) {
                 abortRemainingAsLeftover();
                 itemDurations = new double[0];
-                setDurationSimSec(0.05);
+                failOnStart();
                 return;
             }
             worldCont = ref.container();
@@ -163,7 +169,7 @@ public final class BatchContainerTransferAction extends BaseAction {
                 setExtraAnimVar("LootPosition", lootPos);
             }
             if (facingTarget != null) {
-                npc.faceThisObject(facingTarget);
+                targetNpc.faceThisObject(facingTarget);
             }
             setPerformingActionAnim("Loot");
             setReportEventName("EventLootItem");
@@ -174,25 +180,25 @@ public final class BatchContainerTransferAction extends BaseAction {
         if (mode == TransferMode.LOAD_FROM_CONTAINER && worldCont != null) {
             String takeSound = worldCont.getTakeSound();
             if (takeSound != null && !takeSound.isEmpty()) {
-                playOneShotSound(npc, takeSound);
+                playOneShotSound(targetNpc, takeSound);
             }
         } else if (!plannedItems.isEmpty()) {
-            ItemContainer srcBag = resolveNpcOwnedContainer(npc, plannedItems.get(0));
+            ItemContainer srcBag = resolveNpcOwnedContainer(targetNpc, plannedItems.get(0));
             String takeSound = srcBag != null ? srcBag.getTakeSound() : null;
             if (takeSound != null && !takeSound.isEmpty()) {
-                playOneShotSound(npc, takeSound);
+                playOneShotSound(targetNpc, takeSound);
             }
         }
-        playLoopingActionSound(npc, "RummageInInventory");
+        playLoopingActionSound(targetNpc, "RummageInInventory");
 
         int n = plannedItems.size();
         this.itemDurations = new double[n];
         if (n == 0) {
-            setDurationSimSec(0.05);
+            forceComplete();
             return;
         }
-        boolean dextrous = npc.hasTrait(CharacterTrait.DEXTROUS);
-        boolean clumsy = npc.hasTrait(CharacterTrait.ALL_THUMBS) || npc.isWearingAwkwardGloves();
+        boolean dextrous = targetNpc.hasTrait(CharacterTrait.DEXTROUS);
+        boolean clumsy = targetNpc.hasTrait(CharacterTrait.ALL_THUMBS) || targetNpc.isWearingAwkwardGloves();
         boolean toFloor = mode == TransferMode.UNLOAD_TO_CONTAINER
                 && worldCont != null
                 && "floor".equalsIgnoreCase(worldCont.getType());
@@ -203,7 +209,7 @@ public final class BatchContainerTransferAction extends BaseAction {
             double w = item != null ? item.getActualWeight() : 0.1;
             boolean fromMainInv = item != null
                     && mode != TransferMode.LOAD_FROM_CONTAINER
-                    && resolveNpcOwnedContainer(npc, item) == npc.getInventory();
+                    && resolveNpcOwnedContainer(targetNpc, item) == targetNpc.getInventory();
             double sec = VanillaActionTiming.computeInventoryTransferSeconds(
                     w, false, 1.0, dextrous, clumsy, toFloor, fromMainInv);
             this.itemDurations[i] = sec;
@@ -214,15 +220,15 @@ public final class BatchContainerTransferAction extends BaseAction {
 
     @Override
     protected void onTick(BrainContext ctx, double dtSim) {
-        IsoNPC npc = ctx != null ? ctx.npc : null;
-        if (npc == null || npc.isDead()) {
+        IsoNPC targetNpc = this.npc != null ? this.npc : (ctx != null ? ctx.npc : null);
+        if (targetNpc == null || targetNpc.isDead()) {
             abortRemainingAsLeftover();
-            setDurationSimSec(getElapsedSimSec());
+            forceStop();
             return;
         }
-        npc.setMetabolicTarget(Metabolics.LightWork);
-        if (facingTarget != null && !npc.isSittingOnFurniture()) {
-            npc.faceThisObject(facingTarget);
+        targetNpc.setMetabolicTarget(Metabolics.LightWork);
+        if (facingTarget != null && !targetNpc.isSittingOnFurniture()) {
+            targetNpc.faceThisObject(facingTarget);
         }
         if (itemDurations == null || currentIdx >= plannedItems.size()) {
             return;
@@ -230,9 +236,9 @@ public final class BatchContainerTransferAction extends BaseAction {
         this.itemElapsedSimSec += Math.max(0.0, dtSim);
         while (currentIdx < plannedItems.size() && this.itemElapsedSimSec >= itemDurations[currentIdx]) {
             this.itemElapsedSimSec -= itemDurations[currentIdx];
-            if (!processCurrentItem(npc)) {
+            if (!processCurrentItem(targetNpc)) {
                 abortRemainingAsLeftover();
-                setDurationSimSec(getElapsedSimSec());
+                forceComplete();
                 return;
             }
         }
